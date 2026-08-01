@@ -123,8 +123,9 @@ Tailwind: styling is the shared constellation token layer (see **Design system**
 |---|---|
 | `npm --prefix client run dev` | Vite dev server |
 | `npm --prefix client run typecheck` | `tsc --noEmit` under `strict` |
-| `npm --prefix client run build` | `tsc --noEmit` → `vite build` → the egress lint. A type error fails the build |
+| `npm --prefix client run build` | `tsc --noEmit` → the adherence lint → `vite build` → the egress lint. A type error fails the build |
 | `npm --prefix client run test` | vitest |
+| `npm --prefix client run lint:adherence` | the design-system adherence lint, over the source tree |
 | `npm --prefix client run assert-no-external-hosts` | the egress lint, against an existing `client/dist` |
 
 Fonts are **bundled**, not fetched: the `@fontsource/*` packages emit the woff2 files into the
@@ -240,12 +241,100 @@ rule that matches nothing fails the build rather than rotting silently.
 
 ## Design system
 
-Aperture uses the shared constellation design system: token-based CSS custom properties, a
-deep-space violet palette, glow as the elevation system, and the node-dot iconography
-language. **There is no Tailwind and no parallel palette.** An adherence lint fails the build
-on inline styles, hardcoded colour literals, and stray style blocks. The token layer, the
-primitives, and that lint (`lint:adherence`) arrive with the design-system import; the
-scaffold ships only a colour-free base layer so the two cannot collide.
+Aperture uses the shared constellation design system — the same token-based CSS custom
+properties as the fleet's other web surfaces, so Aperture looks like part of the same product
+rather than a cousin of it. **There is no Tailwind and no parallel palette.**
+
+The rules, in the order they bite:
+
+1. **Colour, type, spacing, radius, elevation and motion come from tokens.**
+   `client/src/styles/constellation.css` is the token layer and **the only file in the client
+   where a colour literal or a font stack may appear.** Everything else says `var(--…)`.
+2. **Compose the primitives, not class strings.** `client/src/components/primitives/` wraps
+   `.card`, `.btn-*`, `.badge-*`, `.table`, `.input` and the tracked label as typed React
+   components. Their props omit `style` and `dangerouslySetInnerHTML` entirely, so an inline
+   style is a **type error** before it is a lint error.
+3. **Colour is semantic, never decorative.** Blue is inbound/source, green is
+   outbound/endpoint/free, amber is cloud/gated/cost, rose is alert/hot, violet is the core.
+   Badge and status variants are therefore named `success` / `warning` / `error` / `info` /
+   `accent` — never `green` / `amber` / `rose` / `blue`. If you want a colour because it looks
+   nice, that is the signal to stop.
+4. **Glow is the elevation system.** A drop shadow says "floating above a page"; a glow says
+   "lit from within". Glow is an interaction signal — hover, focus, active, primary — never
+   ambient decoration.
+5. **Pill radius belongs to badges and status pills.** Cards and panels use `--radius-lg`.
+6. **Inter for UI, JetBrains Mono for code, telemetry, and tracked uppercase labels.** Both are
+   bundled; neither is ever fetched.
+
+### Light and dark
+
+Dark is the base. Light comes from `prefers-color-scheme`, and an explicit `data-theme`
+attribute on the root element overrides the media query **in both directions** — an explicit
+dark choice wins on a light-preferring OS and vice versa. `client/src/theme.ts` owns that
+attribute and writes it before the first render, so no content paints under the wrong theme;
+the residual gap before the entry module executes is documented in that file rather than
+glossed over. Choosing "system" removes the attribute rather than freezing today's answer, so
+a later OS change still reaches the user.
+
+`prefers-reduced-motion` and `forced-colors` behaviour are declared in the token layer.
+`forced-color-adjust: none` — the one property that can defeat a user's own palette — is
+rejected outright by the lint, in every file including the token layer.
+
+### The adherence lint
+
+`client/scripts/adherence-lint.mjs` runs on every build, over the **source** tree, and fails on:
+
+- a `style` attribute in TSX (`style={{…}}` and `style="…"` alike) or in HTML/SVG;
+- a `<style>` element — as JSX, as markup, or via `createElement('style')`;
+- a hex, `rgb()`, `hsl()`, `hwb()`, `lab()`, `oklch()` or `color()` literal — and, in CSS and
+  markup, a CSS **named** colour — anywhere outside the token layer;
+- a font-family literal outside the token layer, **including one hidden in a custom property**;
+- `el.style.x = …`, `style.setProperty(…)`, `cssText = …`, `setAttribute('style', …)` and
+  `dangerouslySetInnerHTML` — the JavaScript routes to the same holes;
+- `forced-color-adjust: none`.
+
+TypeScript is parsed by the TypeScript compiler and CSS by postcss — both already in the tree —
+so comments, string boundaries and regex literals are correct **by construction** rather than by
+a stripping pass. It **fails closed**: a file that will not parse, a file whose extension has no
+registered parser, a missing scan target, a scan that matched nothing, and a malformed allowlist
+are all errors. An unparseable file is not evidence of compliance.
+
+**What it cannot do**, stated plainly so a green run is not mistaken for a proof:
+
+- a colour **assembled at runtime** — string concatenation, a template substitution, character
+  codes, fetched data — is invisible to it. The static text of a template literal *is* scanned;
+  its substitutions are not.
+- a colour reaching the DOM through a **CSS custom property set at runtime** is not detected as
+  a colour. The routes by which this app's own code could set one are closed by the
+  programmatic-style rule, but a value handed to a third-party component's colour prop is not
+  seen. (There is no such dependency today.)
+- CSS **named** colours are checked in CSS and markup, not in TypeScript strings — the
+  false-positive cost on ordinary prose is not worth it, and a bare name in TypeScript has no
+  route to the DOM the other rules do not already close.
+- other CSSOM routes to a stylesheet (`insertRule`, `adoptedStyleSheets`, an aliased tag name)
+  are not detected.
+- the HTML/SVG scanner is **partial** — a hand-written scanner, not a spec tokenizer. An
+  attribute value containing `>` desynchronizes it and behaviour after that point is
+  **unmodelled**. It deliberately does not skip comments: it errs toward the false alarm.
+- it scans **source**, so a dependency's stylesheet is out of scope; and it checks that a raw
+  value is not used, not that the *right* token was chosen. Contrast and motion gating is a
+  separate item.
+
+Every one of those limitations is pinned by a test asserting it is currently NOT detected, so
+the list cannot quietly drift away from the code.
+
+**Exceptions.** `client/scripts/color-allowlist.json` is the only exception path, and it is
+deliberately weak: only the colour-literal rule is allowlistable, only files matching a
+code-owned path registry (a syntax-highlighting theme) may appear in it, every entry names an
+exact file, an exact value and a reason, and a **stale entry fails the lint**. A CDN, a
+component, or a primitive cannot be allowlisted by editing configuration at all. There is no
+pragma, flag, or environment variable that turns a rule off.
+
+**Contrast.** `client/scripts/token-layer.test.mjs` parses the token layer and asserts 4.5:1 on
+the text/surface pairs the system tells people to use — in both themes, with real alpha
+compositing for the tinted badge surfaces — and that the two light blocks have not drifted
+apart. `--text-faint` and `--text-disabled` are excluded by design and documented where they
+are declared: neither may ever be the only carrier of a meaning.
 
 ## Contributing
 
