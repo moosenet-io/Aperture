@@ -9,7 +9,8 @@ spec_id: S128-aperture-client
 - **Session:** S128
 - **Date:** 2026-08-01
 - **Module version:** Aperture v0.1.0
-- **Estimated total:** ~76h
+- **Estimated total:** ~92h (13 items in this repo plus APTR-52, which lands in the media
+  module's repository as a prerequisite PR)
 - **North-Star layer:** shell — Gate 2 justified in `specs/S128-aperture-epic.md`. This sprint
   is where the gate is *paid off*: the three live modules stop being three silos behind three
   surfaces and start sharing one typed context bus.
@@ -540,15 +541,21 @@ spec_id: S128-aperture-client
   - Unit: filter/sort state round-trips through the URL
   - Unit: search issues one request per settled query, not one per keystroke
   - Unit: cursor pagination terminates cleanly with an explicit end state
-  - Unit: `muse.browse` publishes on selection and filter change, debounced, and stops when
-    `shell.focus` moves away
-  - Conformance: the surface passes `inertConformance` for `unavailable` and `degraded`
+  - Unit: `muse.browse` publishes on selection, filter change, and detail mount, debounced, and
+    stops when `shell.focus` moves away
+  - Unit: detail renders title, metadata fields, artwork, and availability/lifecycle state
+  - Unit: playback affordance is inert-with-reason when the playback capability is not available
+  - Unit: consuming a `muse.playback` event for the open item marks it as playing/resumable
+  - Conformance: both the browse surface and the detail surface pass `inertConformance` for
+    `unavailable` and `degraded`
   - Verify no hardcoded IPs, hostnames, org names, ports, or absolute user paths in
     new/modified files
   - Negative: with the media capability `unavailable`, assert the surface issues **zero** data
     requests and renders the inert tile with a reason — a surface that fetches-then-fails must
     FAIL this test
   - Negative: assert no artwork `<img src>` resolves to an external origin (grep + render test)
+  - Negative: an item detail payload containing an external artwork URL must NOT be rendered as
+    an image source — assert it is routed through the BFF path or dropped, never fetched directly
 
   ## EDGE CASES
   - An item with no artwork — render a token-styled placeholder, never a broken image icon
@@ -559,89 +566,131 @@ spec_id: S128-aperture-client
     accessible text, and never assume Latin script for sort
   - Capability flipping to `available` mid-session — the surface lights up on the
     `module.capability` bus event without a page reload
-
-- **Acceptance criteria:**
-  - [ ] Library browse renders in both grid and table modes, virtualized, cursor-paginated
-  - [ ] Search and filter/sort work and round-trip through URL state
-  - [ ] All data and artwork flow through the BFF → `terminus-client`; zero external origins
-  - [ ] Publishes `muse.browse` and consumes `shell.focus`, both declared in its registration
-  - [ ] Passes the inert-conformance harness for `unavailable` and `degraded`, issuing zero
-        requests when unavailable
-  - [ ] No hardcoded infrastructure values in new/modified code
-  - [ ] README updated to document the Muse surface
-  - [ ] All existing tests still pass
-
----
-
-### APTR-52: Muse detail view — metadata, artwork, provenance, and availability
-- **Priority:** High
-- **Labels:** aperture, muse, modules, web
-- **Agent:** claude
-- **Estimate:** 5h
-- **Blocked by:** APTR-51
-- **Description:** The detail surface for a single library item: full metadata from the module's
-  configured providers, artwork, availability/lifecycle state, and — importantly — **provenance**:
-  which provider supplied which field, and when it was last refreshed. The media module already
-  reconciles multiple metadata providers; a detail view that flattens that into anonymous facts
-  discards the most useful thing it knows.
-
-  ## FILES
-  - `client/src/modules/muse/DetailSurface.tsx` — the detail layout
-  - `client/src/modules/muse/MetadataProvenance.tsx` — per-field provider attribution and freshness
-  - `client/src/modules/muse/ArtworkFrame.tsx` — artwork with placeholder and aspect handling
-  - `client/src/modules/muse/AvailabilityState.tsx` — lifecycle/availability presentation
-  - `client/src/modules/muse/DetailSurface.test.tsx`
-  - **Agent-core repo (sibling PR):** the BFF detail route, proxying item detail and artwork
-    through `terminus-client`
-
-  ## APPROACH
-  1. One request for the item detail; artwork streams through the BFF artwork path with strong
-     caching headers. No third-party image origin ever reaches the DOM.
-  2. Provenance is rendered inline and unobtrusively: each metadata field can reveal its source
-     provider and last-refresh time. Where providers disagree, show the reconciled value and make
-     the disagreement inspectable rather than silently picking a winner with no trace.
-  3. Availability/lifecycle state reuses the module's existing vocabulary (requested, grabbing,
-     available, failed, and so on) — read it from the backend, do not invent a parallel set of
-     states in the client.
-  4. The detail surface is the natural launch point for playback (APTR-53) and exposes that
-     affordance only when the playback capability is `available`; otherwise the affordance is
-     present but inert with a reason, so the user learns *why* rather than finding a missing button.
-  5. **Bus citizenship:** publishes `muse.browse` with the selected item id on mount; consumes
-     `muse.playback` so an item currently or recently playing is visibly marked as such, including
-     its resume position once APTR-54 lands.
-  6. Deep-linkable by item id, so Sprint E deep links and assistant-driven navigation both work.
-
-  ## TEST PLAN
-  - Unit: detail renders title, metadata fields, artwork, and availability state
-  - Unit: provenance reveals provider and freshness per field; a disagreement is inspectable
-  - Unit: playback affordance is inert-with-reason when the playback capability is not available
-  - Unit: consuming a `muse.playback` event for this item marks it as playing/resumable
-  - Conformance: passes `inertConformance` for `unavailable` and `degraded`
-  - Verify no hardcoded IPs, hostnames, org names, ports, or absolute user paths in
-    new/modified files
-  - Negative: an item detail payload containing an external artwork URL must NOT be rendered as
-    an image source — assert it is routed through the BFF path or dropped, never fetched directly
-  - Negative: a metadata field with a missing provider attribution renders as "source unknown"
-    rather than silently attributing it to the last known provider
-
-  ## EDGE CASES
   - An item that exists in the library but has no provider match at all — render the file-derived
     facts and state plainly that metadata matching has not succeeded
   - Very large artwork causing layout shift — reserve aspect-ratio space before load
-  - A provider refresh in flight while the detail is open — reflect the refresh via the normal
-    data path; do not poll on a tight interval
-  - Conflicting runtimes/episode counts between providers — show the reconciled value with the
-    conflict inspectable, never an averaged or invented value
   - An item deleted from the library while its detail is open — surface a clear removed state,
     not a 404 error page
 
 - **Acceptance criteria:**
-  - [ ] Detail renders metadata, artwork, and availability/lifecycle state from the backend's own
-        vocabulary
-  - [ ] Per-field provenance shows provider and freshness; disagreements are inspectable
-  - [ ] Zero external image origins reach the DOM
-  - [ ] Publishes `muse.browse` on mount and consumes `muse.playback`
-  - [ ] Passes the inert-conformance harness; playback affordance is inert-with-reason when gated
+  - [ ] Library browse renders in both grid and table modes, virtualized, cursor-paginated
+  - [ ] Search and filter/sort work and round-trip through URL state
+  - [ ] Item detail renders metadata, artwork, and availability state from the backend's own
+        vocabulary, and is deep-linkable by item id
+  - [ ] All data and artwork flow through the BFF → `terminus-client`; zero external origins
+  - [ ] Publishes `muse.browse`, consumes `shell.focus` and `muse.playback`, all declared
+  - [ ] Both surfaces pass the inert-conformance harness, issuing zero requests when unavailable;
+        the playback affordance is inert-with-reason when playback is gated
+  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] README updated to document the Muse surface and the deferred provenance display
+
+---
+
+### APTR-52: Media module — ticket-bound ranged-read capability (prerequisite for playback)
+- **Priority:** Critical
+- **Labels:** muse, media, capability, security, rust, prerequisite
+- **Agent:** claude
+- **Estimate:** 6h
+- **Description:** Aperture cannot play media because **the media module does not serve media
+  bytes at all today** — there is no byte-serving route, no `206 Partial Content`, and no
+  `Content-Range` anywhere in its source. This item adds the capability Aperture will consume.
+
+  It is written deliberately as a **typed JSON capability, not an HTTP byte-range proxy.** The
+  sanctioned door's streaming entry points (`forward_stream` and
+  `forward_stream_with_idle_timeout`) take a JSON request body and yield a raw byte stream; they
+  expose no arbitrary-request-header parameter and no response status or header surface to the
+  caller. A `Range:` request header therefore cannot be passed through, and a `206` /
+  `Content-Range` response could not be read back even if one were produced. The expedient fix —
+  extending the door to forward arbitrary headers — is **rejected on architectural grounds**: it
+  would convert a clean, typed, auditable JSON door into a general HTTP proxy and erode the
+  single-door property that makes the whole system reviewable.
+
+  Instead, range semantics become **typed, validated, server-enforced parameters**:
+  `{ item_id, ticket, offset, length }` in, a bounded chunk stream out. Seeking is "issue a new
+  ranged read at a new offset", which the existing transport supports natively with no new
+  plumbing. This is strictly better here: offset validation and per-ticket bounds enforcement
+  live server-side and fail closed, rather than riding in on a header the door would have to
+  trust.
+
+  **This lands in the media module's own repository.** Per the multi-repo rule it is a separate
+  PR that **merges before** APTR-53's Aperture-side work, and it carries its own ingest, review,
+  merge, and post-merge gate in that repo.
+
+  ## FILES
+  - **Media module repo:** a `media_read` capability handler — request/response types, offset and
+    length validation, ticket verification, bounded chunk streaming
+  - **Media module repo:** ticket minting and verification — issue, verify, revoke; single-item
+    binding; TTL from `APERTURE_MEDIA_STREAM_TICKET_TTL_SECONDS`
+  - **Media module repo:** capability descriptor advertising `media_read` so Aperture's module
+    probe can gate on it, and tests for all of the above
+  - **This repo:** `contracts/aperture-media-read-v1.md` — the request/response shape Aperture
+    codes against, the ticket semantics, and the explicit statement that no HTTP range semantics
+    cross the door
+
+  ## APPROACH
+  1. Request shape: `{ item_id, ticket, offset, length }`. Response: a bounded byte-chunk stream
+     plus a typed header frame carrying total size, content type, and the actual granted
+     `(offset, length)` — because the caller must be able to learn that its request was clamped
+     without inspecting HTTP status codes it cannot see.
+  2. **Ticket authorization is the security boundary and is fail-closed.** A ticket authorizes
+     **exactly one item**. `item_id` is validated against the ticket's bound item on every read;
+     a mismatch is refused. A ticket cannot be widened by a crafted offset, a negative offset, an
+     offset beyond end-of-file, a length exceeding the configured maximum, or an integer that
+     overflows on `offset + length`. Every one of those is refused, not clamped-then-served,
+     except the single documented clamp: a read that starts in range and extends past EOF is
+     served truncated to EOF with the granted length reported honestly.
+  3. Tickets are short-lived, session-bound, and revocable. Session revocation invalidates
+     outstanding tickets immediately — a ticket must **not** remain honored until its TTL.
+  4. No library file path, storage location, mount point, or backend credential ever appears in a
+     response, an error body, or a log line the caller can see. Errors map to the module's
+     existing structured error shape and are redacted.
+  5. Chunk size is bounded by `APERTURE_MEDIA_READ_CHUNK_BYTES` and maximum read length by
+     `APERTURE_MEDIA_READ_MAX_LENGTH_BYTES` — names only, values from config, so a single
+     enormous read cannot be used to pin memory.
+  6. Reads are cancellable: an abandoned stream releases its file handle promptly rather than
+     holding it for the life of the ticket.
+  7. Secrets via the secret manager, never `std::env::var` for anything token/key/secret-shaped.
+     No new outbound network path is opened by this capability.
+
+  ## TEST PLAN
+  - Unit: a valid `{item_id, ticket, offset, length}` read returns exactly the requested bytes and
+    reports the granted offset/length and total size
+  - Unit: a read starting in range and extending past EOF is truncated to EOF with the granted
+    length reported honestly
+  - Unit: sequential reads at differing offsets reconstruct the item byte-for-byte
+  - Unit: an abandoned stream releases its file handle promptly
+  - Unit: chunk size and maximum read length are enforced from named config, with no literal values
+  - Verify no hardcoded IPs, hostnames, org names, ports, or absolute user paths in
+    new/modified files
+  - Negative: a ticket bound to item A used with item B is REFUSED — this is the primary
+    authorization test and a pass here with any other outcome is a security failure
+  - Negative: a negative offset, an offset past EOF, a length over the maximum, and an
+    `offset + length` that overflows are each REFUSED (not clamped, not served)
+  - Negative: after session revocation an outstanding, unexpired ticket is REFUSED
+  - Negative: assert no file path, storage location, mount point, or credential appears in any
+    response, error body, or caller-visible log line
+
+  ## EDGE CASES
+  - A zero-length read — refuse it rather than returning an empty stream a caller could mistake
+    for EOF
+  - An item whose file changes size between ticket mint and read — report the current total size
+    in the header frame; never serve stale bounds
+  - An item removed while a read is in flight — terminate the stream with a typed error rather
+    than a silent truncation the caller would read as EOF
+  - Many concurrent tickets for the same item — permitted; bound total concurrent reads so a
+    single session cannot exhaust file handles
+  - A clock change affecting TTL evaluation — evaluate expiry monotonically, not on wall clock
+
+- **Acceptance criteria:**
+  - [ ] `media_read` accepts `{item_id, ticket, offset, length}` over the existing JSON door and
+        returns a bounded chunk stream plus granted offset/length and total size
+  - [ ] **No HTTP range semantics cross the door** — no `Range` header forwarding, no `206`, no
+        `Content-Range`, and no change to the door's header surface
+  - [ ] A ticket authorizes exactly one item and cannot be widened by any crafted offset, length,
+        or overflow; every such attempt is refused
+  - [ ] Session revocation invalidates outstanding tickets immediately, ahead of TTL
+  - [ ] No file path, storage location, mount point, or credential is caller-visible anywhere
+  - [ ] Chunk and length bounds come from named config; secrets via the secret manager
   - [ ] No hardcoded infrastructure values in new/modified code
   - [ ] All existing tests still pass
 
@@ -651,70 +700,110 @@ spec_id: S128-aperture-client
 - **Priority:** High
 - **Labels:** aperture, muse, playback, modules, web, security
 - **Agent:** claude
-- **Estimate:** 8h
-- **Blocked by:** APTR-52
+- **Estimate:** 7h
+- **Blocked by:** APTR-51, APTR-52
 - **Description:** Play media inside Aperture. This is a real capability with a real player — a
   button that opens another application would defeat the entire point of the shell, and would
   make "what was I watching" unanswerable. The player is a first-class surface with transport
   controls, seeking, subtitle/audio track selection where the backend offers them, and a
   compact persistent mode that survives navigation within the shell.
 
+  Playback consumes the **typed ranged-read capability** landed by APTR-52 —
+  `{ item_id, ticket, offset, length }` in, a bounded chunk stream out. There are no HTTP range
+  semantics anywhere in this path: no `Range` request header, no `206`, no `Content-Range`, and
+  no extension of the door's header surface. Seeking is not a header; it is a new ranged read at
+  a new offset. That is a constraint the client is built around from the start, not a degraded
+  fallback.
+
   ## FILES
   - `client/src/modules/muse/PlayerSurface.tsx` — the full player surface
   - `client/src/modules/muse/MiniPlayer.tsx` — the compact persistent player
-  - `client/src/modules/muse/playbackEngine.ts` — media element lifecycle, buffering, error mapping
+  - `client/src/modules/muse/playbackEngine.ts` — media element lifecycle, buffer feeding, error mapping
+  - `client/src/modules/muse/rangedReader.ts` — offset-driven read scheduling, cancellation, backpressure
   - `client/src/modules/muse/tracks.ts` — subtitle/audio track selection
-  - `client/src/modules/muse/playbackEngine.test.ts`, `client/src/modules/muse/PlayerSurface.test.tsx`
+  - `client/src/modules/muse/playbackEngine.test.ts`, `client/src/modules/muse/rangedReader.test.ts`,
+    `client/src/modules/muse/PlayerSurface.test.tsx`
   - `docs/PLAYBACK.md` — what plays natively, what requires backend transcode, and the failure modes
   - **Agent-core repo (sibling PR):** a BFF playback route that mints a **short-lived,
-    single-item, session-bound stream ticket** and proxies/redirects the byte range through
-    `terminus-client`; TTL from `APERTURE_MEDIA_STREAM_TICKET_TTL_SECONDS`
+    single-item, session-bound stream ticket** and issues ranged reads via
+    `forward_stream_with_idle_timeout`; TTL from `APERTURE_MEDIA_STREAM_TICKET_TTL_SECONDS`
 
   ## APPROACH
   1. **Security first.** The client never receives a library file path, a storage location, or a
      backend credential. It receives an opaque, short-lived, single-item, session-bound ticket
-     and requests bytes from a same-origin BFF path. A ticket is not reusable for another item,
-     does not survive session revocation, and expires on its configured TTL.
-  2. Byte-range requests are honored end to end so seeking works without buffering the whole item.
-     The BFF forwards range semantics through the door rather than materializing files.
-  3. The player is a standard media element driven by `playbackEngine.ts` — no third-party player
+     and requests bounded chunks from a same-origin BFF path. A ticket is not reusable for another
+     item, does not survive session revocation, and expires on its configured TTL. Every bound is
+     re-validated server-side by APTR-52 — the client's correctness is convenience, not the
+     security boundary.
+  2. **Ranged reads, not byte-range HTTP.** `rangedReader.ts` maintains a read cursor and feeds
+     the media element from bounded chunks. A seek **cancels the in-flight read and starts a new
+     one at the new offset** — reads are never interleaved, because two concurrent readers feeding
+     one buffer is a corruption bug, not a performance win. Read-ahead depth is bounded so a fast
+     link cannot pull an entire film into memory.
+  3. **The BFF uses `forward_stream_with_idle_timeout`, not `forward_stream`.** Playback is a
+     fundamentally different workload shape from an agentic turn: chunks either arrive
+     continuously or the read is dead, so an agent-sized idle tolerance would leave a stalled
+     player hanging for minutes with no signal. Use a playback-appropriate idle timeout of
+     **15 seconds**, from `APERTURE_MEDIA_READ_IDLE_TIMEOUT_SECONDS` — long enough to survive a
+     disk seek or a brief network hiccup, short enough that a genuinely stalled read surfaces as
+     buffering-then-error within a few seconds rather than an indefinite spinner.
+  4. The player is a standard media element driven by `playbackEngine.ts` — no third-party player
      library is vendored. Ideas from prior art may be cited; code may not be copied.
-  4. Codec/container reality is handled honestly: probe playability, and when the browser cannot
+  5. Codec/container reality is handled honestly: probe playability, and when the browser cannot
      play an item natively, request the module's transcode capability if it reports `available`,
      and otherwise state plainly that this item cannot play in this client and why. A silent
      black rectangle is the failure mode this item exists to prevent.
-  5. Track selection (subtitles, audio) is offered only for tracks the backend actually reports.
-  6. `MiniPlayer` keeps playback alive while the user navigates to other module surfaces within
+  6. Track selection (subtitles, audio) is offered only for tracks the backend actually reports.
+  7. `MiniPlayer` keeps playback alive while the user navigates to other module surfaces within
      the shell, because "keep watching while I check a build" is exactly the shell's value.
-  7. **Bus citizenship:** publishes `muse.playback` (item, state, position, duration) on state
+  8. **Bus citizenship:** publishes `muse.playback` (item, state, position, duration) on state
      transitions and on a coalesced position cadence; consumes `shell.focus` to decide between
      full and mini presentation. Position persistence is APTR-54's job — this item publishes,
      it does not yet resume.
-  8. Errors map to the APTR-10 problem-details taxonomy: an expired ticket surfaces as a
-     recoverable auth-ish error the player retries once by re-minting, not a dead player.
+  9. Errors map to the APTR-10 problem-details taxonomy: an expired ticket surfaces as a
+     recoverable auth-ish error the player retries once by re-minting at the current offset, not
+     a dead player. An idle-timeout termination is a distinct, stated buffering failure — not
+     silently retried forever, and never presented as end-of-stream.
 
   ## TEST PLAN
   - Unit: transport controls drive the engine (play/pause/seek/rate) and reflect real element state
-  - Unit: byte-range seek issues a range request and does not restart the stream from zero
+  - Unit: a seek issues a new ranged read at the new offset and does not restart from zero
+  - Unit: read-ahead depth is bounded; a fast link does not buffer the whole item into memory
   - Unit: an unplayable codec produces a stated reason and a transcode offer when that capability
     is available, and a plain explanation when it is not
   - Unit: track selection lists only backend-reported tracks
   - Unit: `muse.playback` publishes on every state transition and at a coalesced position cadence
   - Integration: navigating to another module surface keeps `MiniPlayer` playing
-  - Integration: an expired ticket triggers exactly one re-mint and resumes at the same position
+  - Integration: an expired ticket triggers exactly one re-mint and resumes at the current offset
+  - Integration: sequential ranged reads reconstruct the item and play through to its end
   - Verify no hardcoded IPs, hostnames, org names, ports, or absolute user paths in
     new/modified files
   - Negative: assert no library file path, storage location, or credential appears in any client
     payload or in the DOM — a response containing one must FAIL the test
-  - Negative: a ticket minted for one item must be REJECTED when used for another item
+  - Negative: assert the playback path sets **no** `Range` request header and reads **no**
+    response status or header surface from the door — a build that reintroduces HTTP range
+    semantics FAILS this test
+  - Negative: a seek during an in-flight read must CANCEL the prior read — a test asserting two
+    concurrently-live reads feeding one buffer FAILS
   - Negative: after session revocation, an outstanding ticket must be REJECTED, not honored to TTL
 
   ## EDGE CASES
+  - **A seek during an in-flight read** — cancel the prior read, discard its buffered remainder,
+    and start a new read at the new offset. Reads are never interleaved and a late chunk from a
+    cancelled read is dropped by generation counter, not merged into the buffer.
+  - **An offset past end-of-file** — the capability refuses it (APTR-52); the player clamps the
+    requested seek to the known total size before issuing, and treats a refusal as a bug to
+    surface, not a condition to retry
+  - **A ticket expiring mid-playback** — re-mint once, transparently, and resume at the current
+    offset with no visible interruption beyond buffering. A second consecutive failure to re-mint
+    surfaces a stated auth error and pauses; it does not silently loop.
+  - **A stalled stream hitting the idle timeout mid-playback** — surface buffering, then a stated
+    "stream stalled" error with a retry affordance. It must never be presented as end-of-stream,
+    and must never retry indefinitely without telling the user.
   - Autoplay policy blocking playback without a user gesture — surface an explicit "press play"
     state rather than appearing broken
-  - A network stall mid-stream — show buffering, retry with backoff, and give up with a stated
-    reason rather than spinning indefinitely
-  - Seeking past a not-yet-available range on a still-transcoding item — clamp and explain
+  - Seeking into a not-yet-available region of a still-transcoding item — clamp to what the
+    capability reports as available and explain
   - Two tabs playing the same item — both are valid; `muse.playback` last-writer-wins per the
     contract and the privacy panel shows why the position moved
   - The user opting out of `muse.playback` — playback still works fully; only the bus publication
@@ -723,13 +812,15 @@ spec_id: S128-aperture-client
     pause/stop event flushes immediately
 
 - **Acceptance criteria:**
-  - [ ] Media plays in-shell with working transport, seeking via byte ranges, and track selection
+  - [ ] Media plays in-shell with working transport and track selection, driven by typed ranged
+        reads (`{item_id, ticket, offset, length}`) — never an HTTP `Range` header or a `206`
+  - [ ] Seeking issues a new ranged read and cancels the in-flight one; reads never interleave
+  - [ ] The BFF uses `forward_stream_with_idle_timeout` with a playback-appropriate idle timeout
+        from named config, not the default agentic-turn tolerance
   - [ ] Client receives only an opaque short-lived single-item session-bound ticket — never a
         path, location, or credential
-  - [ ] A ticket is rejected for a different item and after session revocation
-  - [ ] Unplayable media yields a stated reason and a transcode path when available, never a
-        silent failure
-  - [ ] `MiniPlayer` survives in-shell navigation; `muse.playback` publishes state and position
+  - [ ] A ticket expiring mid-playback re-mints once and resumes at the current offset; a stalled
+        read surfaces a stated error and is never presented as end-of-stream
   - [ ] No third-party player source vendored
   - [ ] No hardcoded infrastructure values in new/modified code
   - [ ] README and `docs/PLAYBACK.md` document playback support and its failure modes
@@ -1177,7 +1268,7 @@ spec_id: S128-aperture-client
 - **Labels:** aperture, modules, assistant, contract, ci
 - **Agent:** claude
 - **Estimate:** 7h
-- **Blocked by:** APTR-51, APTR-52, APTR-53, APTR-55, APTR-56, APTR-57
+- **Blocked by:** APTR-51, APTR-53, APTR-55, APTR-56, APTR-57
 - **Description:** Module Contract clause 4 says every meaningful module action must be invocable
   by the assistant as a tool, not only as a button. A checklist cannot hold that line — the first
   time someone ships a button in a hurry, the parity silently lapses and nobody notices until the

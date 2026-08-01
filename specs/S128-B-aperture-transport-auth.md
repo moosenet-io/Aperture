@@ -419,7 +419,8 @@ spec_id: S128-aperture-client
 ### APTR-18: Clean cancellation — client disconnect actually stops the generation
 - **Priority:** Critical
 - **Labels:** aperture, bff, streaming, reliability, cost
-- **Agent:** opus
+- **Agent:** claude
+- **Review:** high-assurance panel — widen the `review_run` provider list for this item; a shallow implementation here is expensive to discover later.
 - **Estimate:** 5h
 - **Blocked by:** APTR-15
 - **Description:** When a user closes a tab, navigates away, or presses stop mid-generation, the
@@ -442,10 +443,16 @@ spec_id: S128-aperture-client
   2. Detect disconnect on the write path (a failed send) **and** proactively via the connection's
      closed signal. Relying on write failure alone means an idle-but-dead connection keeps
      generating until the next token, which for a slow first token can be many seconds.
-  3. Propagate cancellation into the `terminus-client` call so the upstream inference request is
-     genuinely cancelled, not merely ignored locally. Assert this with a test that observes the
-     upstream request terminate — **a locally-dropped future that leaves the backend generating
-     is exactly the bug this item forbids.**
+  3. Propagate cancellation into the upstream inference request so it is genuinely cancelled, not
+     merely ignored locally. Concretely: the deep-tier synthesis runs through
+     `ChordClient::chat_completion_streaming` in `crates/lumina-core/src/chord.rs`, so cancellation
+     must reach **that** call and stop the body read, not just drop the SSE writer downstream of
+     it. Assert with a test that observes the upstream request terminate — **a locally-dropped
+     future that leaves the backend generating is exactly the bug this item forbids**, and it is
+     especially costly here because the GPU is a shared, arbitrated, idle-reaped pool.
+     Note this is distinct from the existing LSTR-02 inactivity timeout: that fires when the
+     *upstream* goes quiet; this fires when the *client* goes away. Both must end the same call
+     cleanly, and neither may leave the other's teardown half-run.
   4. In-flight tool calls are abandoned **at the next safe point**, never mid-write. A tool with
      side effects must complete or roll back its current operation; cancellation is cooperative
      for tools and pre-emptive only for pure inference. Document which is which.
@@ -902,7 +909,8 @@ spec_id: S128-aperture-client
 ### APTR-24: Rate limiting and abuse protection on the auth surface
 - **Priority:** High
 - **Labels:** aperture, bff, auth, security, reliability
-- **Agent:** opus
+- **Agent:** claude
+- **Review:** high-assurance panel — widen the `review_run` provider list for this item; a shallow implementation here is expensive to discover later.
 - **Estimate:** 5h
 - **Blocked by:** APTR-21
 - **Description:** The auth endpoints are the instance's only unauthenticated attack surface.
@@ -1063,8 +1071,9 @@ spec_id: S128-aperture-client
 ### APTR-26: The `aperture` Channel adapter — one agent loop, not a parallel path
 - **Priority:** Critical
 - **Labels:** aperture, channels, rust, lumina-core, architecture
-- **Agent:** opus
-- **Estimate:** 8h
+- **Agent:** claude
+- **Review:** high-assurance panel — widen the `review_run` provider list for this item; a shallow implementation here is expensive to discover later.
+- **Estimate:** 6h
 - **Description:** This is the architecturally load-bearing item of the sprint. The agent core
   already has an `EDGE-08` `Channel` trait and a `ChannelRegistry` in which Matrix, CLI, HTTP, and
   (feature-gated) Telegram adapters all feed a single shared `mpsc::Sender<ChannelMessage>`, so
@@ -1076,13 +1085,28 @@ spec_id: S128-aperture-client
   calls the model directly from the BFF, bypassing the agent loop, is rejected outright — it
   would fork the assistant's guarding, its memory, and ultimately its personality.
 
+  **The token-level hook already exists — this item wires it, it does not invent it.**
+  `agent_loop.rs` already invokes `ChordClient::chat_completion_streaming` behind the
+  `router.stream_deep` flag with `crate::config::stream_idle_timeout_secs()`, passing an
+  `on_delta` callback that is **currently a no-op `|_delta| {}` closure**, with an in-code comment
+  stating that LSTR-03 wires the incremental emit through exactly that callback. So the work here
+  is *routing*: replace the no-op with a fan-out that publishes each delta to a per-turn
+  broadcast the SSE endpoint (APTR-15) subscribes to. **Do not add a new incremental-output hook
+  to the agent loop, and do not write a second SSE frame parser** — `ChatSseState` already turns
+  upstream frames into deltas correctly. This is the single most important thing for the reviewer
+  to verify, in both directions: that the existing hook was used, *and* that no parallel path was
+  built around the loop.
+
   ## FILES
   - `docs/ARCHITECTURE-CHANNELS.md` (this repo) — the adapter's place in the registry, the
     message/response flow, and an explicit statement of the no-parallel-path rule for reviewers
   - **Agent-core repo (sibling PR):** `crates/lumina-core/src/channels/aperture.rs` implementing
     `Channel`; registration in `crates/lumina-core/src/channels/mod.rs`; an `Aperture` variant
-    added to `ChannelType` in `crates/lumina-core/src/users/identity.rs`; the bridge between the
-    adapter's response path and the SSE emitter from APTR-15
+    added to `ChannelType` in `crates/lumina-core/src/users/identity.rs`; the per-turn delta
+    fan-out; and a **small, surgical edit at the existing `stream_deep` call site in
+    `crates/lumina-core/src/agent_loop.rs`** replacing the no-op `|_delta| {}` closure with the
+    publishing closure. `crates/lumina-core/src/chord.rs` should need **no change at all** — if a
+    change there looks necessary, stop and justify it in the PR body rather than editing it
 
   ## APPROACH
   1. Implement `Channel` for an `ApertureChannel`: `name()` returns `"aperture"`; `start()` wires
@@ -1095,20 +1119,31 @@ spec_id: S128-aperture-client
      existing channel compiling and behaving identically.
   3. Outbound: `send_response` is the aggregate path (a whole response), but Aperture's value is
      *streaming*. Bridge these by having the adapter register a per-turn emitter handle keyed by
-     `request_id`, into which the agent loop's incremental output is written as `token` events, and
-     have `send_response` finalize the turn. **Where the agent loop does not yet expose incremental
-     output, add that hook in the loop itself rather than bypassing the loop** — this is the crux
-     of the item, and the reviewer should verify it specifically.
-  4. Add `ChannelType::Aperture` to the identity enum with its `as_str`/`from_db_str` mappings. The
+     `request_id`, and **publish into it from the existing `on_delta` callback**: at the
+     `router.stream_deep` call site in `agent_loop.rs`, replace the current no-op `|_delta| {}`
+     with a closure that looks up the emitter for the in-flight turn and pushes the delta as a
+     `token` event. `send_response` then finalizes the turn (`message.end`). The fan-out is a
+     bounded broadcast so multiple subscribers (two devices on one turn) each receive it, and so a
+     slow subscriber applies the APTR-17 backpressure policy instead of blocking the loop.
+     **The closure must never block and must never fail the turn** — if there is no live
+     subscriber, the delta is dropped and the turn still completes normally through the buffered
+     path, exactly as it does today. This preserves the current behaviour for Matrix and CLI
+     byte-for-byte, which is the whole reason the edit is surgical rather than structural.
+  4. With `router.stream_deep` off, `on_delta` is never invoked — no deltas exist to route. The
+     adapter then emits the completed response as a single `token` followed by `message.end`,
+     which is the contracted behaviour from APTR-15. Aperture streaming is therefore *dependent*
+     on that flag by design (see Pre-flight); it must not open its own second inference call to
+     get finer granularity, which would be precisely the parallel path this item forbids.
+  5. Add `ChannelType::Aperture` to the identity enum with its `as_str`/`from_db_str` mappings. The
      enum already has an `Other(String)` catch-all — **do not** ship Aperture as `Other("aperture")`;
      a first-class channel gets a first-class variant, and existing rows must continue to
      round-trip unchanged.
-  5. An Aperture account resolves to a Lumina `user_id` via `ChannelIdentity`, exactly as Matrix and
+  6. An Aperture account resolves to a Lumina `user_id` via `ChannelIdentity`, exactly as Matrix and
      Telegram do. One user, many channel identities. This is what makes APTR-28's continuity
      property true by construction rather than by careful copying.
-  6. Registration is feature-gated consistently with the BFF's `aperture` cargo feature, so a build
+  7. Registration is feature-gated consistently with the BFF's `aperture` cargo feature, so a build
      without the feature is byte-compatible with today's binary and the Matrix path is untouched.
-  7. Failure isolation: an Aperture adapter failing to start must not prevent Matrix or CLI from
+  8. Failure isolation: an Aperture adapter failing to start must not prevent Matrix or CLI from
      starting — the registry already logs and continues, and a test must assert that behaviour is
      preserved.
 
@@ -1116,8 +1151,13 @@ spec_id: S128-aperture-client
   - Unit: `ApertureChannel` implements `Channel`; `start`/`stop` are clean and idempotent
   - Integration: a message posted through the BFF traverses the **same** guarded agent-loop path as
     a Matrix message — assert the input guard, tool gate, and audit log all observe it
-  - Integration: incremental output reaches the SSE emitter as `token` events and the turn finalizes
-    through `send_response`
+  - Integration: with `router.stream_deep` on, deltas delivered through the existing `on_delta`
+    callback reach the SSE emitter as `token` events and the turn finalizes through `send_response`
+  - Integration: with `router.stream_deep` off, the turn arrives as one `token` plus `message.end`
+  - Unit: with no live subscriber, the publishing closure drops the delta and the turn still
+    completes normally — Matrix/CLI behaviour is unchanged
+  - `grep` gate: `chord.rs` is unmodified, and the diff to `agent_loop.rs` is confined to the
+    `stream_deep` call-site closure — no new incremental-output hook was introduced
   - Unit: `ChannelType::Aperture` round-trips through `as_str`/`from_db_str`; existing stored values
     for matrix/telegram/http round-trip unchanged
   - Unit: one user with Matrix and Aperture identities resolves to a single `user_id`
@@ -1138,6 +1178,12 @@ spec_id: S128-aperture-client
     existing channel compiles unchanged; a breaking struct change to a shared type is a review flag
   - Backpressure from the shared `mpsc` channel under load — apply the APTR-17 policy at the BFF
     boundary rather than blocking the loop's sender
+  - The `on_delta` closure is called from inside the upstream body-read loop, so **any blocking or
+    panicking there stalls or kills the turn for every channel, not just Aperture**. Publish into
+    a bounded non-blocking sender and drop on overflow; assert a wedged Aperture subscriber cannot
+    slow a Matrix turn
+  - A turn where `stream_deep` is on but the upstream ignored `stream: true` (`saw_frame == false`)
+    — `on_delta` fires once or not at all; the adapter must still produce a well-formed turn
   - A user whose Aperture identity exists but whose Lumina user was removed — fail closed with a
     typed auth error; **never auto-create a replacement user**, which would present as amnesia
 
@@ -1146,7 +1192,9 @@ spec_id: S128-aperture-client
   - [ ] Aperture messages traverse the identical guarded agent loop as every other channel
   - [ ] The BFF constructs no independent inference or tool path — proven by grep gate and test
   - [ ] `ChannelType::Aperture` is a first-class variant; existing identity rows round-trip unchanged
-  - [ ] Incremental agent-loop output bridges to the SSE emitter; turns finalize via `send_response`
+  - [ ] Streaming is wired through the **existing** `on_delta` callback at the `stream_deep` call
+        site — no new loop hook, no new SSE parser, `chord.rs` unmodified — and the publishing
+        closure is non-blocking, unable to stall or fail a turn for any channel
   - [ ] Feature-off build is byte-compatible; Matrix and CLI unaffected by an Aperture start failure
   - [ ] No hardcoded infrastructure values in new/modified code
   - [ ] All existing tests still pass
@@ -1250,7 +1298,8 @@ spec_id: S128-aperture-client
 ### APTR-28: CONTINUITY — adding Aperture must not reset memory, traits, or relationship lore
 - **Priority:** Critical
 - **Labels:** aperture, continuity, soul-contract, memory, engram
-- **Agent:** opus
+- **Agent:** claude
+- **Review:** high-assurance panel — widen the `review_run` provider list for this item; a shallow implementation here is expensive to discover later.
 - **Estimate:** 5h
 - **Blocked by:** APTR-26
 - **Description:** Soul Contract clause 4: **continuity survives every swap.** The assistant has

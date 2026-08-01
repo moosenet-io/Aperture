@@ -10,7 +10,7 @@ spec_id: S128-aperture-client
 - **Session:** S128
 - **Date:** 2026-08-01
 - **Module version:** Aperture v0.1.0
-- **Estimated total:** ~104h
+- **Estimated total:** ~125h (18 items, each ≤8h)
 - **North-Star layer:** shell — Gate 2 justified in `specs/S128-aperture-epic.md`
 - **Module-Contract:** this sprint *exercises* §4 clauses 1–6 rather than merely declaring them.
   Clause 1 (Terminus-fronted) is enforced by every data path here going through the BFF SDK;
@@ -929,7 +929,8 @@ spec_id: S128-aperture-client
 ### APTR-39: Malicious-upload hardening — sniffing, caps, traversal, zip bombs, SVG payloads
 - **Priority:** Critical
 - **Labels:** aperture, security, bff, attachments
-- **Agent:** opus
+- **Agent:** claude
+- **Review:** high-assurance panel — widen the `review_run` provider list for this item; a shallow implementation here is expensive to discover later.
 - **Estimate:** 8h
 - **Blocked by:** APTR-38
 - **Description:** The upload path is the largest untrusted-input surface Aperture has, and it
@@ -1376,7 +1377,8 @@ spec_id: S128-aperture-client
 ### APTR-44: Admin — users, invites, roles, and per-user workspace access
 - **Priority:** High
 - **Labels:** aperture, web, bff, admin, security
-- **Agent:** opus
+- **Agent:** claude
+- **Review:** high-assurance panel — widen the `review_run` provider list for this item; a shallow implementation here is expensive to discover later.
 - **Estimate:** 8h
 - **Blocked by:** APTR-31
 - **Description:** Aperture is the first surface that lets someone other than the operator use the
@@ -1451,14 +1453,15 @@ spec_id: S128-aperture-client
   - Bulk grant/revoke — per-item outcomes, rate-limited, audited individually
 
 - **Acceptance criteria:**
-  - [ ] Explicit role set with a contract-defined capability matrix; unknown roles fail closed
-  - [ ] Every admin route is independently authorized server-side, proven by contract-enumerated tests
+  - [ ] Explicit role set with a contract-defined capability matrix, unknown roles fail closed, and
+        every admin route is independently authorized server-side (proven by contract-enumerated tests)
   - [ ] Invites are single-use, expiring, hashed at rest, revocable, rate-limited, shown once
   - [ ] Workspace access defaults to none; revocation terminates in-flight streams immediately
   - [ ] Deactivation revokes all sessions/devices without destructive content cascade
   - [ ] Every admin action is audited with sanitized arguments and a correlation id
   - [ ] The last admin cannot be demoted or deactivated (enforced server-side)
   - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] All existing tests still pass
 
 ---
 
@@ -1538,11 +1541,12 @@ spec_id: S128-aperture-client
         by default, with a bounded opt-in
   - [ ] Focus is managed on route change, modal open/close, send, stop, and list deletion
   - [ ] Every interactive element in this sprint is keyboard-operable, including the drop zone
-  - [ ] Reduced motion honored from the media query and the explicit override
-  - [ ] No information conveyed by color alone; contrast passes in both themes
+  - [ ] Reduced motion honored from the media query and the explicit override; no information
+        conveyed by color alone and contrast passes in both themes
   - [ ] `a11y-check.mjs` runs in CI and fails the build on violations
   - [ ] No hardcoded infrastructure values in new/modified code
   - [ ] `docs/ACCESSIBILITY.md` documents the baseline and known manual-check areas
+  - [ ] All existing tests still pass
 
 ---
 
@@ -1551,8 +1555,11 @@ spec_id: S128-aperture-client
 - **Labels:** aperture, web, ux, reliability
 - **Agent:** claude
 - **Estimate:** 6h
-- **Blocked by:** APTR-44
-- **Description:** Close the sprint by making failure legible. Every surface built here gets a
+- **Blocked by:** APTR-33
+- **Description:** Close the sprint by making failure legible. The shared state vocabulary and the
+  completeness check land here, and this item is **sequenced last in the sprint** so the check runs
+  against every surface built above it — later-merging items retrofit their own states as part of
+  this item's PR rather than deferring them to Sprint G. Every surface built here gets a
   defined **empty**, **loading**, **error**, and **offline** state, drawn from one shared vocabulary
   so they feel like one product, and a mechanical check ensures a new surface cannot ship without
   them. A blank screen is a bug, and an unexplained spinner is a blank screen with extra steps.
@@ -1629,10 +1636,11 @@ spec_id: S128-aperture-client
         technical detail
   - [ ] Offline keeps the app navigable, preserves drafts, marks stale data, and auto-revalidates on
         reconnect
-  - [ ] Per-surface error boundaries prevent any whole-app blank screen
-  - [ ] Skeletons match final layout and respect reduced motion
+  - [ ] Per-surface error boundaries prevent any whole-app blank screen, and skeletons match final
+        layout while respecting reduced motion
   - [ ] No hardcoded infrastructure values in new/modified code
   - [ ] `docs/UX-STATES.md` documents the state vocabulary for later sprints
+  - [ ] All existing tests still pass
 
 ---
 

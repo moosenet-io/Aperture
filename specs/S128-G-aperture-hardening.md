@@ -154,7 +154,8 @@ spec_id: S128-aperture-client
 ### APTR-84: Threat model and security hardening for a client that renders untrusted output
 - **Priority:** Critical
 - **Labels:** aperture, security, threat-model, xss, csp
-- **Agent:** opus
+- **Agent:** claude
+- **Review:** high-assurance panel — widen the `review_run` provider list for this item; a shallow implementation here is expensive to discover later.
 - **Estimate:** 8h
 - **Description:** Aperture's core job is taking bytes it did not author — model output, tool
   results, uploaded documents, filenames, remote metadata — and painting them on a screen inside
@@ -601,11 +602,11 @@ spec_id: S128-aperture-client
 - **Acceptance criteria:**
   - [ ] Correlation id propagates client → BFF → kernel call and onto SSE events and error bodies
   - [ ] `healthz` and `readyz` have distinct semantics; kernel-down degrades readiness only
-  - [ ] Structured logs redact content, tokens, filenames, and internal addresses by construction
+  - [ ] Structured logs redact content, tokens, filenames, and internal addresses by construction;
+        client log export is local, bounded, and user-initiated
   - [ ] Metrics cover requests, streams, reconnects, sheds, uploads, capability state, and error
         URNs, with bounded cardinality
   - [ ] Zero external telemetry, analytics, or error-reporting egress; asserted in CI on the bundle
-  - [ ] Client log export is local, redacting, bounded, and user-initiated
   - [ ] No hardcoded infrastructure values in new/modified code
   - [ ] README updated to point at `docs/OBSERVABILITY.md`
   - [ ] All existing tests still pass
@@ -849,7 +850,8 @@ spec_id: S128-aperture-client
 ### APTR-92: Epic Review capstone — the royal panel over the whole repository
 - **Priority:** Critical
 - **Labels:** aperture, capstone, review, epic
-- **Agent:** opus
+- **Agent:** claude
+- **Review:** high-assurance panel — widen the `review_run` provider list for this item; a shallow implementation here is expensive to discover later.
 - **Estimate:** 4h
 - **Blocked by:** APTR-83, APTR-84, APTR-85, APTR-86, APTR-87, APTR-88, APTR-89, APTR-90, APTR-91
 - **Description:** The single review that looks at Aperture as a whole rather than as ninety

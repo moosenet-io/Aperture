@@ -9,7 +9,8 @@ spec_id: S128-aperture-client
 - **Session:** S128
 - **Date:** 2026-08-01
 - **Module version:** Aperture v0.1.0
-- **Estimated total:** ~64h
+- **Estimated total:** ~69h across 11 items (APTR-73..82 plus the out-of-sequence APTR-93 —
+  see the numbering note in Pre-flight)
 - **North-Star layer:** shell — mobile target of the single Aperture client codebase; Gate 2
   justified in `specs/S128-aperture-epic.md`
 - **Module-Contract:** meets §4 clauses 1–7. Clause 1 (Terminus-fronted) holds unchanged on
@@ -56,11 +57,18 @@ spec_id: S128-aperture-client
 - Baseline tests: the Sprint C suite, green
 - Baseline verify: the Sprint C behavior baseline
 
+**Numbering note — read before "fixing" anything.** This sprint contains **11 items**: APTR-73
+through APTR-82, plus **APTR-93**. APTR-93 is numerically out of sequence on purpose. It was
+split out of APTR-73 after Sprint G had already been allocated APTR-83..92, so the next free
+number was 93. **Numbering is an identifier, not an ordering.** APTR-93 is the *first* item that
+must merge in this sprint — APTR-73 is `Blocked by` it — and nobody should renumber, reorder, or
+"correct" it. Execution order is given by `Blocked by`, never by the number.
+
 **Grounding, for every item in this sprint:** run `kg_query` / `kg_search` for the entities
 touched and `kg_neighbors` / `kg_subgraph` for blast radius before writing code, and consult
-`kg_rules` for the scope. APTR-74, APTR-76, APTR-77 and APTR-79 additionally touch caching,
-durable client state, and push credentials — run `cortex_scope` pre-change on those four and
-record a `cortex_review` risk score in the PR body.
+`kg_rules` for the scope. APTR-74, APTR-76, APTR-77, APTR-79 and APTR-93 additionally touch
+caching, durable client state, push credentials, or live production code in another repository —
+run `cortex_scope` pre-change on those five and record a `cortex_review` risk score in the PR body.
 
 ---
 
@@ -69,13 +77,15 @@ record a `cortex_review` risk score in the PR body.
 - **Labels:** aperture, mobile, pwa, manifest
 - **Agent:** claude
 - **Estimate:** 6h
+- **Blocked by:** APTR-93
 - **Description:** Make Aperture genuinely installable from the same bundle web and desktop
   ship from. Author a complete web app manifest driven by the design tokens, produce the full
   icon matrix (including correctly-safe-zoned maskable icons), and implement install-prompt
-  handling that is *offered*, never nagged. The legacy server-rendered mobile page and its stub
-  manifest in the agent core are retired in the same change so there is exactly one manifest
-  and exactly one mobile surface — two manifests on one origin is a silent install-identity
-  bug that is miserable to diagnose later.
+  handling that is *offered*, never nagged. Retiring the legacy server-rendered mobile surface
+  and its stub manifest in the agent core is **not** part of this item — it is live production
+  code in another repository and is scoped as its own cross-repo item, **APTR-93**, which must
+  merge first. This item assumes that removal has already landed, so that the manifest authored
+  here is the only manifest on the origin.
 
   ## FILES
   - `client/public/manifest.webmanifest` — the single source of manifest truth
@@ -89,9 +99,6 @@ record a `cortex_review` risk score in the PR body.
   - `client/src/pwa/useInstallState.ts` — installed / installable / unsupported state hook
   - `client/index.html` — manifest link, theme-colour meta, viewport with `viewport-fit=cover`
   - `docs/INSTALL.md` — the mobile install section (fills the Sprint A placeholder)
-  - **Agent-core repo (sibling PR):** retire the legacy `pwa` module — remove the stub manifest,
-    the near-empty service worker, and the server-rendered dashboard route; keep any route that
-    something else still consumes behind a redirect to the Aperture shell
 
   ## APPROACH
   1. Emit the manifest from the design tokens at build time rather than hand-authoring it, so
@@ -136,8 +143,9 @@ record a `cortex_review` risk score in the PR body.
 
   ## EDGE CASES
   - Two manifests on one origin (the legacy agent-core stub plus this one) — install identity
-    becomes browser-dependent and updates stop applying. The sibling PR retiring the legacy
-    module is not optional cleanup; it is part of the fix.
+    becomes browser-dependent and updates stop applying. APTR-93 removes the legacy one and is a
+    hard prerequisite; if it has not merged, do not start this item, because the resulting bug is
+    intermittent, browser-specific, and will be misattributed to the manifest authored here.
   - Already-installed detection is unreliable across browsers — treat `display-mode: standalone`
     as the only trustworthy signal and degrade to "we're not sure" rather than asserting wrongly.
   - A user who installs, uninstalls, and reinstalls must land in their existing session with
@@ -153,7 +161,7 @@ record a `cortex_review` risk score in the PR body.
   - [ ] Full icon matrix present, including correctly safe-zoned maskable variants, verified mechanically
   - [ ] Install offer is dismissible and durably suppressed after dismissal; never auto-prompts
   - [ ] Promptless platforms get an honest manual-install explainer, not a dead control
-  - [ ] Legacy agent-core PWA stub retired; exactly one manifest is served on the origin
+  - [ ] Exactly one web app manifest is served on the origin (APTR-93 merged first; re-verified here)
   - [ ] No hardcoded infrastructure values in new/modified code
   - [ ] README and `docs/INSTALL.md` updated to document installation on each platform
   - [ ] All existing tests still pass
@@ -658,11 +666,15 @@ record a `cortex_review` risk score in the PR body.
   2. Quiet hours, opt-out, and the trait-scaled quota are honored **by construction**, because the
      decision happens upstream of push. Aperture does not re-implement, re-check, or override any
      of them — a duplicate policy implementation is a second policy that will drift.
-  3. **Keys by name only.** `APERTURE_VAPID_PUBLIC_KEY` and `APERTURE_VAPID_PRIVATE_KEY` are read
-     via `SecretManager::get()` in the BFF. The private key never leaves the BFF; the public key is
-     served to the client through an authenticated BFF endpoint at subscribe time — it is **not**
-     baked into the bundle, so rotation does not require a client rebuild. If either key is absent,
-     push reports capability `unavailable` with a clear reason and **no stopgap key is generated**.
+  3. **Keys by name only.** `APERTURE_VAPID_PUBLIC_KEY` and `APERTURE_VAPID_PRIVATE_KEY` are
+     resolved **exclusively** through `SecretManager::get()` in the BFF — never `std::env::var`,
+     never a literal, never a file. **The private key is used only inside the signing call: it can
+     never reach a response body, an error body, a log line, stdout, a metric label, or a debug
+     format.** The struct holding it carries a redacting `Debug`/`Display` impl and that redaction
+     is asserted by test. The public key is served to the client through an authenticated BFF
+     endpoint at subscribe time — it is **not** baked into the bundle, so rotation does not require
+     a client rebuild. If either key is absent, push reports capability `unavailable` with a clear
+     reason and **no stopgap key is generated**.
   4. **Permission UX that does not nag:** never request permission on load. Request only after an
      explicit user action in settings, or a single in-context offer at a moment where it is
      obviously relevant. Denial is durable and final — no re-prompt, and an honest explanation that
@@ -697,6 +709,9 @@ record a `cortex_review` risk score in the PR body.
   - Integration: `notificationclick` focuses an existing client and routes to the correct thread
   - `grep` confirms zero `std::env::var` reads of the VAPID key names; both go through `SecretManager`
   - `grep` confirms no VAPID key material and no push endpoint literal in the client bundle
+  - Unit: the private-key holder's debug/display renders a redaction marker, not the value
+  - **Negative:** force an error on the signing path and assert the private key appears in **no**
+    response body, error body, log line, or metric label emitted during the failure
   - Verify no hardcoded IPs, hostnames, org names, ports, or absolute paths in new/modified files
   - **Negative (the Soul Contract test):** attempt to dispatch a notification bypassing the presence
     budget — from a module, from the context bus, and from a client-callable route — and assert all
@@ -722,8 +737,8 @@ record a `cortex_review` risk score in the PR body.
   - [ ] Push has exactly one dispatch chokepoint, callable only by the presence decision path
   - [ ] No client-callable, module-callable, or context-bus-callable notification route exists
   - [ ] Quiet hours, opt-out, and the trait-scaled knock quota are honored by construction, with tests
-  - [ ] VAPID keys are read via the secret manager by name; the private key never leaves the BFF and
-        the public key is not baked into the bundle
+  - [ ] VAPID keys are resolved only via the secret manager by name; the private key never leaves the
+        BFF and cannot reach a response body, error body, or log line; the public key is not bundled
   - [ ] Missing key ⇒ capability `unavailable`; no stopgap key is ever generated
   - [ ] Permission is requested only after an explicit user action and never re-requested after denial;
         revocation is immediate and complete and stale subscriptions are pruned
