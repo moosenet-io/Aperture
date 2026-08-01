@@ -1,0 +1,4 @@
+{
+  "note": "Documented exceptions to the adherence lint's `color-literal` rule. This file is DATA: it can only say which of the code-owned allowlistable paths carries a literal and why. It cannot add a rule, cannot add a path, and cannot disable anything — see the PATH REGISTRY in scripts/adherence-lint.mjs. The list is currently empty on purpose: nothing in the client legitimately needs a raw colour yet. The exception that is anticipated is a syntax-highlighting theme, which is a list of colours by definition; when one lands, each of its literals gets an entry here with a reason. A stale entry fails the lint, so this file cannot rot.",
+  "entries": []
+}

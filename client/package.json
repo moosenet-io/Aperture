@@ -11,13 +11,14 @@
   "scripts": {
     "dev": "vite",
     "typecheck": "tsc --noEmit",
-    "build": "npm run assert-api-current && npm run assert-sdk-clean && tsc --noEmit && vite build && node scripts/assert-no-external-hosts.mjs",
+    "build": "npm run assert-api-current && npm run assert-sdk-clean && tsc --noEmit && node scripts/adherence-lint.mjs && vite build && node scripts/assert-no-external-hosts.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "gen:api": "node scripts/gen-api.mjs",
     "assert-api-current": "node scripts/assert-api-current.mjs",
     "assert-sdk-clean": "node scripts/assert-sdk-clean.mjs",
-    "assert-no-external-hosts": "node scripts/assert-no-external-hosts.mjs"
+    "assert-no-external-hosts": "node scripts/assert-no-external-hosts.mjs",
+    "lint:adherence": "node scripts/adherence-lint.mjs"
   },
   "dependencies": {
     "@fontsource/inter": "5.3.0",
@@ -30,7 +31,9 @@
     "@types/react": "18.3.31",
     "@types/react-dom": "18.3.7",
     "@vitejs/plugin-react": "4.7.0",
+    "jsdom": "25.0.1",
     "openapi-typescript": "7.13.0",
+    "postcss-value-parser": "4.2.0",
     "typescript": "5.6.3",
     "vite": "5.4.21",
     "vitest": "2.1.9",

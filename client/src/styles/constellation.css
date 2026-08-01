@@ -1,0 +1,652 @@
+/* ═══════════════════════════════════════════════════════════════════════════════════════════
+   Aperture — the constellation design system token layer (APTR-02)
+   ═══════════════════════════════════════════════════════════════════════════════════════════
+
+   THIS FILE IS THE ONLY PLACE IN THE CLIENT WHERE A COLOUR LITERAL MAY APPEAR.
+   `scripts/adherence-lint.mjs` enforces that mechanically: a hex, rgb(), hsl(), or CSS
+   named colour anywhere else in `src/` fails the build. There is no blanket disable — the
+   one sanctioned exception is the documented, path-restricted allowlist in
+   `scripts/color-allowlist.json`.
+
+   ── PROVENANCE ─────────────────────────────────────────────────────────────────────────────
+
+   The token set is ported from the constellation control plane's live design system
+   (`constellation-web/src/styles/globals.css`), which is itself the Terminus GUI Brand Guide
+   ("deep space violet" portal, v1.0) as amended by S127 TGUI2 POL-1. Aperture must be
+   VISUALLY CONTINUOUS with the rest of the fleet, so the live values are ported verbatim
+   rather than the brand guide's original ones.
+
+   Two deliberate differences from that source, both recorded here rather than left for a
+   reader to discover:
+
+     1. The fleet surface is dark-only. Aperture must support light and dark (APTR-02), so a
+        LIGHT semantic mapping is authored here. It is NOT a parallel palette: it reuses the
+        same violet ramp and the same flux hues, and only re-maps the SEMANTIC aliases
+        (surfaces, ink, lines) and darkens the flux hues that are used as text on a light
+        surface. Every ramp is shared.
+     2. `--text-accent` resolves to `--violet-300` in dark, not `--violet-400` as upstream.
+        violet-400 on `--bg-elevated` measures 4.46:1 and on `--surface-chip` 3.79:1 — both
+        below 4.5:1. violet-400 is still the glow/border/focus hue (`--accent-bright`), where
+        contrast-for-text does not apply. See `constellation.contrast.test.ts`.
+
+   Where the S127 POL-1 desaturation moved a value, the pre-POL-1 brand-guide value is kept in
+   a trailing comment exactly as upstream does, so the lineage stays legible.
+
+   ── THEMING ────────────────────────────────────────────────────────────────────────────────
+
+   Ramps are CONSTANTS. Only the semantic aliases are themed. Resolution order:
+
+     :root                                                    → dark (the fleet default)
+     @media (prefers-color-scheme: light) :root:not([data-theme='dark'])  → light
+     :root[data-theme='light']                                → light  (override beats media)
+     :root[data-theme='dark']                                 → dark   (override beats media)
+
+   The explicit `data-theme` override therefore wins in BOTH directions: `data-theme='dark'`
+   on a light-preferring OS, and `data-theme='light'` on a dark-preferring one. `src/theme.ts`
+   sets the attribute synchronously before the first React render.
+
+   The light mapping is necessarily written TWICE (a media query and a plain selector cannot
+   share a rule in plain CSS, and this project has no CSS preprocessor). That duplication is
+   not left to vigilance: `constellation.theme.test.ts` parses this file and fails if the two
+   light blocks do not declare an identical set of properties with identical values.
+   ═══════════════════════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* ── Surface ramp — neutral deep-dark (page → chip, darkest to lightest) ───────────────
+     S127 TGUI2 POL-1 / M1: desaturated ~65% off the brand guide's violet-tinted "deep space"
+     surfaces. Only a whisper of violet remains — the brand lives in the ACCENT and the node
+     dots, not in the ambient surface hue. */
+  --space-900: #0a0a0d; /* brand guide v1.0: #0D0B1A */
+  --space-800: #0f0f14; /* brand guide v1.0: #110E22 */
+  --space-700: #141419; /* brand guide v1.0: #161130 */
+  --space-600: #18181f; /* brand guide v1.0: #1A1333 */
+  --space-500: #1c1c24; /* brand guide v1.0: #221A40 */
+  --space-400: #26262f; /* brand guide v1.0: #2C2350 */
+
+  /* ── Light surface ramp — the same steps, inverted ────────────────────────────────────
+     Authored for Aperture (the fleet surface is dark-only). A whisper of the same violet,
+     so a light Aperture still reads as the same product. */
+  --paper-100: #ffffff;
+  --paper-200: #fbfafd;
+  --paper-300: #f5f3fa;
+  --paper-400: #efecf7;
+  --paper-500: #e9e5f3;
+  --paper-600: #ddd8ec;
+
+  /* ── Brand accent — the violet ramp (shared by both themes) ───────────────────────── */
+  --violet-700: #5b21b6;
+  --violet-600: #6d28d9;
+  --violet-500: #7c3aed;
+  --violet-400: #a855f7;
+  --violet-300: #c4a5fb;
+  --violet-200: #ddc9fd;
+
+  /* ── Functional ("flux") hues — SEMANTIC, never decorative ────────────────────────────
+     Direction and meaning, never ornament: blue = inbound/source, green = outbound/endpoint/
+     free, amber = cloud/gated/cost, rose = alert/hot. Never pick one because it looks nice. */
+  --flux-blue: #3b82f6;
+  --flux-blue-soft: #60a5fa;
+  --flux-blue-deep: #1e40af; /* light-theme text weight */
+  --flux-green: #10b981;
+  --flux-green-soft: #34d399;
+  --flux-green-deep: #065f46; /* light-theme text weight */
+  --flux-amber: #f59e0b;
+  --flux-amber-deep: #92400e; /* light-theme text weight */
+  --flux-rose: #f43f5e;
+  --flux-rose-soft: #fb7185;
+  --flux-rose-deep: #9f1239; /* light-theme text weight */
+
+  /* ── Ink ramps ───────────────────────────────────────────────────────────────────── */
+  --ink-dark-100: #f4f2fb;
+  --ink-dark-200: #c7c3d6;
+  --ink-dark-300: #9ca3af;
+  --ink-dark-400: #6b7280;
+  --ink-dark-500: #4b5563;
+  --ink-dark-600: #374151;
+  --ink-light-100: #17131f;
+  --ink-light-200: #3a3450;
+  --ink-light-300: #5b5470;
+  --ink-light-400: #6b6480;
+  --ink-light-500: #8a8399;
+  --ink-light-600: #a49db3;
+
+  /* ── Type ─ Inter for UI, JetBrains Mono for code/telemetry/tracked labels ────────────
+     Both are BUNDLED via @fontsource (see src/main.tsx). No font is ever fetched. */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --fs-display: 68px;
+  --fs-h1: 44px;
+  --fs-h2: 32px;
+  --fs-h3: 24px;
+  --fs-h4: 19px;
+  --fs-body-lg: 17px;
+  --fs-body: 15px;
+  --fs-sm: 13px;
+  --fs-xs: 11px;
+  --fs-mono: 13px;
+  --fs-mono-sm: 11px;
+  --fs-label: 11px;
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+  --fw-bold: 700;
+  --lh-tight: 1.1;
+  --lh-heading: 1.2;
+  --lh-body: 1.6;
+  --ls-display: 0.04em; /* wordmark / display tracking */
+  --ls-label: 0.18em; /* tracked uppercase mono label */
+  --ls-mono: 0.02em;
+
+  /* ── Space / radius / measure ─────────────────────────────────────────────────────── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+  --space-9: 96px;
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-pill: 999px; /* badges and status pills ONLY — never a card or a panel */
+  --maxw-prose: 68ch;
+  --content-max: 1280px;
+  --content-max-wide: 2200px;
+  --border-width: 1px;
+
+  /* ── Control geometry ─────────────────────────────────────────────────────────────────
+     The design system's own button / badge / table / input metrics. These sit OFF the 4px
+     spacing rhythm on purpose — they are optical control paddings from the component specs,
+     where the eye wants slightly less vertical padding than the grid would give. They are
+     tokens rather than literals in the primitives layer so a retheme can move them in one
+     place, and so that layer is genuinely token-based rather than nearly so. */
+  --ctl-pad-y-sm: 6px;
+  --ctl-pad-x-sm: 12px;
+  --ctl-gap-sm: 6px;
+  --ctl-pad-y-md: 9px;
+  --ctl-pad-x-md: 18px;
+  --ctl-gap-md: var(--space-2);
+  --ctl-pad-y-lg: 13px;
+  --ctl-pad-x-lg: 24px;
+  --ctl-gap-lg: 10px;
+  --badge-pad-y: 3px;
+  --badge-pad-x: 10px;
+  --badge-gap: 6px;
+  --cell-pad-y: 7px;
+  --cell-pad-x: 10px;
+  --focus-ring-width: 2px;
+  /* Badge type metrics: a tighter line box than body text, and the faint tracking that keeps
+     a short label from looking cramped inside a pill. */
+  --lh-badge: 1.3;
+  --ls-badge: 0.01em;
+  --ls-badge-mono: 0.04em;
+
+  /* ── Motion ──────────────────────────────────────────────────────────────────────── */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-fast: 140ms;
+  --dur-base: 240ms;
+  --dur-slow: 600ms;
+  --dur-flow: 3.2s;
+
+  /* ═══ SEMANTIC MAPPING — DARK (the default) ═══════════════════════════════════════ */
+  color-scheme: dark;
+
+  --bg-page: var(--space-900);
+  --bg-panel: var(--space-700);
+  --bg-elevated: var(--space-600);
+  --bg-hover: var(--space-500);
+  --surface-card: var(--space-700);
+  --surface-chip: var(--space-400);
+  --surface-inset: var(--space-800);
+  --grad-space: linear-gradient(135deg, var(--space-900) 0%, var(--space-600) 100%);
+  --grad-card: linear-gradient(180deg, var(--space-600), var(--space-700));
+
+  --accent: var(--violet-500);
+  --accent-bright: var(--violet-400);
+  --accent-on: #ffffff;
+  --accent-soft: rgba(124, 58, 237, 0.14);
+  --grad-accent: linear-gradient(135deg, var(--violet-500) 0%, rgba(124, 58, 237, 0.6) 100%);
+
+  --text-heading: var(--ink-dark-100);
+  --text-body: var(--ink-dark-200);
+  --text-muted: var(--ink-dark-300);
+  /* NOT a body-text token, in EITHER theme. It falls below 4.5:1 against at least one
+     surface it may sit on (4.09:1 on dark --bg-page), so it is de-emphasised metadata beside
+     an already-labelled value and never the only carrier of a meaning. It is excluded from the
+     contrast suite by that rule, not by convenience — see token-layer.test.mjs. */
+  --text-faint: var(--ink-dark-400);
+  /* Disabled affordances only, where WCAG 1.4.3 does not apply. */
+  --text-disabled: var(--ink-dark-500);
+  --text-accent: var(--violet-300); /* see PROVENANCE note 2 */
+  --text-on-accent: var(--accent-on);
+
+  /* Lines — neutral white-alpha hairlines; violet is reserved for the ACTIVE edge.
+     S127 TGUI2 POL-1 / M2. Brand guide v1.0 used violet hairlines throughout
+     (rgba(168,85,247,0.14 / 0.22 / 0.40)); --line-accent keeps that value. */
+  --line-soft: rgba(255, 255, 255, 0.06);
+  --line-default: rgba(255, 255, 255, 0.09);
+  --line-strong: rgba(255, 255, 255, 0.14);
+  --line-accent: rgba(168, 85, 247, 0.4);
+  --border: var(--line-default);
+  --border-strong: var(--line-strong);
+
+  --status-success: var(--flux-green);
+  --status-warning: var(--flux-amber);
+  --status-error: var(--flux-rose);
+  --status-info: var(--flux-blue);
+  /* Foreground weights for text ON a tinted badge surface. */
+  --on-success: var(--flux-green-soft);
+  --on-warning: var(--flux-amber);
+  --on-error: var(--flux-rose-soft);
+  --on-info: var(--flux-blue-soft);
+  --on-accent-tint: var(--violet-300);
+
+  /* Semantic direction — the flux hues by MEANING, so a call site names the meaning. */
+  --node-source: var(--flux-blue);
+  --node-core: var(--violet-500);
+  --node-endpoint: var(--flux-green);
+  --node-cloud: var(--flux-amber);
+  --cost-free: var(--flux-green);
+  --cost-paid: var(--flux-amber);
+
+  /* Tinted fills for badges and selected surfaces. */
+  --tint-accent: rgba(168, 85, 247, 0.14);
+  --tint-accent-line: rgba(168, 85, 247, 0.32);
+  --tint-success: rgba(16, 185, 129, 0.14);
+  --tint-success-line: rgba(16, 185, 129, 0.32);
+  --tint-warning: rgba(245, 158, 11, 0.14);
+  --tint-warning-line: rgba(245, 158, 11, 0.34);
+  --tint-error: rgba(244, 63, 94, 0.14);
+  --tint-error-line: rgba(244, 63, 94, 0.34);
+  --tint-info: rgba(59, 130, 246, 0.14);
+  --tint-info-line: rgba(59, 130, 246, 0.32);
+  --tint-neutral: rgba(255, 255, 255, 0.05);
+
+  /* Elevation. GLOW is the elevation system: a drop shadow says "floating above a page",
+     a glow says "lit from within", which is the constellation's language. The shadows below
+     are the quiet substrate; the glow is the emphasis, and it is an INTERACTION signal
+     (hover / active / primary / focus), never ambient decoration. */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.55);
+  --glow-violet: 0 0 16px rgba(124, 58, 237, 0.28);
+  --glow-violet-soft: 0 0 8px rgba(168, 85, 247, 0.2);
+  --glow-blue: 0 0 18px rgba(59, 130, 246, 0.45);
+  --glow-green: 0 0 18px rgba(16, 185, 129, 0.45);
+  --glow-amber: 0 0 18px rgba(245, 158, 11, 0.45);
+  --glow-rose: 0 0 18px rgba(244, 63, 94, 0.45);
+  --inset-hi: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+
+  --focus-ring-color: var(--violet-400);
+  --focus-ring: var(--focus-ring-width) solid var(--focus-ring-color);
+  --focus-ring-offset: 2px;
+
+  --overlay-scrim: rgba(10, 10, 13, 0.72);
+  --selection-bg: rgba(124, 58, 237, 0.32);
+}
+
+/* ═══ SEMANTIC MAPPING — LIGHT, from the media query ═════════════════════════════════════
+   `:not([data-theme='dark'])` is what lets an explicit dark override beat a light OS
+   preference. Kept byte-identical to the `[data-theme='light']` block below, mechanically. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    color-scheme: light;
+
+    --bg-page: var(--paper-200);
+    --bg-panel: var(--paper-100);
+    --bg-elevated: var(--paper-300);
+    --bg-hover: var(--paper-400);
+    --surface-card: var(--paper-100);
+    --surface-chip: var(--paper-500);
+    --surface-inset: var(--paper-300);
+    --grad-space: linear-gradient(135deg, var(--paper-200) 0%, var(--paper-400) 100%);
+    --grad-card: linear-gradient(180deg, var(--paper-100), var(--paper-300));
+
+    --accent: var(--violet-600);
+    --accent-bright: var(--violet-500);
+    --accent-on: #ffffff;
+    --accent-soft: rgba(109, 40, 217, 0.1);
+    --grad-accent: linear-gradient(135deg, var(--violet-600) 0%, var(--violet-500) 100%);
+
+    --text-heading: var(--ink-light-100);
+    --text-body: var(--ink-light-200);
+    --text-muted: var(--ink-light-300);
+    --text-faint: var(--ink-light-400);
+    --text-disabled: var(--ink-light-500);
+    --text-accent: var(--violet-700);
+    --text-on-accent: var(--accent-on);
+
+    --line-soft: rgba(23, 19, 31, 0.08);
+    --line-default: rgba(23, 19, 31, 0.12);
+    --line-strong: rgba(23, 19, 31, 0.2);
+    --line-accent: rgba(109, 40, 217, 0.55);
+    --border: var(--line-default);
+    --border-strong: var(--line-strong);
+
+    --status-success: var(--flux-green-deep);
+    --status-warning: var(--flux-amber-deep);
+    --status-error: var(--flux-rose-deep);
+    --status-info: var(--flux-blue-deep);
+    --on-success: var(--flux-green-deep);
+    --on-warning: var(--flux-amber-deep);
+    --on-error: var(--flux-rose-deep);
+    --on-info: var(--flux-blue-deep);
+    --on-accent-tint: var(--violet-700);
+
+    --node-source: var(--flux-blue-deep);
+    --node-core: var(--violet-600);
+    --node-endpoint: var(--flux-green-deep);
+    --node-cloud: var(--flux-amber-deep);
+    --cost-free: var(--flux-green-deep);
+    --cost-paid: var(--flux-amber-deep);
+
+    --tint-accent: rgba(109, 40, 217, 0.1);
+    --tint-accent-line: rgba(109, 40, 217, 0.28);
+    --tint-success: rgba(6, 95, 70, 0.1);
+    --tint-success-line: rgba(6, 95, 70, 0.28);
+    --tint-warning: rgba(146, 64, 14, 0.1);
+    --tint-warning-line: rgba(146, 64, 14, 0.28);
+    --tint-error: rgba(159, 18, 57, 0.1);
+    --tint-error-line: rgba(159, 18, 57, 0.28);
+    --tint-info: rgba(30, 64, 175, 0.1);
+    --tint-info-line: rgba(30, 64, 175, 0.28);
+    --tint-neutral: rgba(23, 19, 31, 0.05);
+
+    --shadow-sm: 0 1px 2px rgba(23, 19, 31, 0.08);
+    --shadow-md: 0 8px 24px rgba(23, 19, 31, 0.1);
+    --shadow-lg: 0 20px 60px rgba(23, 19, 31, 0.14);
+    --glow-violet: 0 0 16px rgba(109, 40, 217, 0.22);
+    --glow-violet-soft: 0 0 8px rgba(109, 40, 217, 0.16);
+    --glow-blue: 0 0 18px rgba(30, 64, 175, 0.28);
+    --glow-green: 0 0 18px rgba(6, 95, 70, 0.28);
+    --glow-amber: 0 0 18px rgba(146, 64, 14, 0.28);
+    --glow-rose: 0 0 18px rgba(159, 18, 57, 0.28);
+    --inset-hi: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+
+    --focus-ring-color: var(--violet-600);
+    --focus-ring: var(--focus-ring-width) solid var(--focus-ring-color);
+    --focus-ring-offset: 2px;
+
+    --overlay-scrim: rgba(23, 19, 31, 0.42);
+    --selection-bg: rgba(109, 40, 217, 0.22);
+  }
+}
+
+/* ═══ SEMANTIC MAPPING — LIGHT, from the explicit override ═══════════════════════════════
+   Higher specificity than the `:root` dark block, so this wins on a dark-preferring OS. */
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --bg-page: var(--paper-200);
+  --bg-panel: var(--paper-100);
+  --bg-elevated: var(--paper-300);
+  --bg-hover: var(--paper-400);
+  --surface-card: var(--paper-100);
+  --surface-chip: var(--paper-500);
+  --surface-inset: var(--paper-300);
+  --grad-space: linear-gradient(135deg, var(--paper-200) 0%, var(--paper-400) 100%);
+  --grad-card: linear-gradient(180deg, var(--paper-100), var(--paper-300));
+
+  --accent: var(--violet-600);
+  --accent-bright: var(--violet-500);
+  --accent-on: #ffffff;
+  --accent-soft: rgba(109, 40, 217, 0.1);
+  --grad-accent: linear-gradient(135deg, var(--violet-600) 0%, var(--violet-500) 100%);
+
+  --text-heading: var(--ink-light-100);
+  --text-body: var(--ink-light-200);
+  --text-muted: var(--ink-light-300);
+  --text-faint: var(--ink-light-400);
+  --text-disabled: var(--ink-light-500);
+  --text-accent: var(--violet-700);
+  --text-on-accent: var(--accent-on);
+
+  --line-soft: rgba(23, 19, 31, 0.08);
+  --line-default: rgba(23, 19, 31, 0.12);
+  --line-strong: rgba(23, 19, 31, 0.2);
+  --line-accent: rgba(109, 40, 217, 0.55);
+  --border: var(--line-default);
+  --border-strong: var(--line-strong);
+
+  --status-success: var(--flux-green-deep);
+  --status-warning: var(--flux-amber-deep);
+  --status-error: var(--flux-rose-deep);
+  --status-info: var(--flux-blue-deep);
+  --on-success: var(--flux-green-deep);
+  --on-warning: var(--flux-amber-deep);
+  --on-error: var(--flux-rose-deep);
+  --on-info: var(--flux-blue-deep);
+  --on-accent-tint: var(--violet-700);
+
+  --node-source: var(--flux-blue-deep);
+  --node-core: var(--violet-600);
+  --node-endpoint: var(--flux-green-deep);
+  --node-cloud: var(--flux-amber-deep);
+  --cost-free: var(--flux-green-deep);
+  --cost-paid: var(--flux-amber-deep);
+
+  --tint-accent: rgba(109, 40, 217, 0.1);
+  --tint-accent-line: rgba(109, 40, 217, 0.28);
+  --tint-success: rgba(6, 95, 70, 0.1);
+  --tint-success-line: rgba(6, 95, 70, 0.28);
+  --tint-warning: rgba(146, 64, 14, 0.1);
+  --tint-warning-line: rgba(146, 64, 14, 0.28);
+  --tint-error: rgba(159, 18, 57, 0.1);
+  --tint-error-line: rgba(159, 18, 57, 0.28);
+  --tint-info: rgba(30, 64, 175, 0.1);
+  --tint-info-line: rgba(30, 64, 175, 0.28);
+  --tint-neutral: rgba(23, 19, 31, 0.05);
+
+  --shadow-sm: 0 1px 2px rgba(23, 19, 31, 0.08);
+  --shadow-md: 0 8px 24px rgba(23, 19, 31, 0.1);
+  --shadow-lg: 0 20px 60px rgba(23, 19, 31, 0.14);
+  --glow-violet: 0 0 16px rgba(109, 40, 217, 0.22);
+  --glow-violet-soft: 0 0 8px rgba(109, 40, 217, 0.16);
+  --glow-blue: 0 0 18px rgba(30, 64, 175, 0.28);
+  --glow-green: 0 0 18px rgba(6, 95, 70, 0.28);
+  --glow-amber: 0 0 18px rgba(146, 64, 14, 0.28);
+  --glow-rose: 0 0 18px rgba(159, 18, 57, 0.28);
+  --inset-hi: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+
+  --focus-ring-color: var(--violet-600);
+  --focus-ring: var(--focus-ring-width) solid var(--focus-ring-color);
+  --focus-ring-offset: 2px;
+
+  --overlay-scrim: rgba(23, 19, 31, 0.42);
+  --selection-bg: rgba(109, 40, 217, 0.22);
+}
+
+/* ═══ SEMANTIC MAPPING — DARK, from the explicit override ════════════════════════════════
+   Only the properties the light blocks change need restating. Higher specificity than the
+   `:root:not([data-theme='dark'])` media block above — which is belt-and-braces, since the
+   `:not()` already excludes this case — so an explicit dark choice wins on a light OS. */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --bg-page: var(--space-900);
+  --bg-panel: var(--space-700);
+  --bg-elevated: var(--space-600);
+  --bg-hover: var(--space-500);
+  --surface-card: var(--space-700);
+  --surface-chip: var(--space-400);
+  --surface-inset: var(--space-800);
+  --grad-space: linear-gradient(135deg, var(--space-900) 0%, var(--space-600) 100%);
+  --grad-card: linear-gradient(180deg, var(--space-600), var(--space-700));
+
+  --accent: var(--violet-500);
+  --accent-bright: var(--violet-400);
+  --accent-on: #ffffff;
+  --accent-soft: rgba(124, 58, 237, 0.14);
+  --grad-accent: linear-gradient(135deg, var(--violet-500) 0%, rgba(124, 58, 237, 0.6) 100%);
+
+  --text-heading: var(--ink-dark-100);
+  --text-body: var(--ink-dark-200);
+  --text-muted: var(--ink-dark-300);
+  --text-faint: var(--ink-dark-400);
+  --text-disabled: var(--ink-dark-500);
+  --text-accent: var(--violet-300);
+  --text-on-accent: var(--accent-on);
+
+  --line-soft: rgba(255, 255, 255, 0.06);
+  --line-default: rgba(255, 255, 255, 0.09);
+  --line-strong: rgba(255, 255, 255, 0.14);
+  --line-accent: rgba(168, 85, 247, 0.4);
+  --border: var(--line-default);
+  --border-strong: var(--line-strong);
+
+  --status-success: var(--flux-green);
+  --status-warning: var(--flux-amber);
+  --status-error: var(--flux-rose);
+  --status-info: var(--flux-blue);
+  --on-success: var(--flux-green-soft);
+  --on-warning: var(--flux-amber);
+  --on-error: var(--flux-rose-soft);
+  --on-info: var(--flux-blue-soft);
+  --on-accent-tint: var(--violet-300);
+
+  --node-source: var(--flux-blue);
+  --node-core: var(--violet-500);
+  --node-endpoint: var(--flux-green);
+  --node-cloud: var(--flux-amber);
+  --cost-free: var(--flux-green);
+  --cost-paid: var(--flux-amber);
+
+  --tint-accent: rgba(168, 85, 247, 0.14);
+  --tint-accent-line: rgba(168, 85, 247, 0.32);
+  --tint-success: rgba(16, 185, 129, 0.14);
+  --tint-success-line: rgba(16, 185, 129, 0.32);
+  --tint-warning: rgba(245, 158, 11, 0.14);
+  --tint-warning-line: rgba(245, 158, 11, 0.34);
+  --tint-error: rgba(244, 63, 94, 0.14);
+  --tint-error-line: rgba(244, 63, 94, 0.34);
+  --tint-info: rgba(59, 130, 246, 0.14);
+  --tint-info-line: rgba(59, 130, 246, 0.32);
+  --tint-neutral: rgba(255, 255, 255, 0.05);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.55);
+  --glow-violet: 0 0 16px rgba(124, 58, 237, 0.28);
+  --glow-violet-soft: 0 0 8px rgba(168, 85, 247, 0.2);
+  --glow-blue: 0 0 18px rgba(59, 130, 246, 0.45);
+  --glow-green: 0 0 18px rgba(16, 185, 129, 0.45);
+  --glow-amber: 0 0 18px rgba(245, 158, 11, 0.45);
+  --glow-rose: 0 0 18px rgba(244, 63, 94, 0.45);
+  --inset-hi: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+
+  --focus-ring-color: var(--violet-400);
+  --focus-ring: var(--focus-ring-width) solid var(--focus-ring-color);
+  --focus-ring-offset: 2px;
+
+  --overlay-scrim: rgba(10, 10, 13, 0.72);
+  --selection-bg: rgba(124, 58, 237, 0.32);
+}
+
+/* ═══ DOCUMENT BASE ══════════════════════════════════════════════════════════════════════ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg-page);
+  color: var(--text-body);
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  margin: 0;
+  color: var(--text-heading);
+  font-weight: var(--fw-semibold);
+  line-height: var(--lh-heading);
+}
+
+code,
+pre,
+kbd,
+samp {
+  font-family: var(--font-mono);
+  font-size: var(--fs-mono);
+  letter-spacing: var(--ls-mono);
+}
+
+a {
+  color: var(--text-accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+::selection {
+  background: var(--selection-bg);
+}
+
+/* The global focus-visible treatment. Every interactive primitive inherits it; the
+   primitives layer only overrides it where the component needs the ring inset. */
+:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* ═══ prefers-reduced-motion ═════════════════════════════════════════════════════════════
+   Declared in the token layer per APTR-02; APTR-107 gates it mechanically.
+   Continuous/looping animation is disabled outright. One-shot transitions collapse to ~1ms
+   rather than 0 so a `transitionend` listener still fires and no state machine stalls.
+   NOTE: SVG SMIL (<animate>) is not a CSS animation and cannot be reached from here — any
+   SMIL loop must be withheld in render code from a reduced-motion hook. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ═══ forced-colors ══════════════════════════════════════════════════════════════════════
+   Under a forced-colours mode the user's own palette is authoritative and this design system
+   steps aside. Two rules make that real:
+
+     1. `forced-color-adjust: none` NEVER appears in this client. That property is the only
+        way to defeat forced colours, and the adherence lint rejects it outright — a token
+        fallback cannot smuggle a brand colour back in through it.
+     2. Decoration that carries meaning ONLY through colour (glow, gradient, tinted fill,
+        drop shadow) is removed here, and structure is restated in SYSTEM colour keywords, so
+        borders and focus rings survive as the user's own high-contrast colours. */
+@media (forced-colors: active) {
+  *,
+  *::before,
+  *::after {
+    box-shadow: none !important;
+    text-shadow: none !important;
+  }
+
+  :focus-visible {
+    outline: var(--focus-ring-width) solid Highlight;
+    outline-offset: var(--focus-ring-offset);
+  }
+}

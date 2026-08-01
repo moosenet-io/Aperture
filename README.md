@@ -123,11 +123,12 @@ Tailwind: styling is the shared constellation token layer (see **Design system**
 |---|---|
 | `npm --prefix client run dev` | Vite dev server |
 | `npm --prefix client run typecheck` | `tsc --noEmit` under `strict` |
-| `npm --prefix client run build` | the drift gate → the SDK static gate → `tsc --noEmit` → `vite build` → the egress lint. Any of them failing fails the build |
+| `npm --prefix client run build` | the drift gate → the SDK static gate → `tsc --noEmit` → the adherence lint → `vite build` → the egress lint. Any of them failing fails the build |
 | `npm --prefix client run test` | vitest |
 | `npm --prefix client run gen:api` | regenerate the typed SDK from `contracts/aperture-api-v1.yaml` |
 | `npm --prefix client run assert-api-current` | the contract-drift gate — regenerate and diff |
 | `npm --prefix client run assert-sdk-clean` | the SDK static gate — no absolute URL, no default endpoint, one request site |
+| `npm --prefix client run lint:adherence` | the design-system adherence lint, over the source tree |
 | `npm --prefix client run assert-no-external-hosts` | the egress lint, against an existing `client/dist` |
 
 Fonts are **bundled**, not fetched: the `@fontsource/*` packages emit the woff2 files into the
@@ -317,12 +318,213 @@ rule that matches nothing fails the build rather than rotting silently.
 
 ## Design system
 
-Aperture uses the shared constellation design system: token-based CSS custom properties, a
-deep-space violet palette, glow as the elevation system, and the node-dot iconography
-language. **There is no Tailwind and no parallel palette.** An adherence lint fails the build
-on inline styles, hardcoded colour literals, and stray style blocks. The token layer, the
-primitives, and that lint (`lint:adherence`) arrive with the design-system import; the
-scaffold ships only a colour-free base layer so the two cannot collide.
+Aperture uses the shared constellation design system — the same token-based CSS custom
+properties as the fleet's other web surfaces, so Aperture looks like part of the same product
+rather than a cousin of it. **There is no Tailwind and no parallel palette.**
+
+The rules, in the order they bite:
+
+1. **Colour, type, spacing, radius, elevation and motion come from tokens.**
+   `client/src/styles/constellation.css` is the token layer and **the only file in the client
+   where a colour literal or a font stack may appear.** Everything else says `var(--…)`.
+2. **Compose the primitives, not class strings.** `client/src/components/primitives/` wraps
+   `.card`, `.btn-*`, `.badge-*`, `.table`, `.input` and the tracked label as typed React
+   components. Their props omit `style` and `dangerouslySetInnerHTML`, so the direct case
+   (`<Card style={…} />`) is a **type error** before it is a lint error — but a JSX *spread* is
+   checked for assignability only, with no excess-property check, so `<Card {...propsBag} />`
+   slips both past the type checker whenever the bag shares any other prop. Every wrapper
+   therefore also strips the two keys **at runtime** before spreading onto the DOM. The type
+   layer is the fast, in-editor half of the guarantee; the runtime strip is what makes it hold.
+3. **Colour is semantic, never decorative.** Blue is inbound/source, green is
+   outbound/endpoint/free, amber is cloud/gated/cost, rose is alert/hot, violet is the core.
+   Badge and status variants are therefore named `success` / `warning` / `error` / `info` /
+   `accent` — never `green` / `amber` / `rose` / `blue`. If you want a colour because it looks
+   nice, that is the signal to stop.
+4. **Glow is the elevation system.** A drop shadow says "floating above a page"; a glow says
+   "lit from within". Glow is an interaction signal — hover, focus, active, primary — never
+   ambient decoration.
+5. **Pill radius belongs to badges and status pills.** Cards and panels use `--radius-lg`.
+6. **Inter for UI, JetBrains Mono for code, telemetry, and tracked uppercase labels.** Both are
+   bundled; neither is ever fetched.
+
+### Light and dark
+
+Dark is the base. Light comes from `prefers-color-scheme`, and an explicit `data-theme`
+attribute on the root element overrides the media query **in both directions** — an explicit
+dark choice wins on a light-preferring OS and vice versa. `client/src/theme.ts` owns that
+attribute and writes it before the first render, so no content paints under the wrong theme;
+the residual gap before the entry module executes is documented in that file rather than
+glossed over. Choosing "system" removes the attribute rather than freezing today's answer, so
+a later OS change still reaches the user.
+
+`prefers-reduced-motion` and `forced-colors` behaviour are declared in the token layer.
+`forced-color-adjust: none` — the one property that can defeat a user's own palette — is
+rejected outright by the lint, in every file including the token layer. Structural hairlines are
+**neutral in both themes**; violet is reserved for the active/accent edge, which is the live
+system's rule and applies to the authored light theme exactly as it does to the ported dark one.
+Where a component replaces the focus outline with a glow, a test asserts it restores a real
+outline under forced colours, since glow is stripped there.
+
+### The adherence lint
+
+`client/scripts/adherence-lint.mjs` runs on every build, over the **source** tree, and fails on:
+
+- a `style` attribute in TSX (`style={{…}}` and `style="…"` alike) or in HTML/SVG;
+- a `<style>` element — as JSX, as markup, or via `createElement('style')`;
+- a hex, `rgb()`, `hsl()`, `hwb()`, `lab()`, `oklch()` or `color()` literal — and, in CSS and
+  markup, a CSS **named** colour — anywhere outside the token layer;
+- a font-family literal outside the token layer, **including one hidden in a custom property**;
+- a raw `px` dimension outside the token layer — in a declaration **or in an at-rule's params**,
+  matched case-insensitively — unless it carries an inline `/* dimension-literal: … */` reason.
+  Control geometry lives in the token layer with the rest of the design system's constants, and
+  a genuinely optical value (or a breakpoint, which cannot be a token because `var()` does not
+  resolve inside a media condition) has to say so where it sits;
+- **malformed CSS** — an unknown at-rule, an at-rule sitting where a declaration belongs, an
+  at-rule with no block outside the small blockless allowlist, or a property name that is not a
+  valid ident;
+- `el.style.x = …`, `style.setProperty(…)`, `cssText = …`, `setAttribute('style', …)` and
+  `dangerouslySetInnerHTML` — the JavaScript routes to the same holes;
+- `forced-color-adjust: none`.
+
+TypeScript is parsed by the TypeScript compiler and CSS by postcss — both already in the tree —
+so comments, string boundaries and regex literals are correct **by construction** rather than by
+a stripping pass. It **fails closed**: a file that will not parse, a file whose extension has no
+registered parser, a missing scan target, a scan that matched nothing, and a malformed allowlist
+are all errors. An unparseable file is not evidence of compliance.
+
+**"postcss parsed it" is much weaker than "it is valid CSS", and that is not theoretical.**
+`.x { @@@ display: flex; … }` shipped on this branch and passed a green build: postcss read
+`@@` as an at-rule *name* with `display: flex` as its *params*, so there was no parse error and
+the fail-closed path was never engaged — and the swallowed declaration was never walked as a
+declaration. Measured cost of a swallow: the font, dimension and forced-colours rules all walk
+declarations. Measured after at-rule params gained a px scan: the colour and dimension rules
+survive a swallow, because params are scanned for both; the font and forced-colours rules still
+go blind. `malformed-css` reports the *shape* regardless of what was swallowed, which is why it
+is the rule that matters here. It does **not** make this a CSS validator — a well-formed but
+wrong declaration (`color: notacolour`) still passes.
+
+**Its registries are allowlists, on purpose.** An earlier revision listed the at-rules that
+*require* a block; `@property` and `@viewport` were not on it and walked straight through,
+swallowing declarations exactly as `@@@` did. Extending that list would have fixed two cases and
+left the next at-rule CSS gains to re-open the hole silently. So the check is inverted: inside a
+style rule a declaration is expected and an at-rule is the anomaly, so only `@media`, `@supports`
+and `@container` may nest, and only `@charset`, `@import`, `@namespace` and `@layer` may be
+blockless. Anything else — including an at-rule that does not exist yet, and including real CSS
+like a nested `@starting-style` — fails. That is a false positive a reviewer resolves with a
+source change, which is the right trade for a rule whose whole purpose is catching what nobody
+anticipated. **Enumeration was the failure mode three times in this item; where a check can be
+inverted so the unanticipated case fails rather than passes, it is.**
+
+**What it cannot do**, stated plainly so a green run is not mistaken for a proof:
+
+- a colour **assembled at runtime** — string concatenation, a template substitution, character
+  codes, fetched data — is invisible to it. The static text of a template literal *is* scanned;
+  its substitutions are not.
+- the dimension rule covers **`px` only**. `rem`, `em`, `%`, `ch`, `vh`, `fr` and unitless
+  numbers are not checked: the design system's scale is expressed in px, and a rule over every
+  unit would fire on `100%`, `1fr` and `line-height: 1.3` — noise that gets a rule switched off.
+  It matches the CSS Syntax L3 `<number-token>` grammar, so exponent forms (`1e3px`) and case
+  variants (`7PX`) are caught; a **CSS escape in the unit** (`7p\78`) and a px value *computed*
+  by `calc()` from non-px operands are not, and are documented as non-goals in the script.
+- a colour reaching the DOM through a **CSS custom property set at runtime** is not detected as
+  a colour. The routes by which this app's own code could set one are closed by the
+  programmatic-style rule, but a value handed to a third-party component's colour prop is not
+  seen. (There is no such dependency today.)
+- CSS **named** colours are checked in CSS, in markup presentation attributes and in JSX
+  presentation attributes — not in ordinary TypeScript strings, where the false-positive cost on
+  prose is not worth it. In JSX every **statically known** value counts, whatever the spelling.
+  The rule is about the value, not the syntax, and a test asserts the JSX and markup scanners
+  return identical findings for the same element.
+
+  That is a **general property, not a list**. The lint resolves a JSX attribute value through
+  `ts.skipOuterExpressions` — TypeScript's own definition of a wrapper that does not change the
+  value (parentheses, `as`/`satisfies`/angle-bracket assertions, non-null `!`, and any future
+  member of `OuterExpressionKinds`). It replaced a hand-written case list that four separate
+  reviews found incomplete, each time by a wrapper nobody had thought of; a wrapper the language
+  adds next is now handled by construction.
+
+  It is deliberately **not** the type checker: that answers "does this have a string-literal
+  *type*", which is a different question. `fill={'red' as string}` widens to `string` while its
+  runtime value is plainly `"red"`, so type-identity would report a static value as dynamic.
+
+  What is genuinely *not* covered: a value computed at runtime (`fill={colour}`, a template
+  **with** substitutions, a call, a value from props or state) and a colour handed to a
+  third-party component's own prop. Both are outside what a source lint can resolve.
+- other CSSOM routes to a stylesheet (`insertRule`, `adoptedStyleSheets`, an aliased tag name)
+  are not detected.
+- the HTML/SVG scanner is **partial** — a hand-written scanner, not a spec tokenizer. An
+  attribute value containing `>` desynchronizes it and behaviour after that point is
+  **unmodelled**. It deliberately does not skip comments: it errs toward the false alarm.
+- only a **presentation attribute** is treated as a CSS value — in markup *and* in JSX, from one
+  shared registry, so a `<circle fill="red" />` gets the same verdict in a `.tsx` file as in an
+  `.svg` one. A colour-shaped string in an ordinary attribute — `class`, `title`, `data-*`, `id`
+  — is data and is not reported; lexing every attribute reported `class="red"` as a colour.
+
+  **That registry is bounded, and its edges are declared rather than chased.** It covers
+  `style`, `color`, `fill`, `stroke`, `stop-color`, `flood-color`, `lighting-color`,
+  `solid-color`, `background-color`, `border-color`, `outline-color`, `caret-color`,
+  `text-decoration`, `text-decoration-color`, `text-emphasis-color`, `column-rule-color` and
+  `bgcolor`. It is **not** the full SVG 2 presentation-attribute set, and three things follow
+  that are recorded, not hidden:
+  - **SVG animation attributes are not handled.** In `<animate attributeName="fill" from="red">`
+    the colour lives in `from`/`to`/`values`/`by`, and whether those hold a colour at all depends
+    on `attributeName` — target-aware resolution across elements, which is out of scope for a
+    source lint.
+  - **The registry is name-based, not element-aware**, so a listed attribute on an element where
+    it is not presentational (`<div fill="red">`) is reported anyway. That is a false positive.
+    (`background`, the legacy HTML image-URL attribute, *was* in the registry and has been
+    removed — that one was removable without opening the element question.)
+
+    **The allowlist is not the remedy for these**, and an earlier version of this page said it
+    was. `color-allowlist.json` admits only syntax-theme CSS paths, so a markup or TSX finding
+    cannot be allowlisted at all — pointing at a door that does not exist is worse than saying
+    there is none. Remediation is a **source change**, or a reviewed change to the code-owned
+    registry. Keeping the allowlist narrow is deliberate: widening it to markup would reopen the
+    configuration-widening hole that complete functional-colour capture closed.
+  - The enforcing control for anything this misses is, as ever, the **runtime CSP**.
+
+  Each of those cases is pinned by a test that records the current behaviour and fails with an
+  instruction to widen the claim if it ever changes. Those recordings assert **no errors as well
+  as no findings**: a recording that checks only findings cannot tell silence from failure, and
+  would quietly record "not detected" when the truth was "did not run".
+- it scans **source**, so a dependency's stylesheet is out of scope; and it checks that a raw
+  value is not used, not that the *right* token was chosen. Contrast and motion gating is a
+  separate item.
+
+Every one of those limitations is pinned by a test asserting it is currently NOT detected, so
+the list cannot quietly drift away from the code.
+
+**Exceptions.** `client/scripts/color-allowlist.json` is the only exception path, and it is
+deliberately weak: only the colour-literal rule is allowlistable, only files matching a
+code-owned path registry (a syntax-highlighting theme) may appear in it, every entry names an
+exact file, an exact value and a reason, and a **stale entry fails the lint**. A CDN, a
+component, or a primitive cannot be allowlisted by editing configuration at all. There is no
+pragma, flag, or environment variable that turns a rule off.
+
+**Contrast.** `client/scripts/token-layer.test.mjs` parses the token layer and asserts 4.5:1 in
+both themes, with real alpha compositing for tinted surfaces, and checks that the two light
+blocks have not drifted apart.
+
+The surface set is **derived, not enumerated**: every semantic surface token, plus every stop of
+every gradient token, with translucent stops composited onto each opaque surface. That matters
+because a component does not sit on "the panel" — a badge sits inside a `.card`, whose fill is a
+gradient, so the surface behind it is a range. An earlier revision listed four surfaces and
+composited onto the most favourable one, and passed a light success badge that measured 3.89:1
+against the darker end. A new surface token or gradient endpoint now enters the suite by
+existing.
+
+The measured minimum across the whole cross-product is **4.834:1**, in dark, for `--on-error`
+over `--tint-error` composited on `--surface-chip`. That figure is computed by the test suite
+from the same cross-product the assertions use and checked against the documented constant, so
+it cannot go stale: change the palette and the build fails until the number is updated. (It was
+stale once — a previous revision quoted the light theme's minimum as if it were the global one.)
+
+`--text-faint` and `--text-disabled` are excluded **by rule**, not by convenience: faint is
+de-emphasised metadata beside an already-labelled value, and a disabled control is exempt from
+WCAG 1.4.3. Both say so where they are declared, and a separate test asserts the primitives
+layer never applies either as live text outside that scope — a contrast suite cannot police a
+token it excludes. That check **resolves aliases**, so reaching an excluded token through an
+intermediate custom property is caught too.
 
 ## Contributing
 

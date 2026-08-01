@@ -1,0 +1,377 @@
+/* ═══════════════════════════════════════════════════════════════════════════════════════════
+   Aperture — component primitives (APTR-02)
+   ═══════════════════════════════════════════════════════════════════════════════════════════
+
+   The component vocabulary of the constellation design system, expressed only in tokens.
+   THERE IS NOT ONE COLOUR LITERAL IN THIS FILE, and the adherence lint fails the build if one
+   appears: every colour comes from `constellation.css` through `var(--…)`. That is what makes
+   the light theme work at all — nothing here knows which theme is active.
+
+   Naming: the fleet's control plane prefixes these `.h-*` (`.h-card`, `.h-btn-primary`).
+   Aperture uses the unprefixed names the item specifies (`.card`, `.btn-primary`, …) because
+   this bundle has no other stylesheet to collide with. The treatments are the same.
+
+   These classes are the implementation. Application code composes the TYPED REACT WRAPPERS in
+   `src/components/primitives/`, not raw class strings.
+
+   Colour is used SEMANTICALLY. A badge is amber because the thing it describes is gated or
+   costs money, not because amber looked good next to the violet.
+   ═══════════════════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Card ────────────────────────────────────────────────────────────────────────────────
+   Gradient fill, hairline edge, glow on interaction. Radius lg — never pill. */
+.card {
+  background: var(--grad-card);
+  border: var(--border-width) solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md), var(--inset-hi);
+  overflow: hidden;
+  transition:
+    border-color var(--dur-base) var(--ease-out),
+    box-shadow var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
+}
+
+/* The one resting state that keeps the violet edge: an ACTIVE or LIVE element. */
+.card-accent {
+  border-color: var(--line-accent);
+  box-shadow: var(--shadow-md), var(--glow-violet-soft), var(--inset-hi);
+}
+
+/* Interactive card: lift and light up. Glow is the elevation language, not a bigger shadow. */
+.card-interactive {
+  cursor: pointer;
+}
+
+.card-interactive:hover,
+.card-interactive:focus-visible {
+  border-color: var(--accent-bright);
+  box-shadow: var(--glow-violet), var(--shadow-lg);
+  /* dimension-literal: a 2px lift is the smallest movement that reads as "this rose toward
+     you" rather than "this jittered". It is a motion amplitude, not a spacing value, so it
+     has no place on the spacing scale — a retheme that changed the grid must not change it. */
+  transform: translateY(-2px);
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: var(--border-width) solid var(--border);
+  color: var(--text-heading);
+  font-weight: var(--fw-semibold);
+}
+
+.card-body {
+  padding: var(--space-3) var(--space-4);
+}
+
+.card-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-top: var(--border-width) solid var(--border);
+}
+
+/* ── Button ──────────────────────────────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ctl-gap-md);
+  font-family: var(--font-sans);
+  font-weight: var(--fw-semibold);
+  line-height: 1;
+  border: var(--border-width) solid transparent;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-base) var(--ease-out),
+    filter var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+.btn:disabled,
+.btn[aria-disabled='true'] {
+  opacity: 0.45;
+  cursor: not-allowed;
+  color: var(--text-disabled);
+}
+
+.btn:not(:disabled):active {
+  /* dimension-literal: the press. 1px down plus a 1% shrink is the standard tactile nudge;
+     like the card lift it is a motion amplitude rather than spacing. */
+  transform: translateY(1px) scale(0.99);
+}
+
+.btn-sm {
+  padding: var(--ctl-pad-y-sm) var(--ctl-pad-x-sm);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
+  gap: var(--ctl-gap-sm);
+}
+
+.btn-md {
+  padding: var(--ctl-pad-y-md) var(--ctl-pad-x-md);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-body);
+}
+
+.btn-lg {
+  padding: var(--ctl-pad-y-lg) var(--ctl-pad-x-lg);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-body-lg);
+  gap: var(--ctl-gap-lg);
+}
+
+.btn-primary {
+  background: var(--grad-accent);
+  color: var(--text-on-accent);
+  box-shadow: var(--glow-violet-soft), var(--shadow-sm);
+}
+
+.btn-primary:not(:disabled):hover {
+  box-shadow: var(--glow-violet), var(--shadow-md);
+  filter: brightness(1.08);
+}
+
+.btn-secondary {
+  background: var(--grad-card);
+  color: var(--text-heading);
+  border-color: var(--border-strong);
+  box-shadow: var(--inset-hi);
+}
+
+.btn-secondary:not(:disabled):hover {
+  border-color: var(--line-accent);
+  background: var(--bg-hover);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-body);
+}
+
+.btn-ghost:not(:disabled):hover {
+  background: var(--bg-hover);
+  color: var(--text-heading);
+}
+
+/* Destructive. Rose, because the action is destructive — the one place rose is not a status. */
+.btn-danger {
+  background: var(--tint-error);
+  color: var(--on-error);
+  border-color: var(--tint-error-line);
+}
+
+.btn-danger:not(:disabled):hover {
+  border-color: var(--status-error);
+  box-shadow: var(--glow-rose);
+  filter: brightness(1.06);
+}
+
+/* ── Badge ───────────────────────────────────────────────────────────────────────────────
+   Pill radius is reserved for badges and status pills. Each variant names a MEANING; a call
+   site that wants "a green badge" is asking the wrong question. */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--badge-gap);
+  padding: var(--badge-pad-y) var(--badge-pad-x);
+  border: var(--border-width) solid transparent;
+  border-radius: var(--radius-pill);
+  font-family: var(--font-sans);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  letter-spacing: var(--ls-badge);
+  line-height: var(--lh-badge);
+  white-space: nowrap;
+}
+
+.badge-mono {
+  font-family: var(--font-mono);
+  font-size: var(--fs-mono-sm);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-badge-mono);
+}
+
+.badge-neutral {
+  background: var(--tint-neutral);
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+
+.badge-accent {
+  background: var(--tint-accent);
+  border-color: var(--tint-accent-line);
+  color: var(--on-accent-tint);
+}
+
+.badge-success {
+  background: var(--tint-success);
+  border-color: var(--tint-success-line);
+  color: var(--on-success);
+}
+
+.badge-warning {
+  background: var(--tint-warning);
+  border-color: var(--tint-warning-line);
+  color: var(--on-warning);
+}
+
+.badge-error {
+  background: var(--tint-error);
+  border-color: var(--tint-error-line);
+  color: var(--on-error);
+}
+
+.badge-info {
+  background: var(--tint-info);
+  border-color: var(--tint-info-line);
+  color: var(--on-info);
+}
+
+/* ── Table ───────────────────────────────────────────────────────────────────────────────
+   Header labels are tracked uppercase mono — the telemetry voice, per the type rules. */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+}
+
+.table th,
+.table td {
+  padding: var(--cell-pad-y) var(--cell-pad-x);
+  text-align: left;
+  border-bottom: var(--border-width) solid var(--border);
+}
+
+.table th {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-mono-sm);
+  font-weight: var(--fw-medium);
+  text-transform: uppercase;
+  letter-spacing: var(--ls-label);
+  white-space: nowrap;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.table tbody tr:hover td {
+  background: var(--bg-hover);
+}
+
+.table-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* ── Input ───────────────────────────────────────────────────────────────────────────────
+   The focus ring is inset here: an outlined ring outside a field inside a dense form clips
+   against its neighbours, so the field takes the accent edge plus a soft glow instead. */
+.input {
+  width: 100%;
+  background: var(--surface-inset);
+  color: var(--text-heading);
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  border: var(--border-width) solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--cell-pad-y) var(--cell-pad-x);
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+
+/* --text-muted, NOT --text-faint. A placeholder in an ACTIVE field is live interface text: it
+   is what tells you what the field wants. --text-faint measures 3.95:1 on --surface-inset in
+   dark, and its own declaration restricts it to de-emphasised metadata beside an already-
+   labelled value — which a placeholder is not. The exclusion was being applied outside the
+   scope it documents. */
+.input::placeholder {
+  color: var(--text-muted);
+}
+
+.input:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.input:focus-visible {
+  outline: none;
+  border-color: var(--focus-ring-color);
+  box-shadow: var(--glow-violet-soft);
+}
+
+.input:disabled {
+  color: var(--text-disabled);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.input[aria-invalid='true'] {
+  border-color: var(--status-error);
+}
+
+.input-mono {
+  font-family: var(--font-mono);
+  font-size: var(--fs-mono);
+  letter-spacing: var(--ls-mono);
+}
+
+/* ── Tracked label ───────────────────────────────────────────────────────────────────────
+   The mono uppercase eyebrow. Reach for it for a section label or a telemetry key — never
+   for a sentence. */
+.label {
+  font-family: var(--font-mono);
+  font-size: var(--fs-label);
+  text-transform: uppercase;
+  letter-spacing: var(--ls-label);
+  color: var(--text-muted);
+}
+
+/* ── forced-colors ───────────────────────────────────────────────────────────────────────
+   The token layer strips shadow and glow. Here the STRUCTURE is restated in the user's own
+   system colours, so a card still has an edge and a primary button still reads as primary
+   when every brand colour has been replaced. `forced-color-adjust: none` is never used. */
+@media (forced-colors: active) {
+  .card,
+  .input,
+  .btn,
+  .badge {
+    border: var(--border-width) solid ButtonBorder;
+  }
+
+  .btn-primary {
+    background: Highlight;
+    color: HighlightText;
+  }
+
+  .table th,
+  .table td {
+    border-bottom: var(--border-width) solid ButtonBorder;
+  }
+
+  .card-interactive:hover,
+  .card-interactive:focus-visible {
+    border-color: Highlight;
+  }
+
+  /* The input's focus treatment is an inset glow, and the token layer strips every box-shadow
+     under forced colours — while `.input:focus-visible { outline: none }` out-specifies the
+     global `:focus-visible` ring. Between them the field ended up with NO focus indicator at
+     all here: its border is already ButtonBorder at rest, so focus was indistinguishable from
+     rest. A real outline is restored, in the user's own system colour. */
+  .input:focus-visible {
+    outline: var(--focus-ring-width) solid Highlight;
+    outline-offset: var(--focus-ring-offset);
+  }
+}
