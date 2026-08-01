@@ -855,10 +855,17 @@ paths:
           in: header
           required: false
           description: |
-            The last `seq` the client processed on a previous connection. Standard SSE resume.
-            Absent on a first connection.
+            Standard SSE resume. The value is the composite `"{stream_id}:{seq}"` the server put
+            in the SSE `id:` field of the last event the client fully processed. It is composite
+            rather than a bare `seq` because `seq` is only meaningful within its connection: the
+            `stream_id` half is what lets the server tell "resume connection X from 412" from
+            "connection X is gone, so this position means nothing".
+
+            Absent on a first connection. An unparseable value is treated as absent, never
+            parse-guessed.
           schema:
             type: string
+            pattern: '^[A-Za-z0-9_-]+:[0-9]+$'
         - name: thread_id
           in: query
           required: false
@@ -2319,10 +2326,20 @@ components:
         Fields common to **every** stream event, without exception. There is no exempt event
         type: `heartbeat` carries an `origin` exactly as `token` does, because an exemption is how
         a mandatory invariant erodes.
-      required: [type, seq, origin, ts]
+      required: [type, stream_id, seq, origin, ts]
       properties:
         type:
           $ref: "#/components/schemas/EventType"
+        stream_id:
+          allOf:
+            - $ref: "#/components/schemas/Id"
+          description: |
+            The identifier of **this connection** — because a stream is one connection, this is
+            the connection id and nothing else. It is not a thread id, not a turn id, and not a
+            message id. It scopes the `seq` domain and the replay buffer, and it is what lets the
+            server recognize a resume request for a connection it no longer has buffered.
+
+            Values are unguessable random ids, never sequential.
         seq:
           type: integer
           minimum: 0

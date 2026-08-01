@@ -25,10 +25,11 @@ Everything else follows from that:
 | Consequence | Statement |
 |---|---|
 | Demultiplexing | `thread_id` and `message_id` demultiplex many threads and many turns **inside a single connection**. A client does not open a connection per thread. |
-| Sequence domain | `seq` is **per connection**, and it covers **all event types** — one monotonic counter, not one per thread, per turn, or per type. |
-| Replay buffer | The replay buffer is **per connection**. |
+| `stream_id` | **`stream_id` is the connection id.** Not a thread id, not a turn id, not a message id. Every event carries it. Values are unguessable and never sequential. |
+| Sequence domain | `seq` is **per `stream_id`**, and it covers **all event types** — one monotonic counter, not one per thread, per turn, or per type. |
+| Replay buffer | The replay buffer is **per `stream_id`**. |
 | Connection cap | A per-user cap counts **connections**, not threads or turns. |
-| Client state | The client's reducer keys message state by `message_id`, **never by stream**. |
+| Client state | The client's reducer keys message state by `message_id`, **never by `stream_id`**. |
 
 The `thread_id` query parameter on `GET /v1/aperture/stream` is a server-side **filter, not a
 scope**. It narrows what is delivered. It does not create a per-thread stream, does not change the
@@ -55,6 +56,9 @@ seq  event          thread   message   origin      note
 110  heartbeat      —        —         system      consumes a seq like anything else
 111  message.end    T-b      M-2       system      reason: completed
 ```
+
+Every row above shares **one** `stream_id`, because they share one connection. The SSE `id:` of
+the last frame is `"{stream_id}:111"`.
 
 A client that assumed one stream per thread would treat `seq` 103 as a protocol violation. It is
 not. Interleaving across threads on one connection is the normal case.
@@ -154,16 +158,22 @@ other fails the build.
 | `resync` | `system` | `from_seq`, `to_seq`, affected ids | The client's position aged out; refetch. |
 | `heartbeat` | `system` | — | Liveness tick. |
 
-Every event additionally carries the common envelope: `type`, `seq`, `origin`, `ts`, and where
-applicable `thread_id`, `message_id`, `turn_id`.
+Every event additionally carries the common envelope: `type`, `stream_id`, `seq`, `origin`, `ts`,
+and where applicable `thread_id`, `message_id`, `turn_id`.
 
 ### 3.1 Wire framing
 
 Each event is one SSE frame:
 
 - the SSE `event:` field carries the event `type`;
-- the SSE `id:` field carries `seq`, so the browser's native `Last-Event-ID` resume works;
+- the SSE `id:` field carries the composite **`"{stream_id}:{seq}"`**, so the browser's native
+  `Last-Event-ID` resume works and carries enough information to be interpreted;
 - the SSE `data:` field carries the event object as a single JSON document.
+
+The `id:` is composite rather than a bare `seq` because a `seq` is only meaningful inside its
+connection. Without the `stream_id` half, a server receiving `Last-Event-ID: 412` cannot
+distinguish "resume this connection from 412" from "that connection is gone and 412 means
+nothing", and would have to guess. It does not guess — see §5.3.
 
 `heartbeat` is a real event with a real `seq`, not an SSE comment line. A comment would not be
 replayable and would not be visible to a non-browser client's reducer.
@@ -217,9 +227,13 @@ Four rules, cited rather than re-derived by anything that touches time:
 
 ### 5.1 Resume
 
-A client reconnecting sends `Last-Event-ID` with the last `seq` it fully processed. The server
-replays every event after that position, in order, and then continues live. A client that has
-never connected omits the header and receives only live events.
+A client reconnecting sends `Last-Event-ID` with the composite `"{stream_id}:{seq}"` of the last
+event it fully processed. The server replays every buffered event for that `stream_id` after that
+`seq`, in order, and then continues live. A client that has never connected omits the header and
+receives only live events.
+
+A client persists the highest `seq` it has seen **per `stream_id`** across reconnects. An
+unparseable `Last-Event-ID` is treated as absent — never parse-guessed.
 
 ### 5.2 The window is bounded
 
@@ -253,6 +267,17 @@ On receiving `resync` the client:
 
 A client that observes a `seq` gap without a `resync` treats it identically to a `resync` for the
 gap range: the invariant is "no silent loss", and the client enforces it too.
+
+### 5.4 An unknown `stream_id`
+
+If the `stream_id` in a resume request is entirely unknown — the server restarted, or the
+connection was reaped — the server issues a **fresh** `stream_id` with its own `seq` domain
+starting from the beginning, and immediately emits a `resync` so the client knows to refetch
+rather than assuming continuity. It does **not** silently pretend the old position was honoured,
+and it does **not** reject the connection.
+
+Two tabs resuming the same `stream_id` concurrently is permitted: both may replay. Emission
+remains single-writer per `stream_id`, so `seq` stays strictly increasing and gapless for each.
 
 The term "gap marker" does not appear in this contract. The event is `resync`.
 
