@@ -9,8 +9,11 @@ spec_id: S128-aperture-client
 - **Session:** S128
 - **Date:** 2026-08-01
 - **Module version:** Aperture v0.1.0
-- **Estimated total:** ~92h (13 items in this repo plus APTR-52, which lands in the media
-  module's repository as a prerequisite PR)
+- **Estimated total:** 141h across 22 items — 20 in this repo, plus APTR-52 and APTR-160, which
+  land in the media module's own repository as prerequisite PRs. This figure is the exact sum of
+  the per-item estimates below and was re-derived after the Fable review re-scoped playback
+  (D4), the parity gate (D8), and the ingest ledger. A header that disagrees with the sum is a
+  defect, not a rounding choice.
 - **North-Star layer:** shell — Gate 2 justified in `specs/S128-aperture-epic.md`. This sprint
   is where the gate is *paid off*: the three live modules stop being three silos behind three
   surfaces and start sharing one typed context bus.
@@ -33,7 +36,10 @@ spec_id: S128-aperture-client
   fallback only. Clause 2 (presence has a budget) — context-bus events are inputs to the
   assistant's existing prioritized knock quota, not a notification source; this sprint adds no
   tray, no badge count, and no independent alert path. Clause 3 (show the becoming) — the bus
-  carries the assistant's own state changes as first-class topics rather than burying them.
+  carries the assistant's own state changes as first-class topics rather than burying them, **and
+  APTR-164 renders them on an actual surface.** The review was right that a topic definition with
+  no consumer is not compliance; clause 3 is satisfied by the recall/becoming panel, not by the
+  `memory.recall` entry in the topic registry.
   Clause 4 (continuity survives every swap) — no item here resets memory, traits, or lore;
   the bus is additive context, and APTR-50's clear operation is explicitly scoped to bus
   contents only, with a negative test asserting Engram memory is untouched.
@@ -43,7 +49,13 @@ spec_id: S128-aperture-client
   module surfaces embedded into the shell as first-class citizens of that bus.
 
   The Muse surface is real media, not a link-out: browse, search, detail with metadata and
-  artwork, and genuine in-shell playback with a resume position that the assistant can read.
+  artwork, and genuine in-shell playback — **for content that can be remuxed to fragmented MP4
+  without transcoding** — with a resume position that the assistant can read. Playback is
+  deliberately narrower than it first looked (decision D4): Media Source Extensions accepts only
+  fragmented MP4/WebM, so feeding a media element raw chunks of a stock MP4 or an MKV cannot work.
+  Content requiring a full transcode is **explicitly deferred** to a later sprint and renders an
+  honest "not playable in-client yet" state. Resume-position tracking is unaffected either way —
+  it is fed by the bus and by other clients of the media module, not by Aperture's player.
   The Harmony surface is real build orchestration: runs, dispatch, PR/review state, and a spec
   browser. And the marquee capability — **spec-ingest-from-chat** — closes the loop the epic's
   Gate 2 argument was built on: select a range of a conversation, have the assistant draft a
@@ -55,6 +67,18 @@ spec_id: S128-aperture-client
   another through the bus, and makes each of them assistant-operable.
 
 ## Pre-flight
+- **Item numbers are IDENTIFIERS, NOT AN ORDERING.** Sprint D owns APTR-47..60; items added
+  after the Fable review continue at **APTR-160..167**, because APTR-95..159 are being consumed
+  concurrently by other sprints in this epic and reusing them would collide. A higher number does
+  not mean later work, and no existing item is ever renumbered. **Required merge order is
+  expressed only by `Blocked by`** — read the dependency edges, never the numeric sequence. In
+  particular APTR-160 (remux capability) and APTR-163 (chat/shell publishers) are prerequisites
+  for lower-numbered items.
+- **Binding cross-sprint decisions** in `specs/S128-DECISIONS.md` take precedence over anything in
+  this file. This sprint reflects **D3** (a stream is one connection; `thread_id` and message id
+  demultiplex within it; context events share the per-session sequence space), **D4** (playback is
+  re-scoped to remuxable content only), **D8** (a gate must be implementable in the language whose
+  property it asserts), and **D12** (the header estimate equals the sum of the item estimates).
 - **Blocked by Sprint C** (`S128-C-aperture-web-chat.md`) — the shell, thread model, SSE
   consumer, and settings surface all land there; this sprint composes onto them.
 - Depends on Sprint A contracts: `contracts/aperture-api-v1.yaml` (APTR-06),
@@ -74,12 +98,32 @@ spec_id: S128-aperture-client
   `APERTURE_CONTEXT_PUBLISH_RATE_LIMIT`, `APERTURE_CONTEXT_MAX_PAYLOAD_BYTES`,
   `APERTURE_MEDIA_STREAM_TICKET_TTL_SECONDS`, `APERTURE_MEDIA_READ_CHUNK_BYTES`,
   `APERTURE_MEDIA_READ_MAX_LENGTH_BYTES`, `APERTURE_MEDIA_READ_IDLE_TIMEOUT_SECONDS`,
-  `APERTURE_SPEC_DRAFT_MAX_TRANSCRIPT_CHARS`.
+  `APERTURE_MEDIA_REMUX_SEGMENT_SECONDS`, `APERTURE_MEDIA_REMUX_MAX_CONCURRENT`,
+  `APERTURE_CHAT_SELECTION_MAX_MESSAGES`, `APERTURE_CONTEXT_READ_AUDIT_RETENTION_EVENTS`,
+  `APERTURE_INGEST_LEDGER_RETENTION_DAYS`, `APERTURE_SPEC_DRAFT_MAX_TRANSCRIPT_CHARS`.
+  **No config value appears anywhere in this spec — names only.** Recommended defaults, including
+  the playback idle timeout, live in `docs/CONFIGURATION.md` as recommendations, never as
+  normative literals in a spec item.
 - **Media byte-serving does not exist today.** The media module has no byte-serving route, and
   the sanctioned door carries a JSON request body with no arbitrary-header parameter and no
   caller-visible response status or headers — so HTTP range semantics cannot cross it. APTR-52
   adds a typed ranged-read capability in the media module's own repository as a prerequisite;
   it is a separate PR that merges before APTR-53's Aperture-side work.
+- **Neither does remuxing, and playback needs it.** Media Source Extensions accepts fragmented
+  MP4 and WebM only. A stock MP4 with a trailing `moov` atom, and any MKV, cannot be appended to a
+  SourceBuffer — and no third-party demuxer may be vendored. Playback therefore additionally
+  requires **APTR-160**, a remux-to-fragmented-MP4 capability in the media module's repository,
+  merging before APTR-53. Per D4 this sprint attempts playback **only** for content remuxable
+  without transcoding; a full transcode is out of scope and renders an honest unavailable state
+  (APTR-161).
+- **Transcode is NOT assumed to exist.** Unlike byte-serving, the media module's transcode
+  capability was never established as live. No item in this sprint depends on it. Where a codec
+  cannot be remuxed, the answer is the deferred-state surface in APTR-161, not an unverified
+  transcode call.
+- **Streams follow D3.** A stream is **one connection**; `thread_id` and message id demultiplex
+  within it. Context-bus events share the per-session sequence space defined in
+  `contracts/aperture-events-v1.md`. This sprint references that model and defines no parallel
+  one — no second stream, no second sequence counter, no bus-specific resume semantics.
 - Baseline tests: whatever Sprint C leaves green. Every item must leave them green.
 - Baseline verify: the shell renders, streams, and gates modules; Muse and Harmony currently
   render as inert descriptors only.
@@ -90,7 +134,7 @@ spec_id: S128-aperture-client
 - **Priority:** Critical
 - **Labels:** aperture, context-bus, contract, privacy
 - **Agent:** claude
-- **Estimate:** 6h
+- **Estimate:** 7h
 - **Description:** Author the contract that turns "the SSE `context` channel" from a name in the
   Sprint A event taxonomy into a real, typed, enforceable publish/consume bus. This is a
   **contract plus machine-readable schema**, not an implementation — APTR-48 and APTR-49 code
@@ -113,30 +157,50 @@ spec_id: S128-aperture-client
 
   ## APPROACH
   1. Define a single envelope, identical for every topic: `topic` (dotted, registry-validated),
-     `schema_version` (integer, per topic), `seq` (monotonic per session, shares the Sprint B
-     stream sequence space so `Last-Event-ID` resume works unchanged), `ts` (RFC-3339),
+     `schema_version` (integer, per topic), `seq` (monotonic per session, **sharing the per-session
+     stream sequence space defined by decision D3** so `Last-Event-ID` resume works unchanged),
+     `ts` (RFC-3339),
      `origin` (`client` | `bff` | `module` | `assistant`), `subject` (opaque session-scoped id),
      `payload` (topic-schema'd), and `ttl_class`. Unknown envelope fields are **rejected**, not
      ignored — an open envelope is how a bus becomes a firehose.
   2. Enumerate the v1 topic registry. Each entry declares: id, direction (who may publish, who
-     may consume), payload schema, retention class, privacy class, and whether it is opt-outable.
+     may consume), **the item that implements its publisher**, payload schema, retention class,
+     privacy class, and whether it is opt-outable. A topic with no implementing publisher item is
+     a contract defect — the registry's cross-check script (below) enforces this, because the
+     original draft defined `chat.thread` and `chat.selection` with no publisher anywhere in the
+     sprint and APTR-57 would have discovered the gap only at integration time.
      The v1 set is exactly:
-     - `shell.focus` — which module surface and route the user is on
-     - `chat.thread` — active workspace + thread identity (opaque ids, never message content)
-     - `chat.selection` — a user-selected transcript range (ids + range bounds, never raw text)
+     - `shell.focus` — which module surface and route the user is on (publisher: APTR-163)
+     - `chat.thread` — active workspace + thread identity (opaque ids, never message content).
+       **Publisher: APTR-163**, which retrofits `registerModuleTopics` onto the Sprint C chat and
+       shell surfaces that predate this bus.
+     - `chat.selection` — a user-selected transcript range (ids + range bounds, never raw text),
+       bounded by `APERTURE_CHAT_SELECTION_MAX_MESSAGES` so a pathological selection cannot
+       produce a bloated payload. Publisher: APTR-163 (mechanism) and APTR-57 (selection UI).
      - `muse.browse` — current library view: filter, sort, and selected item id
      - `muse.playback` — media item id, playback state, position, duration
      - `harmony.run` — build run id and status the user is watching
      - `harmony.spec` — spec id or draft id being viewed or edited
      - `memory.recall` — assistant-published pointer to what it recalled and why (consume-only
-       for the UI; this is Soul Contract clause 3, "show the becoming", made legible)
+       for the UI; this is Soul Contract clause 3, "show the becoming", made legible, and its
+       consumer is **APTR-164**, without which the clause-3 claim is unbacked)
      - `module.capability` — a module's capability state changed (drives the APTR-08 revalidate)
-  3. Retention classes, and no others: `ephemeral` (fan-out only, never stored),
-     `session` (bounded ring buffer, dies with the session), `pinned` (survives the session,
-     **only** for topics whose entry explicitly allows it — v1 allows exactly one:
-     `muse.playback`, so "resume where I was" works across a reload). Bounds come from
-     `APERTURE_CONTEXT_RETENTION_EVENTS` and `APERTURE_CONTEXT_RETENTION_TTL_SECONDS`;
-     the contract states the names, never the values.
+  3. Retention classes, and no others:
+     - `ephemeral` — fan-out only, never stored.
+     - `session` — bounded ring buffer, dies with the session. Bounds from
+       `APERTURE_CONTEXT_RETENTION_EVENTS` and `APERTURE_CONTEXT_RETENTION_TTL_SECONDS`; the
+       contract states the names, never the values.
+     - `pinned` — **defined as a read-through projection of the owning module's own store, not as
+       durable bus state.** This resolves the direct contradiction the review found: the bus is
+       single-session by construction, so it cannot itself be the thing that survives session end
+       and device change. What survives is the media module's watch state (authoritative per
+       APTR-54); `pinned` means "on read, the BFF resolves this topic's current value from the
+       owning module through `terminus-client` and projects it into the session's view." v1 allows
+       exactly one pinned topic, `muse.playback`. This also dissolves the dual-source-of-truth
+       tension between the ring buffer and the module store: there is one authority, and the bus
+       is a view of it.
+     - Consequence, stated normatively: a bus clear removes the session's bus contents and **does
+       not** delete module-owned state; the privacy surface must say so (APTR-50).
   4. Privacy classes: every topic is `user-visible` — there is no hidden class, and the contract
      says so normatively. Every topic carries `opt_outable: true` except `module.capability`
      (which carries no user activity, only backend health). Opt-out is enforced at **publish**,
@@ -147,9 +211,18 @@ spec_id: S128-aperture-client
      metrics product ever receives a bus event; aggregate counters, if any, carry no payload.
   6. Delivery guarantees: at-most-once fan-out over SSE, ordered per topic per session by `seq`,
      with gap detection (a consumer seeing a `seq` jump requests a snapshot rather than
-     silently believing it has the current state). No cross-session delivery in v1 — the bus is
-     single-user and single-session by construction, and multi-user fan-out is explicitly a
-     future-version concern, not a v1 hole.
+     silently believing it has the current state). Fan-out rides the **single connection** of
+     decision D3 — `thread_id` and message id demultiplex within it — and never a second stream.
+     No cross-session delivery in v1 — the bus is single-user and single-session by construction,
+     and multi-user fan-out is explicitly a future-version concern, not a v1 hole. The only state
+     that crosses a session boundary is module-owned state projected through `pinned` (point 3),
+     which is not bus delivery.
+  6a. **Inspection scope is per-session, stated normatively.** `GET /v1/aperture/events` returns
+     the *current session's* bus only. Two browsers signed in as the same user have two independent
+     ring buffers, and neither can see the other's. The contract says this in the same breath as
+     the inspection routes, and the privacy surface must render it (APTR-50) — an unqualified "see
+     everything the bus holds" claim would be quietly false. Module-owned `pinned` state is
+     inspected separately, through the owning module, and is labelled as such.
   7. Versioning: additive topics and additive optional payload fields bump the topic's
      `schema_version` and stay on v1. A removed field or changed semantics mints a v2 topic id;
      both are served through a deprecation window. Consumers **must** ignore unknown *topics*
@@ -161,8 +234,10 @@ spec_id: S128-aperture-client
   - `contracts/aperture-context-bus-v1.schema.json` validates as JSON Schema in CI
   - Every topic in the markdown registry has a matching `$defs` entry in the schema, and vice
     versa — a mechanical cross-check script, not a human read
-  - Every topic entry declares all six required attributes (direction, schema, retention class,
-    privacy class, opt-outable, schema_version)
+  - Every topic entry declares all seven required attributes (direction, implementing publisher
+    item, schema, retention class, privacy class, opt-outable, schema_version)
+  - The cross-check script FAILS on a topic whose declared publisher item does not exist in the
+    sprint's item set — the mechanical form of "no topic without a publisher"
   - `contracts/aperture-api-v1.yaml` still validates as OpenAPI 3.1 after the `events` extension
   - Verify no hardcoded IPs, hostnames, org names, ports, or absolute user paths in
     new/modified files
@@ -177,23 +252,31 @@ spec_id: S128-aperture-client
     re-fetches content through the normal authorized route if it needs it
   - `pinned` retention creeping to new topics by convenience — the contract names the allowed
     set explicitly, so adding one is a contract change with review, not an implementation detail
-  - Sequence-space collision with the Sprint B stream sequence — share one space per session
+  - A reader concluding `pinned` means the bus is durable — the contract must state the
+    read-through definition at the point of first use, not only in a footnote, because the
+    original wording read as durable bus state and directly contradicted the single-session claim
+  - Sequence-space collision with the stream sequence — share one space per session per D3
     rather than minting a parallel counter that resume logic would have to reconcile
+  - A user with two sessions open assuming the panel shows both — the contract's per-session
+    scoping (6a) is what the panel renders; a fleet-wide view is explicitly not a v1 capability
   - A future multi-device session where two clients publish `shell.focus` concurrently — v1
     documents last-writer-wins per `origin` and does not pretend to merge
 
 - **Acceptance criteria:**
-  - [ ] Topic registry enumerates exactly the v1 topics, each with direction, schema, retention
-        class, privacy class, opt-outable flag, and schema version
+  - [ ] Topic registry enumerates exactly the v1 topics, each with direction, implementing
+        publisher item, schema, retention class, privacy class, opt-outable flag, schema version —
+        and the cross-check FAILS on a topic with no publisher item
   - [ ] Envelope is closed: unknown envelope fields are specified as rejected, unknown topics as
         ignored, and both are covered by schema examples
-  - [ ] Retention classes are exactly `ephemeral`/`session`/`pinned`, with `pinned` restricted to
-        an explicitly named topic set
-  - [ ] Sovereignty invariants written as testable sentences: no egress, no telemetry, no third
-        party, user-inspectable, user-clearable
-  - [ ] Opt-out is specified as enforced at publish, server-side — not as client-side suppression
-  - [ ] No literal hosts, ports, addresses, org names, or personal identifiers in any contract file
-  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
+  - [ ] `pinned` is defined as read-through to the owning module's store, not durable bus state,
+        with no remaining wording that contradicts the single-session claim
+  - [ ] `seq` shares the per-session stream sequence space of D3 and the contract references the
+        one-connection model rather than defining a parallel stream lifecycle
+  - [ ] Inspection scope is stated as per-session, with module-owned state inspected separately
+  - [ ] Sovereignty invariants written as testable sentences, and opt-out specified as enforced at
+        publish server-side — not as client-side suppression
+  - [ ] No literal hosts, ports, addresses, config values, org names, or personal identifiers in
+        any contract file; all existing tests still pass
   - [ ] README updated to point at the context-bus contract as the source of truth for Sprint D
 
 ---
@@ -230,13 +313,19 @@ spec_id: S128-aperture-client
   4. Retention store: an in-memory ring buffer per topic per session, bounded by
      `APERTURE_CONTEXT_RETENTION_EVENTS` and aged out by
      `APERTURE_CONTEXT_RETENTION_TTL_SECONDS`. `ephemeral` topics are fanned out and dropped
-     without ever entering the buffer. `pinned` topics additionally write through to the
-     kernel's own durable store **via `terminus-client`** — the BFF opens no database, no file,
-     and no second persistence path of its own.
-  5. Fan-out reuses the Sprint B SSE broadcaster and the shared per-session sequence space. No
-     second stream, no second socket, no polling fallback that hits a service URL directly.
-  6. `GET /v1/aperture/events` returns exactly what is retained, with its retention class and
-     age, so the privacy surface in APTR-50 can render truth rather than a plausible summary.
+     without ever entering the buffer. `pinned` topics are **not durable bus state**: per the
+     APTR-47 definition the BFF writes the value through to the owning module's store **via
+     `terminus-client`** and resolves it back from there on read. The BFF opens no database, no
+     file, and no second persistence path of its own, and the session buffer is a cache of the
+     module's value, never a competing copy of it.
+  5. Fan-out reuses the existing SSE broadcaster on the **single connection** of decision D3 and
+     the shared per-session sequence space, demultiplexing by `thread_id` and message id. No
+     second stream, no second socket, no bus-specific resume path, no polling fallback that hits a
+     service URL directly.
+  6. `GET /v1/aperture/events` returns exactly what **the current session** retains, with its
+     retention class and age, plus an explicit `scope: session` marker so the privacy surface in
+     APTR-50 can render truth — including the truth that another session's bus is not visible here
+     — rather than a plausible summary. `pinned` entries are marked as module-owned projections.
      `DELETE /v1/aperture/events` clears the bus — optionally scoped to one topic — and clears
      **only** the bus.
   7. Publishes originating from a module or the assistant carry `origin` accordingly and are
@@ -283,12 +372,14 @@ spec_id: S128-aperture-client
   - [ ] All four `events` routes implemented per contract, with problem-details errors
   - [ ] Opt-out enforced server-side at publish: opted-out events are never stored, never fanned
         out, and never readable by the assistant
-  - [ ] Retention classes honored, with bounds and TTL from named config keys and no literal values
-  - [ ] Fan-out reuses the existing SSE stream and sequence space; no second stream or polling path
+  - [ ] Retention classes honored, with bounds and TTL from named config keys and no literal
+        values; `pinned` resolves through the owning module and is marked as a projection
+  - [ ] Fan-out reuses the single D3 connection and its per-session sequence space; no second
+        stream, no bus-specific resume path, no polling fallback
+  - [ ] Inspection responses are session-scoped and say so explicitly
   - [ ] All backend access through `terminus-client`; zero direct service HTTP clients
   - [ ] Kernel unreachable degrades to session-only retention with a reason, never a crash
-  - [ ] No hardcoded infrastructure values in new/modified code
-  - [ ] All existing tests still pass
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
 
 ---
 
@@ -324,14 +415,20 @@ spec_id: S128-aperture-client
      literal. Publishing a `muse.playback` payload on `harmony.run` must not typecheck.
   3. All transport goes through the single `client/src/api/client.ts` fetch wrapper from APTR-07.
      The bus constructs no `fetch` of its own and never an absolute URL.
-  4. Consume rides the existing SSE consumer's `context` events. On a `seq` gap the runtime
-     requests a snapshot via `GET /v1/aperture/events` rather than assuming continuity — a
-     consumer that silently believes stale state is worse than one that refetches.
+  4. Consume rides the existing SSE consumer's `context` events on the **single connection** of
+     decision D3, demultiplexing by `thread_id` and message id; the runtime opens no connection of
+     its own and implements no second resume protocol. On a `seq` gap it requests a snapshot via
+     `GET /v1/aperture/events` rather than assuming continuity — a consumer that silently believes
+     stale state is worse than one that refetches. A `resync` instruction from the server (aged-out
+     replay position, per D3) is honored as a REST refetch, not as a reconnect loop.
   5. Publishes are coalesced client-side: high-frequency topics (`muse.playback` position,
      `shell.focus` during navigation) are debounced and deduplicated so the bus carries state
      changes, not a mouse-move log. Coalescing never drops a *terminal* event (playback stopped,
      surface unmounted) — those flush immediately.
   6. `registration.ts` exports a `registerModuleTopics(moduleId, { publishes, consumes })` call.
+     It is consumed not only by this sprint's new module surfaces but by **APTR-163**, which
+     retrofits it onto the pre-existing Sprint C chat and shell surfaces so `chat.thread`,
+     `chat.selection`, and `shell.focus` have a real publisher rather than a contract entry.
      Registrations are asserted against the module's APTR-08 descriptor: a module that publishes
      a topic it did not declare is a test failure, not a warning.
   7. Opt-out state is read from `GET /v1/aperture/events/topics` and used to render UI honestly
@@ -389,6 +486,13 @@ spec_id: S128-aperture-client
   refuse any part of it. This item ships that surface and the mechanical assertions that make the
   sovereignty claim in the epic a tested property rather than a promise in a README.
 
+  **"All of it" is scoped honestly, per APTR-47 §6a.** Inspection is **per-session**: this panel
+  shows the current session's bus. Another signed-in session has its own ring buffer and is not
+  visible here, and module-owned `pinned` state is a projection of the owning module's store, not
+  bus state. The panel says both of those in plain language on the surface itself. An unqualified
+  "see all of it" claim would be quietly false, and a privacy surface that overstates its own
+  coverage is worse than one that admits its edges.
+
   This is deliberately a *first-class* surface, not a settings sub-tab footnote: the bus is the
   most intimate data Aperture holds, and the epic's Module Contract clause 6 makes its
   legibility a requirement, not a courtesy.
@@ -407,7 +511,12 @@ spec_id: S128-aperture-client
   1. The panel lists every registered topic with: plain-language description, what it carries
      (fields, in words), retention class, current retained count and oldest age, publish/consume
      modules, and its opt-out toggle. **Nothing is summarized away** — a "view raw events"
-     affordance shows the actual retained envelopes.
+     affordance shows the actual retained envelopes. Each entry is labelled with its scope:
+     session-retained, or a module-owned projection (`pinned`). The panel header states that
+     inspection covers this session only and points at where module-owned state is managed.
+     Where APTR-167's read-audit is present, each topic additionally shows when the assistant last
+     read it; the panel degrades gracefully if that data is absent rather than asserting "never
+     read".
   2. Clear is offered at two scopes: one topic, or the entire bus. Both call
      `DELETE /v1/aperture/events`. Clearing is immediate, confirmed, and reports what it removed.
   3. Export writes a JSON file **locally, through the browser's own download path**. It uploads
@@ -430,7 +539,10 @@ spec_id: S128-aperture-client
      telemetry, and here is exactly how to see and delete everything in it.
 
   ## TEST PLAN
-  - Unit: every registered topic appears in the panel with description, retention class, and count
+  - Unit: every registered topic appears in the panel with description, retention class, count,
+    and an explicit scope label (session-retained vs module-owned projection)
+  - Unit: the panel states that inspection is per-session; a rendering that claims fleet-wide or
+    all-session coverage FAILS this test
   - Unit: raw-event view renders the actual retained envelopes, not a derived summary
   - Unit: clearing one topic leaves other topics' retained events intact
   - Unit: export produces a valid JSON document containing exactly the retained events
@@ -459,8 +571,10 @@ spec_id: S128-aperture-client
     cross-module answers degrading to "I don't have that context" rather than erroring
 
 - **Acceptance criteria:**
-  - [ ] Every topic is listed with a plain-language description, retention class, count, and age
-  - [ ] Raw retained envelopes are viewable, not just a summary
+  - [ ] Every topic is listed with a plain-language description, retention class, count, and age,
+        and raw retained envelopes are viewable rather than only a summary
+  - [ ] Inspection scope is stated honestly on the surface: per-session bus contents, with
+        module-owned `pinned` state labelled as a projection managed by its owning module
   - [ ] Clear works at both topic and whole-bus scope and reports what it removed
   - [ ] Export is local-only with zero network requests, proven by a negative test
   - [ ] Opt-out reflects server state on read-back; optimistic-only state is a test failure
@@ -529,8 +643,13 @@ spec_id: S128-aperture-client
      set of states invented in the client. Detail is deep-linkable by item id, so Sprint E deep
      links and assistant-driven navigation both address it.
   7. Detail is the launch point for playback (APTR-53) and exposes that affordance only when the
-     playback capability is `available`; otherwise the affordance is present but inert with a
-     reason, so the user learns *why* rather than finding a missing button.
+     playback capability is `available` **and APTR-161 classifies the item as playable via remux**;
+     otherwise the affordance is present but inert with a reason — including the D4 deferred
+     reason, "not playable in this client yet" — so the user learns *why* rather than finding a
+     missing button or a broken player. Empty-but-healthy library states are APTR-165's.
+  7a. Artwork rides the BFF media path and inherits its response-header discipline (APTR-53 §1a):
+     `nosniff`, an authoritative non-sniffed `Content-Type`, and raster formats only — a
+     script-bearing SVG must be refused or transcoded, never served inline.
   8. **Bus citizenship:** publishes `muse.browse` (filter, sort, selected item id) on a debounce
      and on detail mount; consumes `shell.focus` so the surface knows when it is foregrounded and
      can stop publishing when it is not, and consumes `muse.playback` so an item currently or
@@ -563,6 +682,10 @@ spec_id: S128-aperture-client
   - Negative: assert no artwork `<img src>` resolves to an external origin (grep + render test)
   - Negative: an item detail payload containing an external artwork URL must NOT be rendered as
     an image source — assert it is routed through the BFF path or dropped, never fetched directly
+  - Negative: a script-bearing SVG offered as artwork is refused or rasterized — serving it inline
+    FAILS this test
+  - Negative: for an item classified as needing a transcode, the playback affordance renders inert
+    with the deferred reason and mounting a player FAILS the test
 
   ## EDGE CASES
   - An item with no artwork — render a token-styled placeholder, never a broken image icon
@@ -597,7 +720,7 @@ spec_id: S128-aperture-client
 - **Priority:** Critical
 - **Labels:** muse, media, capability, security, rust, prerequisite
 - **Agent:** claude
-- **Estimate:** 6h
+- **Estimate:** 7h
 - **Description:** Aperture cannot play media because **the media module does not serve media
   bytes at all today** — there is no byte-serving route, no `206 Partial Content`, and no
   `Content-Range` anywhere in its source. This item adds the capability Aperture will consume.
@@ -646,8 +769,28 @@ spec_id: S128-aperture-client
      overflows on `offset + length`. Every one of those is refused, not clamped-then-served,
      except the single documented clamp: a read that starts in range and extends past EOF is
      served truncated to EOF with the granted length reported honestly.
-  3. Tickets are short-lived, session-bound, and revocable. Session revocation invalidates
-     outstanding tickets immediately — a ticket must **not** remain honored until its TTL.
+  3. **Ownership of minting and verification is settled here, in one place.** The review found it
+     split ambiguously across two repositories with no mechanism connecting them, so:
+     - **The media module owns mint, verify, and revoke.** All three are implemented by this item.
+       The BFF never mints a ticket itself, never signs one, and holds no ticket-signing key.
+     - The BFF **requests** a mint through the sanctioned door, presenting `{ item_id,
+       session_epoch }`. The media module has no concept of an Aperture session and must not grow
+       one; `session_epoch` is an **opaque, monotonically increasing integer** the BFF derives from
+       its own session record. The media module stores it on the ticket and compares it — it never
+       interprets it, never resolves it to a user, and never calls back into Aperture.
+     - **Revocation mechanism, stated explicitly:** ending or revoking an Aperture session bumps
+       that session's epoch, and the BFF calls a door operation to raise the media module's
+       recorded floor for that opaque session key. Any ticket carrying an epoch **below** the floor
+       is refused on its next verify, ahead of its TTL. This is what "session-bound" means; it is
+       one direction of data flow, one door, and no shared secret between the repositories.
+     - Verification is fail-closed on an **unknown or absent** epoch floor: refuse, never default
+       to honoring the ticket.
+  3a. Tickets are short-lived and travel in the **request body only, never a query parameter or a
+     URL path segment**, so a live capability token cannot land in an access log, browser history,
+     or a referrer-adjacent surface. A grep-based negative test asserts this on both sides.
+  3b. Outstanding tickets are **bounded per session key** — minting past the bound revokes the
+     oldest rather than growing without limit, so the mint path cannot be used to accumulate
+     thousands of live tokens.
   4. No library file path, storage location, mount point, or backend credential ever appears in a
      response, an error body, or a log line the caller can see. Errors map to the module's
      existing structured error shape and are redacted.
@@ -673,7 +816,17 @@ spec_id: S128-aperture-client
     authorization test and a pass here with any other outcome is a security failure
   - Negative: a negative offset, an offset past EOF, a length over the maximum, and an
     `offset + length` that overflows are each REFUSED (not clamped, not served)
-  - Negative: after session revocation an outstanding, unexpired ticket is REFUSED
+  - Unit: mint, verify, and revoke are all implemented in this module; a grep asserts the BFF-side
+    code contains no ticket construction and no ticket-signing key read
+  - Negative: after the session epoch floor is raised, an outstanding, unexpired ticket carrying
+    the older epoch is REFUSED on its next verify — this is the revocation mechanism, and honoring
+    it to TTL is a security failure
+  - Negative: a ticket presenting an epoch for which no floor is recorded is REFUSED (fail-closed),
+    not honored by default
+  - Negative: a ticket supplied as a query parameter or path segment rather than in the request
+    body is REFUSED, and a grep test FAILS the build if either side constructs such a URL
+  - Negative: minting past the per-session outstanding-ticket bound revokes the oldest ticket
+    rather than growing the live set without limit
   - Negative: assert no file path, storage location, mount point, or credential appears in any
     response, error body, or caller-visible log line
 
@@ -695,72 +848,114 @@ spec_id: S128-aperture-client
         `Content-Range`, and no change to the door's header surface
   - [ ] A ticket authorizes exactly one item and cannot be widened by any crafted offset, length,
         or overflow; every such attempt is refused
-  - [ ] Session revocation invalidates outstanding tickets immediately, ahead of TTL
+  - [ ] Mint, verify, and revoke all live in this module; the BFF requests a mint through the door
+        with an opaque `session_epoch` and never constructs or signs a ticket
+  - [ ] Revocation works by raising the recorded epoch floor: a ticket below the floor is refused
+        ahead of TTL, and an unknown floor fails closed
+  - [ ] Tickets travel in the request body only — never a query parameter or path segment — and
+        outstanding tickets are bounded per session key
   - [ ] No file path, storage location, mount point, or credential is caller-visible anywhere
-  - [ ] Chunk and length bounds come from named config; secrets via the secret manager
-  - [ ] No hardcoded infrastructure values in new/modified code
-  - [ ] All existing tests still pass
+  - [ ] Chunk and length bounds come from named config; secrets via the secret manager; no
+        hardcoded infrastructure values in new/modified code; all existing tests still pass
 
 ---
 
-### APTR-53: Muse playback — genuine in-shell media playback, not a link-out
+### APTR-53: Muse playback — in-shell playback of remuxable content, honest about the rest
 - **Priority:** High
 - **Labels:** aperture, muse, playback, modules, web, security
 - **Agent:** claude
-- **Estimate:** 7h
-- **Blocked by:** APTR-51, APTR-52
+- **Estimate:** 8h
+- **Blocked by:** APTR-51, APTR-52, APTR-160, APTR-161
 - **Description:** Play media inside Aperture. This is a real capability with a real player — a
   button that opens another application would defeat the entire point of the shell, and would
   make "what was I watching" unanswerable. The player is a first-class surface with transport
-  controls, seeking, subtitle/audio track selection where the backend offers them, and a
-  compact persistent mode that survives navigation within the shell.
+  controls, seeking, track selection within the scope APTR-161 defines, and a compact persistent
+  mode that survives navigation within the shell.
+
+  **Scope, per decision D4 — read this before the file list.** The original draft assumed a media
+  element could be fed raw chunks of a library file. It cannot. Media Source Extensions accepts
+  **fragmented MP4 and WebM only**; a stock MP4 carries its `moov` atom at the end and an MKV is a
+  different container entirely, and neither can be appended to a `SourceBuffer`. Vendoring a
+  third-party demuxer is forbidden by the epic. So:
+  - This item plays content the media module can deliver as **fragmented MP4 via the remux
+    capability of APTR-160** — a container rewrite of already-compatible codecs, no re-encoding.
+  - Content whose **codecs** are not natively playable requires a full transcode. That is
+    **explicitly deferred out of this sprint.** APTR-161 classifies it and renders an honest "not
+    playable in this client yet" state with the reason. A deferred item never reaches this player,
+    and this player never renders a black rectangle, an infinite spinner, or a dead element.
+  - The remux path is **APTR-160's** item and estimate, deliberately not folded into this one, so
+    the sprint cannot again hide its hardest problem inside a player estimate.
+  - **Resume-position tracking (APTR-54) is independent of all of this.** It is fed by the bus and
+    by other clients of the media module, so "what was I watching" keeps working for an item this
+    client cannot itself play. APTR-54 is not blocked on playback.
 
   Playback consumes the **typed ranged-read capability** landed by APTR-52 —
-  `{ item_id, ticket, offset, length }` in, a bounded chunk stream out. There are no HTTP range
-  semantics anywhere in this path: no `Range` request header, no `206`, no `Content-Range`, and
-  no extension of the door's header surface. Seeking is not a header; it is a new ranged read at
-  a new offset. That is a constraint the client is built around from the start, not a degraded
-  fallback.
+  `{ item_id, ticket, offset, length }` in, a bounded chunk stream out — reading the fragmented
+  output APTR-160 produces. There are no HTTP range semantics anywhere in this path: no `Range`
+  request header, no `206`, no `Content-Range`, and no extension of the door's header surface.
+  Seeking is not a header; it is a new ranged read at a new offset, aligned to a fragment boundary
+  the remux capability reports. That is a constraint the client is built around from the start,
+  not a degraded fallback.
 
   ## FILES
   - `client/src/modules/muse/PlayerSurface.tsx` — the full player surface
   - `client/src/modules/muse/MiniPlayer.tsx` — the compact persistent player
-  - `client/src/modules/muse/playbackEngine.ts` — media element lifecycle, buffer feeding, error mapping
+  - `client/src/modules/muse/playbackEngine.ts` — media element and `MediaSource` lifecycle,
+    `SourceBuffer` append scheduling, error mapping
   - `client/src/modules/muse/rangedReader.ts` — offset-driven read scheduling, cancellation, backpressure
-  - `client/src/modules/muse/tracks.ts` — subtitle/audio track selection
   - `client/src/modules/muse/playbackEngine.test.ts`, `client/src/modules/muse/rangedReader.test.ts`,
     `client/src/modules/muse/PlayerSurface.test.tsx`
-  - `docs/PLAYBACK.md` — what plays natively, what requires backend transcode, and the failure modes
-  - **Agent-core repo (sibling PR):** a BFF playback route that mints a **short-lived,
-    single-item, session-bound stream ticket** and issues ranged reads via
-    `forward_stream_with_idle_timeout`; TTL from `APERTURE_MEDIA_STREAM_TICKET_TTL_SECONDS`
+  - `docs/PLAYBACK.md` — the support matrix: what plays via remux, what is deferred pending
+    transcode, and every failure mode with its user-visible wording
+  - **Agent-core repo (sibling PR):** a BFF playback route that **requests** a short-lived,
+    single-item, session-bound stream ticket from the media module (APTR-52 owns minting; the BFF
+    supplies the opaque `session_epoch` and holds no signing key) and issues ranged reads via
+    `forward_stream_with_idle_timeout`; TTL and idle timeout from
+    `APERTURE_MEDIA_STREAM_TICKET_TTL_SECONDS` and `APERTURE_MEDIA_READ_IDLE_TIMEOUT_SECONDS`
 
   ## APPROACH
   1. **Security first.** The client never receives a library file path, a storage location, or a
-     backend credential. It receives an opaque, short-lived, single-item, session-bound ticket
-     and requests bounded chunks from a same-origin BFF path. A ticket is not reusable for another
-     item, does not survive session revocation, and expires on its configured TTL. Every bound is
-     re-validated server-side by APTR-52 — the client's correctness is convenience, not the
-     security boundary.
+     backend credential. It receives an opaque, short-lived, single-item, session-bound ticket —
+     **minted by the media module (APTR-52) at the BFF's request, never by the BFF itself** — and
+     requests bounded chunks from a same-origin BFF path. The ticket travels in the request body
+     only, never a query parameter or path segment. A ticket is not reusable for another item, is
+     refused once its session's epoch floor is raised (the revocation mechanism defined in
+     APTR-52), and expires on its configured TTL. Every bound is re-validated server-side by
+     APTR-52 — the client's correctness is convenience, not the security boundary.
+  1a. **Response-header discipline on the BFF media path.** The BFF serves attacker-influenceable
+     file bytes from the app's own origin, which makes header sloppiness a same-origin XSS vector.
+     Every media and artwork response carries `X-Content-Type-Options: nosniff`, an authoritative
+     `Content-Type` taken from APTR-52's typed header frame and **never sniffed from content**,
+     and `Content-Disposition: attachment` for anything that is not being fed to a media element.
+     Negative test: a file whose bytes are HTML, fetched through the media path, must never be
+     renderable as a document.
   2. **Ranged reads, not byte-range HTTP.** `rangedReader.ts` maintains a read cursor and feeds
-     the media element from bounded chunks. A seek **cancels the in-flight read and starts a new
-     one at the new offset** — reads are never interleaved, because two concurrent readers feeding
-     one buffer is a corruption bug, not a performance win. Read-ahead depth is bounded so a fast
-     link cannot pull an entire film into memory.
+     the `SourceBuffer` from bounded chunks of the **fragmented** stream APTR-160 produces. A seek
+     **cancels the in-flight read and starts a new one at the fragment-aligned offset** reported by
+     the remux capability's fragment index — reads are never interleaved, because two concurrent
+     readers feeding one buffer is a corruption bug, not a performance win. Appending at an
+     arbitrary byte offset is not valid MSE input and the reader must not attempt it. Read-ahead
+     depth is bounded so a fast link cannot pull an entire film into memory.
   3. **The BFF uses `forward_stream_with_idle_timeout`, not `forward_stream`.** Playback is a
      fundamentally different workload shape from an agentic turn: chunks either arrive
      continuously or the read is dead, so an agent-sized idle tolerance would leave a stalled
-     player hanging for minutes with no signal. Use a playback-appropriate idle timeout of
-     **15 seconds**, from `APERTURE_MEDIA_READ_IDLE_TIMEOUT_SECONDS` — long enough to survive a
-     disk seek or a brief network hiccup, short enough that a genuinely stalled read surfaces as
-     buffering-then-error within a few seconds rather than an indefinite spinner.
-  4. The player is a standard media element driven by `playbackEngine.ts` — no third-party player
-     library is vendored. Ideas from prior art may be cited; code may not be copied.
-  5. Codec/container reality is handled honestly: probe playability, and when the browser cannot
-     play an item natively, request the module's transcode capability if it reports `available`,
-     and otherwise state plainly that this item cannot play in this client and why. A silent
-     black rectangle is the failure mode this item exists to prevent.
-  6. Track selection (subtitles, audio) is offered only for tracks the backend actually reports.
+     player hanging for minutes with no signal. The timeout is read from
+     `APERTURE_MEDIA_READ_IDLE_TIMEOUT_SECONDS`. **This spec states no value for it** — a
+     playback-appropriate recommended default, and the reasoning for it, belong in
+     `docs/CONFIGURATION.md`. A normative literal in a spec item that also claims the value comes
+     from config is a contradiction, and the pre-flight says names only.
+  4. The player is a standard media element driven by `playbackEngine.ts` over `MediaSource` — no
+     third-party player library, demuxer, or remuxer is vendored. Ideas from prior art may be
+     cited; code may not be copied. The remuxing itself happens backend-side in APTR-160,
+     which is precisely why no client-side demuxer is needed.
+  5. **Playability is decided before the player mounts, by APTR-161's classifier, never by the
+     player discovering failure.** Given a `playable-via-remux` classification the player mounts
+     and plays. Given `deferred-needs-transcode` or `unsupported`, the player **does not mount at
+     all**: the detail surface renders APTR-161's honest unavailable state instead. There is no
+     probe-then-fail path, no transcode request (this sprint assumes no transcode capability), and
+     no silent black rectangle — which is the failure mode this item exists to prevent.
+  6. Track selection UI is presented by APTR-161, which also owns what the backend can actually
+     deliver; this item consumes that selection and applies it to the media element.
   7. `MiniPlayer` keeps playback alive while the user navigates to other module surfaces within
      the shell, because "keep watching while I check a build" is exactly the shell's value.
   8. **Bus citizenship:** publishes `muse.playback` (item, state, position, duration) on state
@@ -774,11 +969,12 @@ spec_id: S128-aperture-client
 
   ## TEST PLAN
   - Unit: transport controls drive the engine (play/pause/seek/rate) and reflect real element state
-  - Unit: a seek issues a new ranged read at the new offset and does not restart from zero
+  - Unit: a seek issues a new ranged read at the fragment-aligned offset and does not restart from
+    zero; an unaligned append is never attempted
   - Unit: read-ahead depth is bounded; a fast link does not buffer the whole item into memory
-  - Unit: an unplayable codec produces a stated reason and a transcode offer when that capability
-    is available, and a plain explanation when it is not
-  - Unit: track selection lists only backend-reported tracks
+  - Unit: given a `deferred-needs-transcode` or `unsupported` classification, the player **does not
+    mount** and APTR-161's stated-reason surface renders instead
+  - Unit: the BFF media response carries `nosniff` and an authoritative non-sniffed `Content-Type`
   - Unit: `muse.playback` publishes on every state transition and at a coalesced position cadence
   - Integration: navigating to another module surface keeps `MiniPlayer` playing
   - Integration: an expired ticket triggers exactly one re-mint and resumes at the current offset
@@ -792,7 +988,14 @@ spec_id: S128-aperture-client
     semantics FAILS this test
   - Negative: a seek during an in-flight read must CANCEL the prior read — a test asserting two
     concurrently-live reads feeding one buffer FAILS
-  - Negative: after session revocation, an outstanding ticket must be REJECTED, not honored to TTL
+  - Negative: after the session epoch floor is raised, an outstanding ticket must be REJECTED, not
+    honored to TTL
+  - Negative: feed the engine a **non-fragmented** MP4 fixture; the engine must refuse before
+    mounting and surface the deferred state — an attempt to append it to a `SourceBuffer` FAILS
+    this test, since that is exactly the assumption the review found broken
+  - Negative: a file whose bytes are HTML, fetched through the BFF media path, must not be
+    renderable as a document — a response lacking `nosniff` or with a sniffed content type FAILS
+  - Negative: grep asserts the ticket never appears in a URL, query string, or path segment
 
   ## EDGE CASES
   - **A seek during an in-flight read** — cancel the prior read, discard its buffered remainder,
@@ -809,8 +1012,12 @@ spec_id: S128-aperture-client
     and must never retry indefinitely without telling the user.
   - Autoplay policy blocking playback without a user gesture — surface an explicit "press play"
     state rather than appearing broken
-  - Seeking into a not-yet-available region of a still-transcoding item — clamp to what the
-    capability reports as available and explain
+  - Seeking into a not-yet-remuxed region of an item still being fragmented — clamp to what
+    APTR-160 reports as available and explain, rather than appending a gap
+  - An item reclassified mid-session (a remux completing, or a codec probe correcting itself) —
+    the surface re-evaluates on the `module.capability` bus event rather than requiring a reload
+  - An item that is deferred rather than playable — the MiniPlayer must not appear for it at all;
+    a persistent player chrome around content that cannot play is worse than no chrome
   - Two tabs playing the same item — both are valid; `muse.playback` last-writer-wins per the
     contract and the privacy panel shows why the position moved
   - The user opting out of `muse.playback` — playback still works fully; only the bus publication
@@ -819,18 +1026,23 @@ spec_id: S128-aperture-client
     pause/stop event flushes immediately
 
 - **Acceptance criteria:**
-  - [ ] Media plays in-shell with working transport and track selection, driven by typed ranged
-        reads (`{item_id, ticket, offset, length}`) — never an HTTP `Range` header or a `206`
-  - [ ] Seeking issues a new ranged read and cancels the in-flight one; reads never interleave
-  - [ ] The BFF uses `forward_stream_with_idle_timeout` with a playback-appropriate idle timeout
-        from named config, not the default agentic-turn tolerance
-  - [ ] Client receives only an opaque short-lived single-item session-bound ticket — never a
-        path, location, or credential
-  - [ ] A ticket expiring mid-playback re-mints once and resumes at the current offset; a stalled
-        read surfaces a stated error and is never presented as end-of-stream
-  - [ ] No third-party player source vendored
-  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
-  - [ ] README and `docs/PLAYBACK.md` document playback support and its failure modes
+  - [ ] Content classified `playable-via-remux` plays in-shell with working transport, driven by
+        typed ranged reads (`{item_id, ticket, offset, length}`) over fragmented MP4 — never an
+        HTTP `Range` header, never a `206`, never a raw non-fragmented container
+  - [ ] Content requiring a full transcode **never mounts a player** and renders APTR-161's stated
+        deferred surface instead; no probe-then-fail path and no transcode call exist in this item
+  - [ ] Seeking issues a new fragment-aligned ranged read and cancels the in-flight one; reads
+        never interleave
+  - [ ] The BFF uses `forward_stream_with_idle_timeout` with the timeout read from named config;
+        **no timeout value appears in this spec**
+  - [ ] Client receives only an opaque short-lived single-item session-bound ticket, minted by the
+        media module and carried in the request body — never a path, location, credential, or URL
+  - [ ] BFF media responses set `nosniff` and an authoritative non-sniffed `Content-Type`; HTML
+        bytes served through the media path are not renderable as a document
+  - [ ] No third-party player, demuxer, or remuxer source vendored; no hardcoded infrastructure
+        values in new/modified code; all existing tests still pass
+  - [ ] README and `docs/PLAYBACK.md` document the support matrix, the deferred class, and the
+        failure modes
 
 ---
 
@@ -839,12 +1051,24 @@ spec_id: S128-aperture-client
 - **Labels:** aperture, muse, context-bus, modules
 - **Agent:** claude
 - **Estimate:** 5h
-- **Blocked by:** APTR-53
+- **Blocked by:** APTR-51, APTR-49
 - **Description:** Make "resume where I left off" real, and make it the worked example of the
   `pinned` retention class from APTR-47. Playback position survives reload, session end, and
-  device change, and — because it lives on the bus — the assistant can answer "what was I
+  device change, and — because it is projected onto the bus — the assistant can answer "what was I
   watching" without being told, which is the concrete Muse × assistant win the epic's Gate 2
   argument named.
+
+  **This item is deliberately NOT blocked on playback (decision D4).** Position state is fed by the
+  bus and by other clients of the media module, so "what was I watching" must work for an item
+  Aperture cannot itself play — which, after the D4 re-scope, is a whole class of the library. A
+  resume feature gated on the client's own player would have silently shrunk to the remuxable
+  subset. It reads and writes the media module's watch state, and the player (APTR-53) is one
+  publisher among several, not a prerequisite.
+
+  Note on `pinned`: per the corrected APTR-47 definition, `pinned` is a **read-through projection
+  of the media module's store**, not durable bus state. That is what makes surviving session end
+  and device change consistent with the bus being single-session — the survival lives in the
+  module, and the bus shows it.
 
   ## FILES
   - `client/src/modules/muse/resume.ts` — resume resolution and write-through policy
@@ -878,8 +1102,10 @@ spec_id: S128-aperture-client
   - Unit: terminal transitions (pause, stop, unmount, tab hide) each flush a write
   - Integration: play, reload the client, and confirm the resume affordance offers the recorded
     position and that start-over is always available
-  - Integration: the assistant, reading only retained bus state, can name the most recent item
+  - Integration: the assistant, reading only projected bus state, can name the most recent item
     and its position
+  - Integration: with the in-client player disabled entirely, a position written by another client
+    still resolves, renders, and is assistant-readable — resume must not depend on APTR-53
   - Verify no hardcoded IPs, hostnames, org names, ports, or absolute user paths in
     new/modified files
   - Negative: with `muse.playback` opted out, assert no position is published, none is written
@@ -888,6 +1114,9 @@ spec_id: S128-aperture-client
     the module's store, not the bus
 
   ## EDGE CASES
+  - An item Aperture cannot play in-client (deferred per D4) that has a position recorded by
+    another client — resume state still renders and the assistant can still answer about it; the
+    resume *action* states that playback is not available in this client yet
   - Two devices watching the same item — the module's store is authoritative; the later write wins
     and the affordance shows the position it will actually resume from
   - A resume position beyond the item's duration after a re-encode changed length — clamp and
@@ -902,11 +1131,11 @@ spec_id: S128-aperture-client
   - [ ] Positions write through to the media module's store as the authority, throttled and idempotent
   - [ ] Resume offers the recorded position explicitly, never resumes silently, always offers start-over
   - [ ] Near-start/near-end thresholds come from named config, not inline constants
-  - [ ] The assistant can answer "what was I watching" from retained bus state alone
+  - [ ] The assistant can answer "what was I watching" from projected bus state alone, **including
+        for an item this client cannot play**, with no dependency on APTR-53 having run
   - [ ] Opt-out fully suppresses publication and write-through with no local fallback cache
   - [ ] Bus clear does not delete the media module's own watch state, and the UI says so
-  - [ ] No hardcoded infrastructure values in new/modified code
-  - [ ] All existing tests still pass
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
 
 ---
 
@@ -1065,7 +1294,7 @@ spec_id: S128-aperture-client
 - **Labels:** aperture, harmony, marquee, assistant, context-bus, web
 - **Agent:** claude
 - **Estimate:** 8h
-- **Blocked by:** APTR-49, APTR-56
+- **Blocked by:** APTR-49, APTR-56, APTR-163
 - **Description:** **The marquee capability of this epic**, first half. Select a range of a
   conversation, have the assistant draft a real spec from it, and review and edit that draft in
   the client until it is right. APTR-58 ingests it; this item produces something worth ingesting.
@@ -1117,7 +1346,13 @@ spec_id: S128-aperture-client
      not silently truncated — a spec drafted from a quietly clipped conversation is worse than no
      spec at all.
   7. **Bus citizenship:** publishes `chat.selection` and `harmony.spec` (draft id); consumes
-     `chat.thread` so the selection surface knows its source thread.
+     `chat.thread` so the selection surface knows its source thread. **`chat.thread` and the
+     `chat.selection` publish mechanism are delivered by APTR-163**, which retrofits topic
+     registration onto the Sprint C chat and shell surfaces. That is a hard dependency, declared
+     here rather than discovered at integration time — the review correctly flagged that this item
+     consumed topics nothing published.
+  7a. The selection is bounded by `APERTURE_CHAT_SELECTION_MAX_MESSAGES` at the contract level in
+     addition to the character limit, so a pathological range cannot bloat the bus payload.
   8. Drafts are stored server-side through `terminus-client` and are never written to a local
      file, a browser storage bucket that survives logout, or any second persistence path.
 
@@ -1173,7 +1408,7 @@ spec_id: S128-aperture-client
 - **Priority:** Critical
 - **Labels:** aperture, harmony, marquee, pipeline, security
 - **Agent:** claude
-- **Estimate:** 7h
+- **Estimate:** 8h
 - **Blocked by:** APTR-57
 - **Description:** **The marquee capability, second half.** Take a reviewed draft and ingest it
   into the build pipeline so it becomes tracked work items — through the **one sanctioned Plane
@@ -1211,10 +1446,26 @@ spec_id: S128-aperture-client
      item records that it was drafted from a chat range, with the source thread id, message range,
      content digest, drafting proxy name, draft revision id, and reviewer identity. A reader six
      months later must be able to answer "where did this come from" from the work item alone.
-  5. **Idempotency.** The ingest request carries an idempotency key derived from the draft
-     revision. A retry after a network failure must not create a duplicate set of items. A
-     partially-applied ingest is reported item-by-item with what was created and what was not,
-     and is resumable — never silently re-run from the top.
+  5. **Idempotency, with a named state store.** The review was right that "retry creates no
+     duplicates" and "an ingest that succeeded while the response was lost is detected" are
+     untestable promises without durable server-side state. That state is specified here as an
+     **ingest ledger, kernel-side, reached through `terminus-client`** — not a BFF-local map, not
+     an in-memory table that dies with a restart, and not a second database the BFF opens.
+     - Key: the idempotency key derived from the draft revision id (stable across retries).
+     - Value: a ledger record created **before** any work item is created, holding the key, the
+       draft revision, the target project and prefix, the planned item list, and a per-planned-item
+       completion record (`pending` → `created` with the created item id, or `failed` with a
+       reason).
+     - Flow: consult the ledger first. No record ⇒ create the record, then create items, writing
+       each completion as it lands. A complete record ⇒ return "already ingested" with the existing
+       item ids and create nothing. An incomplete record ⇒ **resume from the first `pending`
+       entry**, never from the top.
+     - A lost response is therefore indistinguishable from a retry, which is the point: the next
+       attempt with the same key reads the ledger and reports the true state.
+     - Two concurrent ingests of the same revision serialize on the ledger record; the loser
+       reports "already ingested" and links to the existing items rather than racing.
+     - Ledger records are retained long enough to be useful for provenance and audit, bounded by a
+       named config key, and carry no transcript content — only ids.
   6. **Rate discipline.** The tracker is rate-sensitive; ingest paces its calls and batches where
      the tool supports it, rather than firing a burst that trips a limit mid-creation.
   7. **Result hands off to APTR-56.** On success the user lands on the ingested spec in the spec
@@ -1227,8 +1478,14 @@ spec_id: S128-aperture-client
   - Unit: nothing is created without explicit confirmation
   - Unit: the idempotency key derives from the draft revision and is stable across retries
   - Integration: a successful ingest creates the expected items, each carrying the full provenance
-  - Integration: a retry with the same key creates nothing additional
-  - Integration: a partial failure reports per-item outcomes and is resumable without duplication
+  - Unit: the ledger record is written **before** the first item is created; a crash between the
+    two leaves a resumable record, not an orphaned creation
+  - Integration: a retry with the same key reads the ledger, creates nothing additional, and
+    returns the existing item ids
+  - Integration: a partial failure leaves per-planned-item completion records; the next attempt
+    resumes from the first `pending` entry and never re-creates a `created` one
+  - Integration: an ingest that succeeds while the response is dropped is detected on the next
+    attempt via the ledger and reported as already-ingested
   - Integration: with the Plane tool unreachable, ingest reports `capability-unavailable` and
     creates nothing
   - Verify no hardcoded IPs, hostnames, org names, ports, or absolute user paths in
@@ -1248,10 +1505,12 @@ spec_id: S128-aperture-client
     the prefix-promotion path; do not create a project on the fly
   - The draft was reviewed, then its source thread changed — the content digest mismatch is
     surfaced at preflight so the reviewer re-confirms deliberately
-  - Two clients ingesting the same draft revision concurrently — the idempotency key serializes;
-    the loser reports "already ingested" and links to the existing items
-  - An ingest that succeeds while the response is lost — the next attempt with the same key must
-    detect the existing items rather than duplicating them
+  - Two clients ingesting the same draft revision concurrently — they serialize on the ledger
+    record; the loser reports "already ingested" and links to the existing items
+  - An ingest that succeeds while the response is lost — the next attempt with the same key reads
+    the ledger's completion records and reports the existing items rather than duplicating them
+  - The ledger itself unreachable — refuse the ingest with `capability-unavailable` and create
+    nothing; ingesting without the ability to record what was created is how duplicates are born
   - A draft containing an item the validator accepts but that is over-scoped — out of scope for
     mechanical enforcement here; the reviewer is the gate, and the docs say so plainly
 
@@ -1263,7 +1522,9 @@ spec_id: S128-aperture-client
   - [ ] Preflight shows exactly what will be created and requires explicit confirmation
   - [ ] Every created item carries source thread, message range, content digest, proxy name,
         draft revision, and reviewer identity
-  - [ ] Retry with the same idempotency key creates no duplicates; partial failure is resumable
+  - [ ] Idempotency and resume are backed by a named durable store — a kernel-side ingest ledger
+        reached through `terminus-client`, written before creation, with per-item completion
+        records — so retry creates no duplicates and a partial failure resumes from `pending`
   - [ ] Plane tool unreachable ⇒ `capability-unavailable`, nothing created, no alternate route
   - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
   - [ ] README and `docs/SPEC-INGEST.md` document the flow and its explicit refusals
@@ -1274,8 +1535,8 @@ spec_id: S128-aperture-client
 - **Priority:** Critical
 - **Labels:** aperture, modules, assistant, contract, ci
 - **Agent:** claude
-- **Estimate:** 7h
-- **Blocked by:** APTR-51, APTR-53, APTR-55, APTR-56, APTR-57
+- **Estimate:** 8h
+- **Blocked by:** APTR-51, APTR-53, APTR-55, APTR-56, APTR-57, APTR-162
 - **Description:** Module Contract clause 4 says every meaningful module action must be invocable
   by the assistant as a tool, not only as a button. A checklist cannot hold that line — the first
   time someone ships a button in a hurry, the parity silently lapses and nobody notices until the
@@ -1289,8 +1550,9 @@ spec_id: S128-aperture-client
   - `contracts/aperture-actions-v1.md` — the action manifest contract: what counts as an action,
     what a declaration carries, and what parity means
   - `client/src/modules/actions/manifest.ts` — the declared action manifest (all modules)
-  - `client/src/modules/actions/declareAction.ts` — the declaration helper every action uses
-  - `client/src/modules/actions/parity.test.ts` — the gate
+  - `client/src/modules/actions/parity.test.ts` — the gate (legs 2 and 3)
+  - (`client/src/modules/actions/declareAction.ts` and the leg-1 enforcement are **APTR-162's**,
+    which is why this item is blocked by it rather than defining them twice)
   - `client/scripts/assert-action-parity.mjs` — CI-invocable form of the gate
   - `.gitea/workflows/ci.yml` — wire the parity job
   - `docs/ASSISTANT-PARITY.md` — how to add an action correctly
@@ -1306,11 +1568,23 @@ spec_id: S128-aperture-client
   2. Every action is declared through `declareAction({ id, module, title, params, toolName,
      capability })`. The declaration is the single source of truth: the UI control is *built from*
      the declaration, and the tool name it names is what parity is checked against.
-  3. **The gate has three legs, all mechanical:**
-     - **Leg 1 — no undeclared UI actions.** A static sweep of module surfaces finds interactive
-       controls that invoke a mutating or navigating handler without a corresponding
-       `declareAction` reference, and fails on a hit. This is the leg that catches the
-       shipped-in-a-hurry button.
+  3. **The gate has three legs, all mechanical — and per decision D8, each is implementable in
+     the language whose property it asserts.** The original Leg 1 was specified as "a static sweep
+     finds interactive controls that invoke a mutating or navigating handler," which is not
+     buildable: statically classifying an arbitrary handler as mutating is undecidable, so the
+     acceptance criterion "fails the build on a UI action with no declaration" could not have been
+     met in general. Leg 1 is therefore **re-specified and moved to its own item, APTR-162**, which
+     replaces the undecidable classification with an enforceable one: design-system action
+     components accept their handler **only** as a `declareAction` reference (a typed constraint
+     the compiler checks), an ESLint rule enforces that no raw handler is passed, and a runtime
+     registry assertion in tests confirms every rendered action control resolves to a manifest
+     entry. Same guarantee, actually buildable. This item owns legs 2 and 3 and consumes APTR-162's
+     leg 1 result.
+     - **Leg 1 — no undeclared UI actions.** Delivered by **APTR-162**. Its claim is narrowed to
+       exactly what is checkable: *no design-system action component receives a handler that is not
+       a `declareAction` reference*, plus *every action control rendered in the test suite resolves
+       to a manifest entry*. It does not claim to detect a mutating handler on an arbitrary
+       element, because nothing can.
      - **Leg 2 — every declared action resolves to a real tool.** The manifest is checked against
        the live tool surface enumerated through the door. A declaration naming a tool that does
        not exist fails.
@@ -1321,10 +1595,14 @@ spec_id: S128-aperture-client
      item detail, start playback, pause/resume playback, seek, select track, resume from position;
      Harmony — open run, watch run, open PR/review state, open spec, open spec item, create spec
      draft from a chat range, revise draft, ingest reviewed draft; Shell/bus — inspect bus, clear
-     bus (topic and whole), toggle topic opt-out, export bus.
-  5. Actions that are **deliberately** not assistant-invocable must be declared as such with a
-     written reason (e.g. an action requiring in-person confirmation). An undeclared exception is
-     a failure; a declared one is a reviewable decision. There is no silent third state.
+     bus (topic and whole), toggle topic opt-out, export bus, open the recall/becoming panel.
+  5. Actions that are **deliberately** not assistant-invocable, and whole action families
+     **deliberately deferred**, must be declared as such with a written reason. An undeclared
+     exception is a failure; a declared one is a reviewable decision. There is no silent third
+     state. The declared deferral list is maintained in `docs/DEFERRALS.md` (APTR-166) and read by
+     the gate, and it explicitly includes **Muse acquisition actions** (request, grab, retry,
+     cancel) — the review was right that silence there reads as an oversight against the epic's
+     own Gate 2 prose, and that this sprint's Muse surface is read-and-play by deliberate choice.
   6. The gate runs in CI as a blocking job and is reproducible locally. Leg 2 and leg 3 require
      the door; when the door is unreachable, the job **fails closed** with a clear reason —
      absence of a tool surface is never read as parity.
@@ -1340,15 +1618,17 @@ spec_id: S128-aperture-client
   - `node client/scripts/assert-action-parity.mjs` runs in CI as a blocking job
   - Verify no hardcoded IPs, hostnames, org names, ports, or absolute user paths in
     new/modified files
-  - Negative (**the point of the item**): add a new UI button that mutates module state without a
-    `declareAction` declaration; confirm leg 1 FAILS the build; revert
-  - Negative: point a declared action at a non-existent tool name; confirm leg 2 FAILS; revert
+  - Unit: every entry on the declared deferral list carries a written reason, and the Muse
+    acquisition family appears there explicitly
+  - Negative (**the point of the item**): point a declared action at a non-existent tool name;
+    confirm leg 2 FAILS the build; revert
   - Negative: widen a declared action's params beyond its tool's schema; confirm leg 3 FAILS; revert
   - Negative: with the door unreachable, confirm the gate FAILS CLOSED rather than passing
 
   ## EDGE CASES
-  - A control rendered by a shared primitive rather than a module file — the sweep must follow
-    the declaration, not the file location, so shared components are not a parity blind spot
+  - A control rendered by a shared primitive rather than a module file — enforcement follows the
+    declaration through the component's typed handler prop, not the file location, so shared
+    components are not a parity blind spot
   - An action that is genuinely presentation-only today and mutating tomorrow — the exclusion list
     is reviewed as part of any change to that control
   - A tool renamed backend-side — leg 2 catches it at build time, which is exactly the intent
@@ -1359,8 +1639,11 @@ spec_id: S128-aperture-client
 
 - **Acceptance criteria:**
   - [ ] The action manifest declares every user-facing module action across Muse, Harmony, and the
-        bus surfaces, with an explicit, reasoned exclusion list
-  - [ ] Leg 1 fails the build on a UI action with no declaration
+        bus surfaces, with an explicit, reasoned exclusion list and a declared deferral list that
+        names the Muse acquisition family
+  - [ ] Leg 1's claim is narrowed to what APTR-162 can actually enforce, and this item asserts no
+        undecidable property — no criterion here depends on statically classifying an arbitrary
+        handler as mutating
   - [ ] Leg 2 fails the build on a declaration naming a non-existent tool
   - [ ] Leg 3 fails the build on a param shape the named tool cannot accept
   - [ ] The gate fails closed when the tool surface cannot be enumerated
@@ -1413,7 +1696,15 @@ spec_id: S128-aperture-client
      (`kg_query` / `kg_search` / `kg_neighbors`) combined with build-run state from the Harmony
      surface, and cites what it drew on. Negative leg: with the KG capability unavailable, the
      assistant states that plainly and does not fabricate a change list — a confidently invented
-     answer must FAIL this test.
+     answer must FAIL this test. **Triage note, stated plainly so a failure lands in the right
+     repository:** this scenario exercises kernel behaviour (the assistant's KG tools and build
+     state) through an Aperture harness. **Aperture's own contribution here is the door-discipline
+     assertion and the decline-rather-than-fabricate leg**; nothing else in this scenario is built
+     by this sprint. A failure of the answer's *content* is a kernel issue, not an Aperture one,
+     and the behaviour contract says so in writing.
+  3a. **Scenario 1 is likewise scoped honestly after D4:** it asserts resume state and the declared
+     tool path (APTR-54, APTR-59), **not** that the item plays in-client. An item in the deferred
+     class must still produce a correct "what was I watching" answer, so the scenario seeds one.
   4. **The harness is adversarial about the single door.** Its stub fails the test on any outbound
      request that is not a `terminus-client`-mediated call: a direct forge call, a tracker REST
      call, a media service call, or any external origin. Every scenario therefore doubles as a
@@ -1468,3 +1759,696 @@ spec_id: S128-aperture-client
   - [ ] Memory, traits, and lore are unchanged after all scenarios run
   - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
   - [ ] README and `docs/CROSS-MODULE.md` document what the shell can answer across modules
+
+---
+
+## Items added by the 2026-08-01 review revision (APTR-160..167)
+
+> Reminder, repeated here because it is the easiest thing to get wrong: **these numbers are
+> identifiers, not an ordering.** Sprint D owns APTR-47..60; APTR-95..159 are allocated to other
+> sprints in this epic and are being consumed concurrently, so the additions continue at 160.
+> Several of these are Critical and merge **before** lower-numbered items — APTR-160 before
+> APTR-53, APTR-162 before APTR-59, APTR-163 before APTR-57. Order comes from `Blocked by`, never
+> from the number, and no existing item was renumbered.
+
+---
+
+### APTR-160: Media module — remux to fragmented MP4, the prerequisite playback actually needs
+- **Priority:** Critical
+- **Labels:** muse, media, playback, capability, rust, prerequisite
+- **Agent:** claude
+- **Estimate:** 8h
+- **Blocked by:** APTR-52
+- **Description:** Playback in a browser means Media Source Extensions, and MSE accepts
+  **fragmented MP4 or WebM only**. Real library content is neither: a stock MP4 keeps its `moov`
+  atom at the end of the file, and MKV is a different container. Appending either to a
+  `SourceBuffer` fails, and the epic forbids vendoring a third-party demuxer to work around it.
+  Decision D4 therefore makes remuxing a first-class prerequisite with **its own item and its own
+  estimate**, deliberately not folded into the player — the review found the sprint's hardest
+  problem hidden inside one confident sentence in a 7h player item, and this is the correction.
+
+  **Remux is a container rewrite, not a re-encode.** Compatible elementary streams are repackaged
+  into fragmented MP4 with an initialization segment and fixed-duration fragments. Nothing is
+  decoded, nothing is re-encoded, and content whose **codecs** are not natively playable is out of
+  scope entirely — it is classified as deferred by APTR-161 and never enters this path.
+
+  **This lands in the media module's own repository** as a separate PR that merges before
+  APTR-53's Aperture-side work, carrying its own ingest, review, merge, and post-merge gate there.
+
+  ## FILES
+  - **Media module repo:** a `media_remux` capability — request/response types, compatibility
+    probe, initialization-segment generation, fragment-index generation, and the fragmented output
+    exposed for reading through the existing `media_read` capability from APTR-52
+  - **Media module repo:** capability descriptor advertising `media_remux` with a per-item
+    classification result, so Aperture can gate before it mounts a player, plus tests
+  - **This repo:** `contracts/aperture-media-remux-v1.md` — the classification vocabulary, the
+    fragment-index shape Aperture seeks against, and the explicit statement that transcoding is
+    not part of this capability
+
+  ## APPROACH
+  1. **Classification first, work second.** A probe reports one of exactly three results for an
+     item: `playable-via-remux` (compatible codecs, container rewrite only), `needs-transcode`
+     (incompatible codecs — **refused by this capability**, deferred per D4), or `unsupported`
+     (unreadable or unrecognized). The vocabulary is closed and lives in the contract, so client
+     and module cannot drift into disagreeing about what "playable" means.
+  2. A `needs-transcode` classification is a **terminal, honest answer**, not a fallback path into
+     a transcode this sprint does not assume exists. The capability refuses; APTR-161 renders it.
+  3. Output is fragmented MP4: one initialization segment plus fixed-duration fragments sized from
+     `APERTURE_MEDIA_REMUX_SEGMENT_SECONDS`. A **fragment index** — fragment ordinal, byte offset,
+     start time, duration — is returned so a seek maps to a fragment-aligned byte offset the
+     APTR-52 ranged read can request. Seeking to an arbitrary byte offset is not valid MSE input,
+     so the index is what makes seeking correct rather than approximate.
+  4. Remuxed output is addressed through the **existing** `media_read` capability and the same
+     ticket model. This item opens no second byte-serving route, no second authorization model,
+     and no HTTP range semantics — every constraint APTR-52 established still holds.
+  5. Concurrency is bounded by `APERTURE_MEDIA_REMUX_MAX_CONCURRENT` so remuxing cannot be used to
+     exhaust the host. Work is cancellable, and an abandoned request releases its resources
+     promptly rather than running to completion unwatched.
+  6. No library file path, storage location, mount point, or backend credential appears in any
+     response, error body, or caller-visible log line — the same redaction posture as APTR-52.
+  7. Secrets via the secret manager, never `std::env::var` for anything token/key/secret-shaped.
+     No new outbound network path is opened. No third-party remuxer source is vendored into
+     Aperture; the module uses its own existing media tooling.
+
+  ## TEST PLAN
+  - Unit: a compatible-codec source classifies `playable-via-remux` and produces an initialization
+    segment plus fragments that a `SourceBuffer` accepts
+  - Unit: the fragment index maps a requested time to a fragment-aligned byte offset, and
+    sequential fragment reads reconstruct a playable stream
+  - Unit: remux is lossless at the elementary-stream level — no re-encode occurs (assert stream
+    parameters are unchanged between source and output)
+  - Unit: concurrency is bounded from named config; an abandoned request is cancelled and releases
+    its resources
+  - Verify no hardcoded IPs, hostnames, org names, ports, config values, or absolute user paths in
+    new/modified files
+  - Negative (**the D4 correction**): a non-fragmented MP4 and an MKV are each rejected as direct
+    MSE input, and the capability produces fragmented output for them instead — a test asserting
+    raw chunks are appendable FAILS, which is precisely the assumption the review broke
+  - Negative: an incompatible-codec source classifies `needs-transcode` and the capability
+    **REFUSES** rather than attempting a transcode or emitting a broken stream
+  - Negative: assert no file path, storage location, mount point, or credential appears in any
+    response, error body, or caller-visible log line
+
+  ## EDGE CASES
+  - An item with multiple audio tracks or embedded subtitles — remux carries what is compatible and
+    reports the rest to APTR-161 rather than silently dropping tracks
+  - A variable-frame-rate or malformed source whose timestamps are non-monotonic — refuse with a
+    typed reason rather than emitting fragments a player will stall on
+  - An item modified on disk mid-remux — terminate with a typed error; never emit a mixed-source
+    stream that would decode as corruption
+  - A very large item where remuxing the whole file up front would be wasteful — produce fragments
+    progressively and report how far the index currently extends, so the player clamps its seeks
+  - A remux requested concurrently for the same item by two sessions — deduplicate rather than
+    doing the work twice
+
+- **Acceptance criteria:**
+  - [ ] `media_remux` classifies every item as exactly one of `playable-via-remux`,
+        `needs-transcode`, or `unsupported`, from a closed contract vocabulary
+  - [ ] `playable-via-remux` items produce fragmented MP4 (init segment plus fragments) that a
+        `SourceBuffer` accepts, with a fragment index enabling fragment-aligned seeking
+  - [ ] Remux performs no re-encode; `needs-transcode` is REFUSED, never silently transcoded
+  - [ ] Output is served exclusively through the existing `media_read` capability and ticket model
+        — no second byte route, no second authorization model, no HTTP range semantics
+  - [ ] Concurrency bounded from named config; work is cancellable and releases resources
+  - [ ] No file path, storage location, mount point, or credential is caller-visible anywhere
+  - [ ] No third-party remuxer vendored into Aperture; secrets via the secret manager
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
+
+---
+
+### APTR-161: Playability classification, the honest deferred state, and track delivery scope
+- **Priority:** High
+- **Labels:** aperture, muse, playback, modules, web
+- **Agent:** codex
+- **Estimate:** 6h
+- **Blocked by:** APTR-51, APTR-160
+- **Description:** The client-side half of decision D4: decide, **before any player mounts**,
+  whether an item can play in this client, and render an honest state when it cannot. This is the
+  item that guarantees the D4 promise — *never a broken player* — and it is separate from APTR-53
+  precisely so the "we can't play this yet" path gets designed rather than becoming whatever the
+  player does when it fails.
+
+  It also settles subtitles, which the review correctly identified as the same class of hidden gap
+  APTR-52 was written to close: track **selection** was specified while track **delivery** was not.
+  External sidecar tracks ride the existing ranged read; embedded tracks require extraction
+  backend-side. This sprint scopes subtitles to what APTR-160 can actually deliver — sidecar files
+  and tracks the remux carries — and **explicitly defers** embedded-track extraction with a stated
+  reason rather than implying support that does not exist.
+
+  ## FILES
+  - `client/src/modules/muse/playability.ts` — consumes APTR-160's classification and resolves it
+    to a client-side decision: play, defer, or unsupported
+  - `client/src/modules/muse/NotPlayableState.tsx` — the honest deferred/unsupported surface
+  - `client/src/modules/muse/tracks.ts` — subtitle/audio track model, selection, and the delivery
+    scope this sprint supports
+  - `client/src/modules/muse/TrackSelector.tsx` — track selection UI over available tracks only
+  - `client/src/modules/muse/playability.test.ts`, `client/src/modules/muse/tracks.test.ts`
+  - `docs/PLAYBACK.md` — the support matrix (shared with APTR-53): what plays, what is deferred,
+    what is unsupported, and the exact user-visible wording for each
+
+  ## APPROACH
+  1. Classification is **read from the backend** (APTR-160), never inferred from a filename,
+     extension, or a client-side guess. The client owns presentation of the answer, not the answer.
+  2. Three states, three distinct presentations, no fourth:
+     - `playable-via-remux` — the playback affordance is live and APTR-53 mounts.
+     - `needs-transcode` — **"not playable in this client yet"**, with the reason in plain language
+       (the codec is not one browsers decode, and in-client transcoding is not available in this
+       version), the item's metadata and artwork still fully rendered, and resume state still shown
+       because APTR-54 is independent of playback. No player element is created.
+     - `unsupported` — the item cannot be read or recognized; say that, and say what is known.
+  3. **A deferred item is not a degraded item.** Browse, search, detail, artwork, resume state, and
+     every assistant-facing capability continue to work for it. The only thing missing is the
+     in-client player, and the surface says exactly that rather than implying the item is broken.
+  4. Track delivery scope, stated rather than assumed: **sidecar subtitle files** are fetched
+     through the same ranged-read path as media bytes and attached as text tracks; **tracks the
+     remux carries through** are selectable; **embedded tracks requiring backend extraction are
+     deferred**, listed as present-but-unavailable with a reason, not hidden. Hiding them would
+     recreate exactly the gap this item exists to close.
+  5. Subtitle content is untrusted input rendered as **text only** — parsed into cues, never
+     injected as markup, and never permitted to introduce a link, a style, or a fetch.
+  6. The deferred state is a declared, assistant-visible condition, not just pixels: the reason is
+     available through the module's action/capability surface so the assistant can answer "why
+     can't I play this" without screen-scraping.
+  7. No transcode is requested anywhere in this item. This sprint does not assume that capability
+     exists, and a UI that offers an action the backend cannot perform is worse than one that
+     explains the limit.
+
+  ## TEST PLAN
+  - Unit: each of the three classifications renders its own distinct, stated presentation
+  - Unit: a `needs-transcode` item still renders metadata, artwork, and resume state, and creates
+    **no** media element
+  - Unit: track selector lists sidecar and remux-carried tracks as selectable and embedded-only
+    tracks as present-but-unavailable with a reason
+  - Unit: a subtitle cue containing markup renders as literal text — no element, no link, no fetch
+  - Unit: the deferred reason is exposed through the capability surface, not only in the DOM
+  - Verify no hardcoded IPs, hostnames, org names, ports, config values, or absolute user paths in
+    new/modified files
+  - Negative (**the D4 guarantee**): for a `needs-transcode` item, assert no `<video>`/`<audio>`
+    element and no `MediaSource` is created and no playback request is issued — a mounted-then-
+    failed player FAILS this test
+  - Negative: assert no transcode request is issued anywhere in this item's code paths
+  - Negative: an embedded-only track must not be silently omitted from the track list — omitting it
+    FAILS, because a hidden gap is the failure mode this item was written to prevent
+
+  ## EDGE CASES
+  - Classification unavailable because the media module is degraded — render "playability unknown"
+    and offer no player, rather than optimistically mounting one
+  - An item reclassified after a remux completes — the surface updates on the `module.capability`
+    bus event without a reload
+  - A sidecar subtitle file that is enormous or malformed — bound what is fetched and render a
+    parse-warning state rather than freezing the tab
+  - An item with no tracks at all — say so plainly instead of rendering an empty selector
+  - A user who opts out of `muse.playback` — classification and the deferred state still render;
+    only the bus publication stops
+
+- **Acceptance criteria:**
+  - [ ] Playability is read from the backend classification, never guessed client-side, and
+        resolves to exactly one of play / deferred / unsupported
+  - [ ] A `needs-transcode` item renders an honest "not playable in this client yet" state with a
+        plain-language reason and creates no player element — never a broken or blank player
+  - [ ] Deferred items retain full browse, detail, artwork, and resume behaviour
+  - [ ] Track scope is explicit: sidecar and remux-carried tracks are selectable, embedded-only
+        tracks are listed as unavailable with a reason and never silently hidden
+  - [ ] Subtitle content renders as text only — no markup, link, style, or fetch
+  - [ ] No transcode is requested anywhere; the deferred reason is assistant-visible
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
+  - [ ] README and `docs/PLAYBACK.md` document the support matrix and the deferred class
+
+---
+
+### APTR-162: Parity leg 1, made enforceable — declaration-bound action controls
+- **Priority:** Critical
+- **Labels:** aperture, modules, assistant, ci, contract
+- **Agent:** claude
+- **Estimate:** 6h
+- **Blocked by:** APTR-49
+- **Description:** Decision D8 says a mechanical gate must be implementable in the language whose
+  property it asserts. The parity gate's leg 1 was specified as "a static sweep finds interactive
+  controls that invoke a mutating or navigating handler without a `declareAction` reference" —
+  which cannot be built, because statically classifying an arbitrary handler as mutating is
+  undecidable. The acceptance criterion that depended on it was therefore untestable in general.
+
+  This item replaces the undecidable check with an enforceable one that delivers the same
+  practical guarantee: **make the declaration the only way to wire an action control at all.** If
+  a design-system action component cannot accept a raw handler, there is nothing left to classify.
+
+  ## FILES
+  - `client/src/modules/actions/declareAction.ts` — the declaration helper and its branded
+    `ActionRef` type; the single way an action is expressed
+  - `client/src/modules/actions/registry.ts` — the runtime registry every `ActionRef` registers in
+  - `client/src/design-system/actionable.ts` — the typed prop contract action-capable primitives
+    (button, menu item, and the rest) must accept
+  - `client/eslint-rules/require-declared-action.mjs` — the lint rule
+  - `client/eslint-rules/require-declared-action.test.mjs` — rule tests, valid and invalid cases
+  - `client/src/modules/actions/registryAssertion.test.tsx` — the runtime leg
+  - `docs/ASSISTANT-PARITY.md` — the "how to add an action" section this item makes true
+
+  ## APPROACH
+  1. **Compiler-enforced shape.** `declareAction` returns a branded `ActionRef`. Action-capable
+     design-system primitives accept `action: ActionRef` and **do not accept** a bare
+     `onClick`/`onSelect` handler prop at all. A raw function is a type error, not a lint warning —
+     the strongest available enforcement, and D8's preferred one.
+  2. **ESLint rule for what types cannot see:** the rule flags an action-capable primitive rendered
+     without an `action` prop, an `ActionRef` constructed inline rather than from the manifest, and
+     any attempt to re-add a handler prop through a spread. The rule ships with its own valid and
+     invalid test cases, because an unlint-tested lint rule is a suggestion.
+  3. **Runtime registry assertion** closes the escape hatch of a hand-rolled element: rendering the
+     full surface tree in tests, every registered action control must resolve to a manifest entry,
+     and every manifest entry that claims a UI presence must have been rendered. This is a real
+     analysis step over real renders, not a grep over source text.
+  4. **The claim is narrowed to what is true.** Leg 1 asserts: *no action-capable primitive
+     receives a handler that is not a declared `ActionRef`*, and *every rendered action control
+     resolves to a manifest entry*. It does **not** claim to detect an arbitrary mutating handler
+     on an arbitrary element, and the contract says so — an honest narrower gate beats a broad
+     claim nothing enforces.
+  5. Action ids are **static literals** by contract; a dynamically constructed id is a lint error,
+     so the manifest is statically enumerable.
+  6. The escape hatch that remains — someone hand-writing a raw `<button>` outside the design
+     system — is addressed by the design-system adherence lint that already forbids raw elements in
+     module surfaces, and this item states that dependency explicitly rather than pretending the
+     three legs are airtight on their own.
+  7. Runs in CI as a blocking job and is reproducible locally. It needs no network and no door, so
+     unlike legs 2 and 3 it cannot be blocked by an unreachable backend.
+
+  ## TEST PLAN
+  - Unit: `tsc --noEmit` FAILS when a raw function is passed where an `ActionRef` is required
+  - Unit: the lint rule's valid cases pass and its invalid cases each produce the expected error
+  - Unit: the runtime registry assertion passes on the clean tree, with every rendered action
+    control resolving to a manifest entry
+  - Unit: a dynamically constructed action id is a lint error
+  - Verify no hardcoded IPs, hostnames, org names, ports, config values, or absolute user paths in
+    new/modified files
+  - Negative (**the point of the item**): add an action-capable primitive with no `action` prop;
+    confirm the lint rule FAILS the build; revert
+  - Negative: render an action control whose `ActionRef` is absent from the manifest; confirm the
+    runtime assertion FAILS; revert
+  - Negative: attempt to smuggle a handler through a props spread; confirm the rule FAILS
+
+  ## EDGE CASES
+  - A conditionally-rendered action that never appears in the test tree — the manifest entry
+    declares its surface, and an entry never rendered anywhere is reported rather than assumed fine
+  - A shared primitive used by both a module surface and shell chrome — enforcement follows the
+    typed prop, so location is irrelevant
+  - A legacy Sprint C control predating this contract — inventoried and either migrated or added to
+    the declared exclusion list with a reason; there is no silent grandfathering
+  - A presentation-only control that later becomes mutating — the type change forces the
+    declaration, which is exactly the intended pressure
+
+- **Acceptance criteria:**
+  - [ ] `declareAction` returns a branded `ActionRef`, and action-capable primitives accept it
+        instead of a raw handler — passing a bare function is a **type error**
+  - [ ] The ESLint rule flags missing `action` props, inline refs, spread-smuggled handlers, and
+        dynamic action ids, and ships with its own valid/invalid rule tests
+  - [ ] A runtime registry assertion confirms every rendered action control resolves to a manifest
+        entry, and reports manifest entries never rendered
+  - [ ] Leg 1's claim in the contract is narrowed to these two enforceable properties and makes no
+        undecidable assertion about arbitrary handlers
+  - [ ] The gate runs in CI as a blocking job, needs no network or door, and is reproducible locally
+  - [ ] The remaining escape hatch and its mitigation are stated explicitly, not papered over
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
+  - [ ] `docs/ASSISTANT-PARITY.md` documents how to add an action under the new constraint
+
+---
+
+### APTR-163: Chat and shell become bus publishers — `chat.thread`, `chat.selection`, `shell.focus`
+- **Priority:** Critical
+- **Labels:** aperture, context-bus, chat, shell, web, integration
+- **Agent:** codex
+- **Estimate:** 6h
+- **Blocked by:** APTR-49
+- **Description:** The review found a real hole: `chat.thread` and `chat.selection` are defined in
+  the bus contract and **consumed** by APTR-57, but nothing in the sprint published them. The
+  Sprint C chat and shell surfaces predate the bus runtime entirely, so retrofitting
+  `registerModuleTopics` onto them is genuine integration work — and it was assigned to no item.
+  Left as it was, APTR-57 would have discovered the gap at integration time, which is the most
+  expensive possible moment.
+
+  This item makes the shell and chat first-class bus citizens on the publish side, so every topic
+  in the v1 registry has a real implementing publisher.
+
+  ## FILES
+  - `client/src/shell/busRegistration.ts` — shell-side `registerModuleTopics` and `shell.focus`
+    publication on route and surface changes
+  - `client/src/chat/busRegistration.ts` — chat-side registration and `chat.thread` publication
+  - `client/src/chat/selectionSource.ts` — the `chat.selection` publish mechanism (ids and bounds
+    only) that APTR-57's selection UI drives
+  - `client/src/shell/busRegistration.test.ts`, `client/src/chat/busRegistration.test.ts`
+
+  ## APPROACH
+  1. **Retrofit, do not rewrite.** The Sprint C surfaces keep their existing structure; this adds a
+     registration call and publication at the points where state already changes. No re-architecture
+     of chat, no change to the thread model, no change to the SSE consumer.
+  2. `shell.focus` publishes on route change and on module surface mount/unmount, debounced through
+     APTR-49's coalescing, with the terminal (unmount) event flushed immediately.
+  3. `chat.thread` publishes the active workspace and thread identity as **opaque ids only** — never
+     a title, never a message, never a preview. The consumer re-fetches anything it needs through
+     the normal authorized thread path.
+  4. `chat.selection` publishes ids and range bounds only, bounded by
+     `APERTURE_CHAT_SELECTION_MAX_MESSAGES`. Raw transcript text never crosses the bus; this is the
+     mechanism, and APTR-57 supplies the UI that drives it.
+  5. All three registrations declare their published topics through `registerModuleTopics`, so
+     APTR-49's undeclared-publish assertion covers them exactly as it covers the module surfaces.
+  6. **Multi-tab honesty.** Two tabs in one session both publish `shell.focus`; the contract's
+     last-writer-wins per `origin` applies, and this item does not invent a merge. Publication stops
+     when a tab is hidden, so a background tab does not fight a foreground one over focus state.
+  7. Opt-out is respected exactly as everywhere else: the client renders the affordance honestly and
+     the BFF is the enforcement point.
+
+  ## TEST PLAN
+  - Unit: a route change publishes `shell.focus`, debounced, with unmount flushing immediately
+  - Unit: opening a thread publishes `chat.thread` with opaque ids only
+  - Unit: a selection publishes `chat.selection` with ids and bounds within the configured bound
+  - Unit: all three topics are declared via `registerModuleTopics` and pass APTR-49's
+    undeclared-publish assertion
+  - Unit: a hidden tab stops publishing `shell.focus`
+  - Verify no hardcoded IPs, hostnames, org names, ports, config values, or absolute user paths in
+    new/modified files
+  - Negative: assert **no message text, title, or preview** appears in any `chat.thread` or
+    `chat.selection` payload — a payload carrying content FAILS this test
+  - Negative: a selection exceeding `APERTURE_CHAT_SELECTION_MAX_MESSAGES` is refused rather than
+    published truncated
+  - Negative: publishing any of these topics without declaring it FAILS the registration assertion
+
+  ## EDGE CASES
+  - A thread switched rapidly (keyboard navigation through a list) — coalesce so the bus carries the
+    settled thread, not every intermediate one
+  - Sign-out or session end mid-publish — publication stops and no event resurrects a dead session
+  - A selection spanning a message deleted between selection and publish — publish the bounds and
+    let the consumer discover the gap through the authorized path; do not silently reshape it
+  - Two tabs where one is playing media and the other is browsing specs — both publish honestly;
+    the privacy panel shows why focus state moved
+  - A user opted out of `chat.thread` — APTR-57's drafting surface degrades with a stated reason
+    rather than silently failing to find a source thread
+
+- **Acceptance criteria:**
+  - [ ] `shell.focus`, `chat.thread`, and `chat.selection` each have a real publisher, closing the
+        gap where the contract defined topics nothing produced
+  - [ ] The Sprint C chat and shell surfaces are retrofitted, not rewritten
+  - [ ] Payloads carry opaque ids and bounds only — no message text, title, or preview
+  - [ ] Selections beyond the configured message bound are refused, not truncated
+  - [ ] All three topics are declared through `registerModuleTopics` and pass the undeclared-publish
+        assertion; a hidden tab stops publishing focus
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
+  - [ ] README updated to note that chat and shell are bus publishers
+
+---
+
+### APTR-164: The becoming surface — render `memory.recall` so Soul Contract clause 3 is real
+- **Priority:** High
+- **Labels:** aperture, context-bus, assistant, soul-contract, web
+- **Agent:** claude
+- **Estimate:** 6h
+- **Blocked by:** APTR-49
+- **Description:** The metadata claims Soul Contract clause 3 — "show the becoming... rendered on a
+  first-class surface" — and the bus contract defines a `memory.recall` topic. **No item rendered
+  it.** As the review put it, clause-3 compliance was being asserted by a topic definition nobody
+  consumes. This item builds the surface, which is the only thing that makes the claim true.
+
+  The surface answers, at a glance: what did the assistant just recall, why did it surface that,
+  and what has changed in how it understands things. It is the difference between an assistant that
+  *has* memory and one whose memory the user can *see* — which is the whole point of the clause.
+
+  ## FILES
+  - `client/src/assistant/BecomingPanel.tsx` — the first-class recall/becoming surface
+  - `client/src/assistant/RecallCard.tsx` — one recall event: what, why, when, and its source
+  - `client/src/assistant/DriftView.tsx` — trait and opinion drift over the session
+  - `client/src/assistant/becoming.ts` — consumption, grouping, and ordering of `memory.recall`
+  - `client/src/assistant/BecomingPanel.test.tsx`
+  - `docs/BECOMING.md` — what this surface shows, what it deliberately does not, and why
+
+  ## APPROACH
+  1. Consume `memory.recall` through APTR-49's runtime. The topic is **consume-only for the UI**
+     per the APTR-47 registry: this surface never publishes it, and never writes to memory.
+  2. Each recall renders as: what was recalled (a pointer, not a dump), why it surfaced, when, and
+     what the assistant did with it. Where the payload carries only a pointer, the surface fetches
+     the referenced content through the normal authorized path — the bus never carries memory
+     content, and this surface does not become the exception that makes it.
+  3. **Drift is shown, not summarized away.** Where the assistant's traits or stated opinions
+     changed during the session, show the before, the after, and the recall that occasioned it.
+     "Show the becoming" means showing change, and a surface that only shows the current state
+     shows being, not becoming.
+  4. **Read-only, absolutely.** No affordance here edits, deletes, corrects, or resets memory,
+     traits, or lore. Continuity is a hard constraint of this epic; a "forget this" button would be
+     a different feature with a different review, and its absence is asserted by a test.
+  5. Capability-gated like every other surface: with the memory capability unavailable, render the
+     inert state with a reason through the shared `inertConformance` harness, and issue no requests.
+  6. Honest when empty: a session with no recalls yet says so and explains what would appear here,
+     rather than rendering a blank panel that reads as broken (shared vocabulary with APTR-165).
+  7. Opt-out honored: if `memory.recall` is opted out, the surface says the user turned it off and
+     how to turn it back on. It does not reach for a side channel to populate itself.
+
+  ## TEST PLAN
+  - Unit: recall events render with what, why, when, and source, ordered deterministically by `seq`
+  - Unit: a recall carrying only a pointer fetches its content through the authorized path
+  - Unit: drift renders before/after with the occasioning recall
+  - Unit: an empty session renders the explained empty state, not a blank panel
+  - Unit: with `memory.recall` opted out, the surface states that plainly and fetches nothing
+  - Conformance: passes `inertConformance` for `unavailable` and `degraded`
+  - Verify no hardcoded IPs, hostnames, org names, ports, config values, or absolute user paths in
+    new/modified files
+  - Negative (**continuity**): assert this surface exposes **no** mutation path — no edit, delete,
+    correct, or reset of memory, traits, or lore; adding one FAILS this test
+  - Negative: assert no memory content is read from the bus payload itself — content must come from
+    the authorized fetch, so a payload carrying content is not silently rendered
+  - Negative: with the memory capability unavailable, the surface issues zero requests
+
+  ## EDGE CASES
+  - A very long session with hundreds of recalls — group and virtualize; never render everything
+  - A recall referencing content the user can no longer access — show the recall and state the
+    content is unavailable, rather than hiding that the recall happened
+  - Drift with no clear occasioning recall — show the change and say the cause is not recorded,
+    rather than inventing an attribution
+  - A recall arriving while the panel is closed — it appears in order when opened; nothing is lost
+    and nothing knocks, because presence has a budget and this surface is not a notification source
+  - Clearing the bus — recall history in the panel clears with it, while the assistant's actual
+    memory is untouched; the panel says which of the two just happened
+
+- **Acceptance criteria:**
+  - [ ] A first-class surface consumes `memory.recall` and renders what was recalled, why, when,
+        and its source — clause 3 is satisfied by this surface, not by a topic definition
+  - [ ] Trait and opinion drift render as before/after with the occasioning recall
+  - [ ] Memory content is fetched through the authorized path; the bus carries pointers only
+  - [ ] The surface is strictly read-only — no memory, trait, or lore mutation path exists, proven
+        by a negative test
+  - [ ] Capability-gated via the shared harness, issuing zero requests when unavailable
+  - [ ] Empty and opted-out states are explained honestly rather than rendered blank
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
+  - [ ] README and `docs/BECOMING.md` document the surface and its deliberate read-only scope
+
+---
+
+### APTR-165: Empty-but-healthy and first-run states across every module surface
+- **Priority:** Medium
+- **Labels:** aperture, modules, web, ux
+- **Agent:** codex
+- **Estimate:** 4h
+- **Blocked by:** APTR-51, APTR-55, APTR-56
+- **Description:** The sprint covers unavailable and degraded states exhaustively and never covers
+  **empty-but-healthy**. A freshly scanned library with nothing in it, an orchestrator with zero
+  runs, and a spec browser with no specs are all *working* systems with nothing to show — and each
+  currently renders as a void that is indistinguishable from a failure. That is the cheapest
+  possible way to make a healthy system look broken.
+
+  Empty is a designed state with a designed vocabulary, shared across surfaces so it reads as one
+  system rather than three improvisations.
+
+  ## FILES
+  - `client/src/modules/EmptyState.tsx` — the shared empty/first-run primitive: what would fill
+    this, why it is empty, and the relevant next action
+  - `client/src/modules/emptyStates.ts` — the per-surface copy, drawn from the centralized string
+    catalogue rather than inlined in components
+  - `client/src/modules/testing/emptyConformance.tsx` — the harness asserting every module surface
+    renders a designed empty state, mirroring `inertConformance`
+  - `client/src/modules/EmptyState.test.tsx`
+
+  ## APPROACH
+  1. One primitive, three ingredients every time: what this surface shows when populated, why it is
+     empty right now, and the single most relevant action (which is a **declared action** per
+     APTR-162, so empty states do not become a parity blind spot).
+  2. Distinguish **empty** from **unavailable** from **filtered-to-nothing**, because they are three
+     different truths and collapsing them is what makes a healthy system look broken. A search with
+     no results says the search found nothing and offers to clear the filter; a library with nothing
+     scanned says scanning has not run; an unavailable capability keeps its existing inert tile.
+  3. First-run is a special case of empty and reuses the same primitive with different copy, so
+     there is no second component and no second vocabulary.
+  4. `emptyConformance` renders every module surface with an empty successful response and asserts a
+     designed state — never a bare container, never a permanent spinner, never zero pixels. Every
+     surface in this sprint runs through it, exactly as it runs through `inertConformance`.
+  5. Copy lives in the centralized string catalogue, so it is reviewable in one place and does not
+     drift per surface.
+  6. Accessibility is part of the state, not decoration: the empty state is announced, focusable,
+     and its action is reachable by keyboard.
+
+  ## TEST PLAN
+  - Unit: the primitive renders all three ingredients and its action is a declared action
+  - Unit: empty, unavailable, and filtered-to-nothing render as three distinguishable states
+  - Unit: first-run copy differs from steady-state empty copy for the same surface
+  - Conformance: library, runs, specs, and the becoming panel each pass `emptyConformance`
+  - Unit: the empty state is announced to assistive technology and its action is keyboard-reachable
+  - Verify no hardcoded IPs, hostnames, org names, ports, config values, or absolute user paths in
+    new/modified files
+  - Negative: a surface returning an empty successful response must not render a bare container or a
+    persistent spinner — either FAILS `emptyConformance`
+  - Negative: an empty state whose action is not a declared action FAILS, so empty states cannot
+    become a parity hole
+
+  ## EDGE CASES
+  - A library that is empty because a scan is *in progress* — that is a distinct in-progress state,
+    not empty; say scanning is running and roughly where it is
+  - A filter combination that can never match — offer to clear the filter rather than implying the
+    library is empty
+  - An orchestrator with zero runs on first install versus one where runs aged out of retention —
+    different copy, because they are different truths
+  - Empty arriving after a populated render (everything deleted while open) — transition to the
+    empty state explicitly rather than leaving stale content on screen
+  - A surface that is empty *and* opted out of its bus topic — state both, in priority order, and do
+    not let one message hide the other
+
+- **Acceptance criteria:**
+  - [ ] A shared empty/first-run primitive renders what would fill the surface, why it is empty, and
+        a relevant declared action
+  - [ ] Empty, unavailable, and filtered-to-nothing are three distinguishable designed states
+  - [ ] `emptyConformance` covers library, runs, specs, and the becoming panel, and fails a bare
+        container or a persistent spinner
+  - [ ] First-run reuses the same primitive with distinct copy; all copy comes from the string
+        catalogue
+  - [ ] Empty states are announced to assistive technology and keyboard-reachable
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
+  - [ ] README updated to document the empty-state vocabulary
+
+---
+
+### APTR-166: Declared deferrals for Sprint D — what this sprint deliberately does not ship
+- **Priority:** Medium
+- **Labels:** aperture, documentation, scope, modules
+- **Agent:** claude
+- **Estimate:** 3h
+- **Blocked by:** APTR-59
+- **Type:** documentation
+- **Description:** Write the sprint's declared deferral list, so that everything absent from Sprint
+  D is absent **on purpose and in writing**. The review flagged the sharpest example: the epic
+  describes Muse as including acquisition ("why did this grab fail"), and this sprint's action
+  manifest enumerates no request, grab, retry, or cancel action — with no statement either way.
+  Silence there reads as an oversight against the epic's own Gate 2 prose, and a reader cannot tell
+  a scoping decision from a forgotten one. This document makes that distinction legible, and the
+  parity gate (APTR-59) reads it, so a deferral is a reviewable declaration rather than a gap.
+
+  ## AUDIENCE
+  Sprint G's reviewers, the operator deciding what a later sprint picks up, and any implementing
+  agent who notices something missing and needs to know whether to build it or leave it.
+
+  ## OUTLINE
+  1. **How to read this file.** A deferral is a decision with a reason and an owner-sprint
+     suggestion. Anything not listed here and not implemented is a defect, not a deferral.
+  2. **Muse acquisition actions — deferred.** Request, grab, retry, and cancel are not in this
+     sprint's manifest. Reason: this sprint's Muse surface is deliberately read-and-play; the
+     acquisition write-path is a distinct safety surface (it spends bandwidth and mutates a library)
+     and deserves its own dual-confirmation design rather than a bolt-on to a browse surface. The
+     read-side "why did this grab fail" *status* remains visible through availability/lifecycle
+     state, so the epic's diagnostic promise is not lost — only the write actions are deferred.
+  3. **Full-transcode playback — deferred (decision D4).** Only remuxable content plays in-client;
+     everything else renders APTR-161's honest deferred state. Reason and re-entry conditions.
+  4. **Embedded subtitle-track extraction — deferred (APTR-161).** Sidecar and remux-carried tracks
+     ship; embedded extraction needs backend work.
+  5. **Per-field metadata provenance UI — deferred (APTR-51).** Restated here so it lives on one
+     list rather than only inside an item description.
+  6. **Destructive build operations — out of scope (APTR-55).** The shell observes the pipeline; it
+     does not gain a side-channel to mutate it. This one is closer to a standing policy than a
+     deferral, and the file says which entries are policy and which are timing.
+  7. **Multi-user and cross-session bus fan-out — a v2 concern (APTR-47).**
+  8. **Fleet-wide bus inspection — not v1 (APTR-47 §6a).** Inspection is per-session; the privacy
+     panel says so.
+  9. **How the parity gate consumes this file**, and what happens when an entry is removed: removing
+     a deferral without implementing the actions makes the gate fail, which is the intended pressure.
+
+  ## SOURCES
+  `specs/S128-aperture-epic.md` (Gate 2 prose and the Muse description),
+  `specs/S128-DECISIONS.md` (D4 especially), the Fable review of this sprint, and items APTR-51,
+  APTR-53, APTR-55, APTR-59, APTR-161 in this file.
+
+  ## TONE
+  Plain, decisive, and unapologetic. A deferral stated with its reason is a sign of a spec that
+  knows its own edges; hedging makes it read like an excuse. Every entry answers "why not now" in
+  one or two sentences and never more. No infrastructure identifiers, no config values — this file
+  mirrors publicly.
+
+---
+
+### APTR-167: Assistant read-audit — who consumed the bus, not just what it holds
+- **Priority:** Medium
+- **Labels:** aperture, context-bus, privacy, transparency, rust, web
+- **Agent:** claude
+- **Estimate:** 5h
+- **Blocked by:** APTR-48, APTR-50
+- **Description:** The privacy panel shows what the bus retains. It does not show **who read it**.
+  That gap is the difference between an abstract sovereignty story and a visceral one: "the
+  assistant can see this" lands very differently from "the assistant read this four minutes ago."
+  This item adds a lightweight read-audit so access transparency is a rendered fact rather than a
+  documented policy.
+
+  It is deliberately small and deliberately honest: a per-topic last-read timestamp and a
+  per-session read count, recorded where the read actually happens, with no attempt to reconstruct
+  intent.
+
+  ## FILES
+  - `client/src/context-bus/ReadAudit.tsx` — the per-topic audit line in the privacy panel
+  - `client/src/context-bus/ReadAudit.test.tsx`
+  - `docs/PRIVACY.md` — extended with what the audit records, what it does not, and its retention
+  - **Agent-core repo (sibling PR):** read-accounting in the `aperture::context` module — every
+    assistant-facing read of retained bus state records topic, timestamp, and reader class — plus
+    an audit projection on `GET /v1/aperture/events`
+
+  ## APPROACH
+  1. **Record at the read, not at the caller.** Accounting lives in the single place bus state is
+     read for the assistant, so a new consumer cannot forget to declare itself. A read path that
+     bypasses accounting is a bug the tests catch, not a documentation problem.
+  2. What is recorded, exactly: topic, timestamp, and reader class (`assistant` or `module`). What
+     is **not** recorded: prompts, answers, message content, or any inference about why. The audit
+     is a transparency feature, not a second surveillance surface — recording more would betray the
+     purpose of the feature.
+  3. Retention is bounded by `APERTURE_CONTEXT_READ_AUDIT_RETENTION_EVENTS`, it dies with the
+     session exactly as `session` retention does, and it is cleared by the same
+     `DELETE /v1/aperture/events` the user already has. The audit never outlives what it audits.
+  4. The panel renders one line per topic: last read by the assistant, and reads this session. A
+     topic never read says "never read this session" — an absent line would be ambiguous, and the
+     ambiguity always resolves in the system's favour, which is exactly wrong for a privacy surface.
+  5. Opted-out topics are never read and therefore show no reads; the panel states that this follows
+     from the opt-out rather than from luck.
+  6. The audit is itself bus-adjacent data and inherits every sovereignty invariant: no egress, no
+     telemetry, no third party, user-inspectable, user-clearable.
+
+  ## TEST PLAN
+  - Unit: an assistant read of a topic records topic, timestamp, and reader class — and nothing else
+  - Unit: the panel renders last-read and read-count per topic, with an explicit never-read state
+  - Unit: retention is bounded from named config and the audit clears with the bus
+  - Integration: a read through the assistant path is accounted; a read path added without
+    accounting FAILS a test
+  - Verify no hardcoded IPs, hostnames, org names, ports, config values, or absolute user paths in
+    new/modified files
+  - Negative: assert the audit record contains **no** prompt, answer, or message content — a record
+    carrying any of it FAILS this test
+  - Negative: an opted-out topic records zero reads, because it is never read — a recorded read for
+    an opted-out topic FAILS and would prove the opt-out is not enforced
+  - Negative: assert the audit never leaves the fleet (it passes `assert-no-egress.mjs`)
+
+  ## EDGE CASES
+  - A high-frequency reader inflating the count into noise — coalesce reads within a short window
+    into one recorded read, and say in the panel that reads are coalesced
+  - A read occurring while the panel is open — the line updates live from the existing stream rather
+    than requiring a refresh
+  - Audit retention filling before bus retention — say "older reads aged out" rather than implying
+    there were none
+  - A module read rather than an assistant read — distinguish the reader class, since "the media
+    module read your playback state" is a materially different statement from "the assistant did"
+  - Clearing the bus — the audit clears with it, and the panel says both were cleared
+
+- **Acceptance criteria:**
+  - [ ] Every assistant-facing read of retained bus state is accounted at the read site, with topic,
+        timestamp, and reader class
+  - [ ] The privacy panel shows last-read and read-count per topic, with an explicit never-read state
+  - [ ] The audit records no prompt, answer, or message content, proven by a negative test
+  - [ ] An opted-out topic records zero reads; a recorded read there fails the build
+  - [ ] Audit retention is bounded from named config, dies with the session, and clears with the bus
+  - [ ] The audit passes the no-egress sweep and inherits every sovereignty invariant
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
+  - [ ] `docs/PRIVACY.md` documents what the audit records, what it does not, and its retention

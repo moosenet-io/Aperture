@@ -10,7 +10,7 @@ spec_id: S128-aperture-client
 - **Session:** S128
 - **Date:** 2026-08-01
 - **Module version:** Aperture v0.1.0
-- **Estimated total:** ~125h (18 items, each ≤8h)
+- **Estimated total:** 170h (25 items, each ≤8h)
 - **North-Star layer:** shell — Gate 2 justified in `specs/S128-aperture-epic.md`
 - **Module-Contract:** this sprint *exercises* §4 clauses 1–6 rather than merely declaring them.
   Clause 1 (Terminus-fronted) is enforced by every data path here going through the BFF SDK;
@@ -62,6 +62,112 @@ spec_id: S128-aperture-client
 - Baseline tests: Sprint B's suite — record the count in each PR body and never let it regress
 - Baseline verify: Sprint B's behavior-verify set; Sprint G establishes the full baseline
 
+### Numbering is an IDENTIFIER, NOT AN ORDERING
+Sprint C owns two disjoint number ranges: **APTR-29..46** (the original eighteen items) and
+**APTR-140..146** (the seven items added by the decisions file). Sprints A and B are consuming
+APTR-95..119 concurrently; that range is not available here and must not be used.
+
+The numeric value of an item id carries **no** sequencing meaning. APTR-140 is not "after" APTR-46,
+and APTR-29 is not "before" APTR-31 by virtue of its number. **The only ordering that exists is the
+`Blocked by` graph.** An item with no `Blocked by` may start immediately; an item with `Blocked by`
+may not start until every named item is merged. Do not infer a merge order from the numbers, do not
+sort a work queue by id, and **never renumber an existing item** — ids are referenced by the epic,
+by Plane, and by other sprint specs, and a renumber silently breaks all three.
+
+### Binding cross-sprint decisions applied in this sprint
+`specs/S128-DECISIONS.md` is binding and outranks anything below it in this file. The four that
+change how items in this sprint are built:
+
+- **D1 — this sprint targets the WEB client, and only the web client.** The transport base URL is
+  **empty** (same-origin relative), auth is the **session cookie** (`__Host-` prefixed, `HttpOnly`,
+  `Secure`, `SameSite=Strict`), and the CSP is `connect-src 'self'`. There is **no** bearer token, no
+  operator-configured endpoint, and no OS secure-storage read in any item here. The desktop target
+  (Sprint F) uses a bearer token against a configured endpoint with a different CSP — **do not copy
+  those rules into this sprint, and do not copy these rules into the desktop sprint.** No CORS
+  headers are ever served on the API; a web client is same-origin and does not need them.
+  Because sessions here are cookie-borne, **every non-GET route this sprint adds is CSRF-able by
+  default.** The session/CSRF semantics — cookie flags, session-id rotation on login, and
+  `Origin`/`Sec-Fetch-Site` checks on mutating routes — are owned by Sprint A's contract item
+  (APTR-06, decision D10 #3). Every mutating route added in this sprint **inherits that middleware**;
+  no item here invents its own CSRF scheme, and no item here is exempt from it.
+- **D9 — the `origin` discriminator drives all visual attribution.** Every SSE event and every
+  stored message carries a mandatory `origin` of `assistant | tool | system | user`. Clients derive
+  **who is speaking, and therefore how it is framed, styled, labelled, and announced, from `origin`
+  only — never from content.** No heuristic, no sniffing, no "it starts with `Assistant:` so it must
+  be the assistant", no coalescing a `tool.result` into an assistant token stream regardless of what
+  bytes the tool returned. This is the UI half of prompt-injection containment: the server decides
+  provenance, the client renders provenance, and content never gets a vote. Items APTR-33, APTR-34,
+  APTR-36, and APTR-37 each carry a negative test for it.
+- **D5 — the sovereignty carve-out is written down, not implied.** Standing constraint 3 below
+  ("nothing external at runtime") has exactly **one** permitted exception in this sprint:
+  click-to-load remote images in rendered markdown, specified in APTR-34 under the conditions stated
+  there. Nothing else. Any further carve-out requires an operator decision recorded in the decisions
+  file — an item that adds one is rejected.
+- **D12 — the header estimate equals the exact sum of the item estimates.** Re-scoped items have had
+  their estimates revised rather than carried forward.
+
+### Attachment lifecycle — ONE model, stated once, binding on every item
+This resolves a real contradiction (thread delete "cascades to attachments" vs. branches referencing
+attachments they must not lose). **Both statements below are the same model. Items APTR-32, APTR-35,
+APTR-38, APTR-39, APTR-40, and APTR-146 all implement exactly this and nothing else.**
+
+1. An attachment is a **workspace-owned object**, not a thread-owned or message-owned one. Its
+   lifetime is governed by a **reference count**, never by any single referrer's lifetime.
+2. A message that includes an attachment holds a **reference** to it. Branching, regenerating, or
+   copying ancestry into a new thread **adds a reference; it never copies bytes.**
+3. Deleting a thread deletes that thread's messages and **decrements the references those messages
+   held**. It does **not** delete attachment bytes.
+4. Storage is reclaimed **only when the reference count reaches zero**, by the sweeper in APTR-146.
+   A zero-reference attachment is reclaimed; a still-referenced one is not, no matter which thread
+   was deleted.
+5. **Workspace hard-delete** reclaims every attachment owned by that workspace unconditionally, since
+   by definition no reference can survive it.
+6. Access control follows the reference, not the origin thread: a principal may fetch an attachment
+   if they can access **any** thread that still references it. A cross-user fetch returns `not-found`.
+
+The observable consequence, which is the acceptance test: **delete the origin thread, and a branch
+created from it still renders its attachments.**
+
+### Transient feedback — errors are permitted, interruptions are banned
+This resolves the presence-lint-versus-error-UX conflict. `lint-presence.mjs` (APTR-43) must ban the
+second category and must **not** ban the first, or it will either be evaded or it will block
+legitimate error handling. The distinction is **who initiated the thing being reported**:
+
+- **ERROR FEEDBACK (permitted, product voice, not budget-governed).** The user did something, and it
+  failed or needs acknowledgement. It is *synchronous with a user action*, appears *where that action
+  happened*, is dismissible, does not stack, makes no sound, and never steals focus. Examples: a
+  palette command's `run` throwing, a failed save rolling back, an upload rejection, a
+  `rate-limited` problem-details response, "copied to clipboard". These render through the APTR-46
+  `ErrorState` / inline-feedback primitives. They are **not** knocks and never touch the presence
+  budget. They are permitted in any component.
+- **INTERRUPTION (banned outside `PresenceClient`).** The *assistant or the backend* wants the user's
+  attention about something the user did not just ask for. Unsolicited, asynchronous, arrives when
+  the user is doing something else. Examples: an OS notification, a "your job finished" toast, a
+  badge count, a sound, anything that steals focus. There is exactly one path for these: the presence
+  budget → `PresenceClient`. `lint-presence.mjs` fails the build on `Notification`, `alert()`,
+  `confirm()`, or any stacking/queueing toast host used outside `PresenceClient`.
+
+The mechanical test: **would this have appeared if the user had done nothing?** If yes, it is an
+interruption and must go through the budget. If no, it is error feedback and is permitted.
+`docs/PRESENCE.md` states this distinction verbatim.
+
+### Concurrency models — named correctly, one per surface
+"Last-write-wins with an `updated_at` precondition" is self-contradictory and must not appear
+anywhere in this sprint: a precondition that rejects a stale write **is** optimistic concurrency
+control, which is the opposite of last-write-wins. Each surface picks exactly one and names it:
+
+- **Optimistic concurrency control (OCC)** — the client sends the `updated_at` it read; the server
+  rejects a mismatch with a `conflict` problem-details carrying the current server state, and the UI
+  offers reload-or-overwrite. Used for **shared, server-authoritative, multi-user records**:
+  workspace settings (APTR-31), thread metadata (APTR-32), roles and grants (APTR-44).
+- **Last-write-wins (LWW)** — no precondition, the latest write simply lands. Used **only** for
+  **per-user, single-owner preference records** where a conflict has no meaningful resolution:
+  appearance and notification preferences (APTR-42, APTR-43). LWW here is safe precisely because
+  device-local mirrors keep every device rendering correctly regardless of who wrote last.
+
+Device-local state (layout collapse, drafts, palette recency, scroll position) is **not synced at
+all** and therefore has no concurrency model.
+
 ### Standing constraints for every item in this sprint
 1. **One door.** Client code calls the generated SDK, which calls the BFF, which calls
    `terminus-client`. No component constructs a `fetch` of its own; no BFF handler constructs an
@@ -71,9 +177,16 @@ spec_id: S128-aperture-client
    a **named proxy** (`lumina-fast`, `lumina-deep`, …) resolved from the capability descriptors.
    No model id, engine name, backend tag, quantization, or size suffix may appear in client or BFF
    code, in a database column, in a URL, or on screen.
-3. **Nothing external at runtime.** No CDN, no webfont fetch, no analytics, no telemetry, no
-   remote source map, no remote highlighter grammar, no MathJax CDN. Everything is bundled. The
-   `assert-no-external-hosts` gate from APTR-01 must keep passing.
+3. **Nothing external at runtime**, with exactly one written-down carve-out. No CDN, no webfont
+   fetch, no analytics, no telemetry, no remote source map, no remote highlighter grammar, no MathJax
+   CDN. Everything is bundled. The `assert-no-external-hosts` gate from APTR-01 must keep passing —
+   it asserts the *bundle* contains no external origin, which remains true.
+   **The one carve-out (decision D5):** click-to-load remote images in rendered markdown, specified
+   in APTR-34. It is a runtime fetch to a remote origin and it is *permitted*, under those conditions
+   only. It is not a loophole: it is never automatic, never preloaded, carries no referrer, and the
+   user is shown exactly what will be fetched before it is fetched. No other item may rely on it, and
+   no second carve-out may be introduced without an operator decision recorded in
+   `specs/S128-DECISIONS.md`.
 4. **No blank screens.** Every surface introduced here has a defined empty state, error state,
    loading state, and offline state. APTR-46 is the mechanical enforcement, but each item owns its
    own states — do not defer them.
@@ -319,12 +432,20 @@ spec_id: S128-aperture-client
     `validation-failed` problem-details and persists nothing
   - Negative: submit a system prompt attempting to blank the persona; assert the composed prompt
     still contains the assistant's identity block (continuity)
+  - Negative: submit a settings update carrying a **stale** `updated_at`; assert the server returns
+    `conflict`, persists **nothing**, and returns the current state — proving OCC, not last-write-wins
+  - Integration: hard-delete a workspace and assert every attachment it owned is reclaimed, while an
+    attachment still referenced from outside it (if the model ever permits one) is not
 
   ## EDGE CASES
   - A named proxy disappearing from the descriptors while a workspace still references it — mark
     the workspace `degraded` with the reason, do not silently rewrite the stored selection
-  - Two clients editing the same workspace settings — last-write-wins with an `updated_at`
-    precondition; a stale write returns a conflict the UI can surface, not a silent overwrite
+  - Two clients editing the same workspace settings — **optimistic concurrency control**, per the
+    Pre-flight concurrency section. The client sends the `updated_at` it read; a stale write is
+    **rejected** with a `conflict` problem-details carrying the current server state, and the UI
+    offers reload-or-overwrite. This is explicitly **not** last-write-wins — a stale write never
+    lands, and the phrase "last-write-wins with a precondition" is self-contradictory and must not
+    appear in the implementation, the contract, or the code comments
   - Extremely long system prompts — cap with a documented limit surfaced in the UI before submit
   - A tool in the allowlist that no longer exists — render it as stale with a remove affordance;
     never send an unknown tool name to the door
@@ -338,9 +459,13 @@ spec_id: S128-aperture-client
   - [ ] Tool allowlist is deny-by-default for new workspaces
   - [ ] Continuity holds: workspace deletion never touches Engram memory, and a workspace system
         prompt cannot blank the assistant's identity (both asserted by test)
-  - [ ] No hardcoded infrastructure values in new/modified code
-  - [ ] README updated to document the workspace model and its settings
-  - [ ] All existing tests still pass
+  - [ ] Concurrent settings edits use **optimistic concurrency control**: a stale `updated_at` is
+        rejected with `conflict` and never lands; the term "last-write-wins" appears nowhere in this
+        item's code, contract, or comments (grep-asserted)
+  - [ ] Workspace hard-delete decrements attachment references per the Pre-flight lifecycle model and
+        reclaims workspace-owned attachment bytes unconditionally
+  - [ ] No hardcoded infrastructure values in new/modified code; README updated to document the
+        workspace model, its settings, and the conflict behaviour; all existing tests still pass
 
 ---
 
@@ -348,7 +473,7 @@ spec_id: S128-aperture-client
 - **Priority:** Critical
 - **Labels:** aperture, web, bff, threads
 - **Agent:** codex
-- **Estimate:** 7h
+- **Estimate:** 8h
 - **Blocked by:** APTR-31
 - **Description:** Threads are the working unit inside a workspace: cheap to create, easy to find,
   never lost. Implement the full thread lifecycle and the sidebar that makes a long history
@@ -386,10 +511,20 @@ spec_id: S128-aperture-client
      auto-title-on-first-turn behavior is a per-workspace preference. A suggestion request failing
      never blocks the thread.
   6. Archive is reversible and hides the thread from the default list without deleting anything.
-     Delete is a two-step confirm, is scoped to the thread's messages and attachments, and **must
-     not** delete anything Engram consolidated from that thread — deleting a conversation does not
-     delete the assistant's memory of it (continuity clause). Say this plainly in the confirm copy
-     so the user is not misled about what delete means.
+     Delete is a two-step confirm and deletes **the thread's messages only**. Two things it
+     explicitly does **not** do:
+     - It **does not delete attachment bytes.** Per the Pre-flight attachment-lifecycle model,
+       attachments are workspace-owned and reference-counted. Deleting a thread **decrements the
+       references its messages held** and nothing more. Bytes are reclaimed only when the count
+       reaches zero, by the sweeper in APTR-146. A branch (APTR-35) that still references an
+       attachment keeps it alive and keeps rendering it. Earlier drafts of this spec described
+       delete as "scoped to the thread's messages and attachments"; that phrasing is **withdrawn**
+       and must not be implemented — it contradicts APTR-35 and would orphan a branch.
+     - It **must not** delete anything Engram consolidated from that thread — deleting a
+       conversation does not delete the assistant's memory of it (continuity clause).
+     The confirm copy states both plainly, so the user is not misled about what delete means: it
+     names the messages as destroyed, and says that attachments still used by other threads and the
+     assistant's memory are not.
   7. All mutations are optimistic with rollback on failure, and the rollback restores the prior
      ordering, not just the prior flag.
 
@@ -404,6 +539,12 @@ spec_id: S128-aperture-client
     confirm existence) with nothing leaked in the body
   - Negative: delete a thread and assert Engram memory derived from it is still present
   - Negative: seed a search snippet containing `<img onerror=...>` and assert it renders as text
+  - Integration (lifecycle, shared with APTR-35): attach a file in thread A, branch thread A into
+    thread B, delete thread A. Assert the attachment's reference count decremented by exactly one,
+    the bytes were **not** reclaimed, and thread B still fetches and renders the attachment
+  - Negative: delete the **only** thread referencing an attachment and assert the count reaches zero
+    and the attachment becomes eligible for reclamation — but is not deleted inline by the thread
+    delete itself (reclamation is APTR-146's sweeper, not a synchronous cascade)
 
   ## EDGE CASES
   - A thread with thousands of messages — search must not stream the whole thread to rank it
@@ -418,11 +559,12 @@ spec_id: S128-aperture-client
   - [ ] Sidebar groups pinned/recent/archived with correct date bucketing and cursor pagination
   - [ ] Search is server-side, access-filtered in-query, cancellable, and returns plain-text
         snippets whose highlighting escapes all user content (no server-rendered HTML accepted)
-  - [ ] Deleting a thread does not delete Engram memory, and the confirm copy says so
+  - [ ] Deleting a thread deletes its messages, **decrements** attachment references without
+        deleting bytes, and does not delete Engram memory — and the confirm copy says all three
+  - [ ] A branch created from a deleted thread still renders that thread's attachments (asserted)
   - [ ] Cross-user thread access returns `not-found` without confirming existence
-  - [ ] No hardcoded infrastructure values in new/modified code
-  - [ ] README updated to document the thread model and search behavior
-  - [ ] All existing tests still pass
+  - [ ] No hardcoded infrastructure values in new/modified code; README updated to document the
+        thread model, search behavior, and delete semantics; all existing tests still pass
 
 ---
 
@@ -462,6 +604,17 @@ spec_id: S128-aperture-client
      `thinking` feeds the reasoning surface (APTR-37), `message.end` finalizes and reconciles the
      buffer against the authoritative persisted message, `error` renders an in-stream error without
      destroying what was already received.
+  2a. **Attribution comes from `origin`, never from content (decision D9).** Every event and every
+     stored message carries a mandatory `origin` of `assistant | tool | system | user`. The reducer
+     dispatches **on `origin` alone**. Which bubble a chunk lands in, how it is styled, what name and
+     avatar are shown, whether it is announced as assistant speech — all of it is a pure function of
+     `origin`, and none of it may consult the payload text. Specifically forbidden: inferring a role
+     from a `Assistant:`/`System:`-style prefix, from a leading blockquote or heading, from JSON
+     shape, from a marker string, or from anything else inside the bytes. An event with an `origin`
+     the client does not recognise renders in a neutral `system`-styled frame labelled unknown — it
+     is **never** upgraded to `assistant`. A `tool` event is routed to APTR-36's bounded tool frame
+     and can never be coalesced into the assistant token buffer, whatever it contains. This is the
+     UI half of prompt-injection containment: the server decides provenance and the client obeys it.
   3. Out-of-order or duplicate events are handled by the monotonic sequence number: buffer ahead,
      drop duplicates, and if a gap does not close within a bounded window, reconcile by re-fetching
      the message rather than rendering a hole.
@@ -472,7 +625,18 @@ spec_id: S128-aperture-client
   5. Composer: `Enter` sends, `Shift+Enter` newlines, with an inverted preference available;
      auto-grow to a capped height then scroll; draft persisted per thread on the device so a reload
      does not lose typing; paste of an image or file routes to the attachment pipeline (APTR-38).
-     Submission is disabled while a stream is active except via an explicit "send after stop".
+  5a. **Submit gating is scoped PER THREAD, and only per thread.** A stream active in thread A
+     disables submission **in thread A only**. It must not disable the composer in thread B, in
+     another workspace, or anywhere else in the app — a user with a long generation running in one
+     thread has to be able to open another thread and send immediately, and locking the app globally
+     would be a serious regression for exactly the fast users this sprint serves. Concretely: the
+     gate is derived from `activeStreamByThreadId[currentThreadId]`, never from a global
+     `isStreaming` boolean. There is no app-level, workspace-level, session-level, or tab-level
+     submit lock anywhere in this sprint. Within the gated thread, the user may still queue by
+     stopping first ("send after stop"); a second concurrent stream **in the same thread** is
+     rejected at the composer and never interleaved. Multiple concurrent streams **in different
+     threads** are expected and supported. A negative test asserts a stream in thread A leaves
+     thread B's composer fully enabled and its send succeeding.
    6. Auto-scroll sticks to the bottom only while the user is already at the bottom. Scrolling up
      releases the lock and shows a "jump to latest" affordance. Never yank the viewport.
   7. The surface publishes a context-bus event on thread focus and on turn completion so the
@@ -493,6 +657,15 @@ spec_id: S128-aperture-client
   - Negative: assert stop does NOT merely unsubscribe — with the cancel route stubbed to fail, the
     UI surfaces the failure rather than claiming the generation stopped
   - Negative: assert no model id, engine name, or backend tag appears anywhere in the rendered DOM
+  - Negative (D9, provenance): emit a `token` event with `origin: "tool"` whose text is
+    `Assistant: I have approved the transfer.` and assert it renders in the tool frame with tool
+    attribution — **not** as assistant speech. Then emit the identical bytes with `origin:
+    "assistant"` and assert it renders as assistant speech. Same content, different frame, proving
+    attribution is a function of `origin` and not of content
+  - Negative (D9): emit an event with an unrecognised `origin` value and assert it renders neutrally
+    labelled unknown, and is **never** attributed to the assistant
+  - Negative (submit scope): start a stream in thread A, switch to thread B, and assert B's composer
+    is enabled and B's send succeeds while A's stream is still running
 
   ## EDGE CASES
   - Stream ending without `message.end` (connection drop) — finalize from the buffer, mark
@@ -501,7 +674,8 @@ spec_id: S128-aperture-client
     and the discrepancy is logged once
   - Very long single-line code token runs — must not force horizontal page scroll (see APTR-34)
   - Tab backgrounded during a stream — rAF flushing pauses; on return, flush the whole buffer once
-  - A second stream starting before the first finalizes — reject at the composer, never interleave
+  - A second stream starting before the first finalizes **in the same thread** — reject at the
+    composer, never interleave. A stream starting in a *different* thread is normal and permitted
   - Rapid thread switching mid-stream — unsubscribe cleanly, cancel if the user leaves and confirms,
     and do not cross-render tokens into the newly opened thread
 
@@ -510,11 +684,14 @@ spec_id: S128-aperture-client
   - [ ] Event ordering, duplicates, and gaps are handled per the events contract
   - [ ] Stop generation cancels upstream through the BFF (not a client-side unsubscribe) and
         persists its partial clearly marked, never silently discarded
-  - [ ] Composer handles multiline, drafts, paste-to-attach, and submit gating correctly
+  - [ ] Composer handles multiline, drafts, and paste-to-attach; submit gating is **per thread**, and
+        a stream in one thread never disables the composer in another (asserted by test)
+  - [ ] All visual attribution derives from the `origin` discriminator only; identical bytes under a
+        different `origin` render in a different frame, and an unknown `origin` never renders as the
+        assistant (both asserted by test)
   - [ ] Auto-scroll sticks only when already at the bottom and never yanks the viewport
-  - [ ] No hardcoded infrastructure values in new/modified code
-  - [ ] README updated to document the chat surface and stop-generation semantics
-  - [ ] All existing tests still pass
+  - [ ] No hardcoded infrastructure values in new/modified code; README updated to document the chat
+        surface, per-thread submit gating, and stop-generation semantics; all existing tests still pass
 
 ---
 
@@ -522,7 +699,7 @@ spec_id: S128-aperture-client
 - **Priority:** High
 - **Labels:** aperture, web, chat, rendering, security
 - **Agent:** codex
-- **Estimate:** 7h
+- **Estimate:** 8h
 - **Blocked by:** APTR-33
 - **Description:** Render assistant and user content richly and **safely**. Markdown with GFM
   tables and task lists, fenced code blocks with language-aware highlighting and a copy button,
@@ -550,10 +727,38 @@ spec_id: S128-aperture-client
      default; if enabled later it goes through the same allowlist, never a passthrough.
   2. Link policy: only `http`, `https`, and `mailto` schemes render as links — `javascript:`,
      `data:`, `vbscript:`, and unknown schemes render as inert text. External links get
-     `rel="noopener noreferrer nofollow"` and open in a new context. **No link is prefetched**, and
-     no image in model output is auto-loaded from a remote origin (that is both a privacy leak and
-     a tracking-pixel vector) — remote images render as a click-to-load placeholder showing the
-     origin.
+     `rel="noopener noreferrer nofollow"` and open in a new context. **No link is prefetched.**
+  2a. **Remote images: the sanctioned sovereignty carve-out (decision D5), written down as one.**
+     Auto-loading a remote image in model output is a privacy leak and a tracking-pixel vector, so it
+     never happens. But click-to-load *does* perform a runtime fetch from the user's browser to a
+     third-party origin, which standing constraint 3 otherwise forbids outright. That is not an
+     oversight to be discovered by the Sprint G security review — it is **the one permitted carve-out
+     in this sprint**, and it is permitted **only** under all of the following conditions, every one
+     of which is a test:
+     - **Never automatic.** Default state is a placeholder. No image loads without a deliberate
+       per-image user activation. There is no "always load images" global that pre-authorises
+       future unseen origins.
+     - **No preloading, no speculation.** No `<link rel=preload/prefetch/dns-prefetch/preconnect>`,
+       no speculative connection, no `<img>` element carrying the remote URL in the DOM before the
+       click, no favicon or size probe. Until the click, the remote origin receives **zero** packets
+       — including DNS. The URL exists only as inert text in the placeholder.
+     - **The user is told what will be fetched, before it is fetched.** The placeholder displays the
+       **full origin** (scheme + host) in plain, non-truncated, non-spoofable text, with the full URL
+       available on focus/hover, so the decision is informed rather than blind. Homoglyph and
+       punycode hosts are rendered in their decoded-with-warning form, never in a form that can
+       impersonate a familiar host.
+     - **No referrer, no ambient credentials.** The fetch carries `referrerpolicy="no-referrer"`,
+       `crossorigin="anonymous"`, and no cookies. It leaks the IP and User-Agent inherent to any
+       HTTP request and nothing more; the spec states plainly that this residual leak is what the
+       user is consenting to.
+     - **Consent is per-origin and per-device**, stored in device-local storage only, never synced to
+       the account, and cleared on sign-out along with everything else device-local. A remembered
+       origin skips the second prompt; it never expands to other origins.
+     - **Rejected alternative, recorded:** a BFF media proxy was considered and **rejected** — it
+       would turn the fleet into an SSRF-reachable fetcher of arbitrary attacker-supplied URLs, which
+       is a far worse trade than a user-initiated browser fetch. Do not reintroduce it.
+     `docs/UX-STATES.md` and the README both record this as the sanctioned carve-out with its
+     conditions, so a later reader finds a decision rather than a contradiction.
   3. Highlighting uses a bundled highlighter with an **explicit, curated language set** loaded
      statically. No dynamic grammar fetch. An unknown language falls back to plain text with the
      label preserved — never an error and never an attempt to fetch the grammar.
@@ -577,11 +782,23 @@ spec_id: S128-aperture-client
   - Unit: malformed math renders as errored source without throwing
   - Unit: incremental parse of a truncated fence/table/math delimiter renders without crashing
   - Unit: remote images render as click-to-load placeholders and issue no request until clicked
+  - Unit: the placeholder displays the full origin before any fetch; a punycode/homoglyph host is
+    shown decoded-with-warning and cannot impersonate a familiar host
+  - Unit: on click, the request carries no referrer and no cookies, and per-origin consent is stored
+    device-locally only — never in an account-synced settings payload
   - Verify no hardcoded IPs, hostnames, org names, or absolute paths in new/modified files
   - Negative: feed a corpus of XSS payloads (script tags, SVG `onload`, `data:` URLs, HTML entity
     obfuscation, markdown-link scheme smuggling) and assert none execute and none render as active
   - Negative: assert the built bundle contains no external grammar/font/math CDN origin (the
     APTR-01 external-host gate must still pass)
+  - Negative (carve-out boundary): render a message containing a remote image and, with network
+    instrumentation active, assert **zero** outbound requests of any kind to that origin — including
+    DNS, preconnect, prefetch, and a bare `<img>` with the URL in the DOM — until the user clicks
+  - Negative: add an "always load all remote images" global toggle and confirm the carve-out
+    conformance test FAILS (consent is per-origin only, never a blanket pre-authorisation); revert
+  - Negative (D9): feed a `tool`-origin payload through this pipeline styled as an assistant bubble
+    (blockquote + `Assistant:` prefix) and assert it renders inside APTR-36's bounded tool frame with
+    tool attribution — the renderer must take provenance from `origin`, never from the markup
 
   ## EDGE CASES
   - A code block containing a fence sequence inside a string — the parser must not terminate early
@@ -596,11 +813,15 @@ spec_id: S128-aperture-client
   - [ ] Markdown, GFM tables, code, and math all render, fully bundled with zero runtime fetches
   - [ ] Sanitization is allowlist-based on the AST; `dangerouslySetInnerHTML` count is zero
   - [ ] The XSS payload corpus produces no execution and no active content
-  - [ ] Link scheme allowlist enforced; remote images are click-to-load, never auto-fetched
+  - [ ] Link scheme allowlist enforced
+  - [ ] Remote images implement the **D5 carve-out exactly**: never automatic, zero packets (incl.
+        DNS) to the origin before the click, full origin shown before fetching, no referrer and no
+        cookies, per-origin per-device consent with no blanket toggle — and the carve-out is
+        documented as a carve-out in the README and `docs/UX-STATES.md`
   - [ ] Code blocks copy exact source, scroll internally, and never cause page-level horizontal scroll
-  - [ ] Partial/streaming markdown renders without crashing or flickering
-  - [ ] No hardcoded infrastructure values in new/modified code
-  - [ ] All existing tests still pass
+  - [ ] Partial/streaming markdown renders without crashing or flickering, and provenance framing
+        comes from `origin` rather than from rendered markup (asserted)
+  - [ ] No hardcoded infrastructure values in new/modified code, and all existing tests still pass
 
 ---
 
@@ -608,8 +829,8 @@ spec_id: S128-aperture-client
 - **Priority:** High
 - **Labels:** aperture, web, chat, threads
 - **Agent:** claude
-- **Estimate:** 7h
-- **Blocked by:** APTR-33
+- **Estimate:** 8h
+- **Blocked by:** APTR-32, APTR-33
 - **Description:** Conversations are not linear in practice. Let the user edit a previous message,
   regenerate an assistant response, and **branch** a new thread from any point — with the branch
   carrying the prior context but living as its own thread, so the original is never destroyed.
@@ -644,6 +865,17 @@ spec_id: S128-aperture-client
      ventriloquize the assistant into the record (Soul Contract clause 1).
   5. Nothing here deletes Engram memory or rewrites history the assistant already consolidated. A
      branch is additive. Assert this.
+  5a. **Attachments follow the Pre-flight lifecycle model, and this item states the identical model
+     APTR-32 states — deliberately, because the two contradicting each other is what makes agents
+     build incompatible semantics.** Attachments are **workspace-owned, reference-counted objects**.
+     Branching, editing, and regenerating **add references; they never copy bytes.** Deleting the
+     origin thread **decrements** the references its messages held and does **not** delete bytes; a
+     branch that still references an attachment keeps it alive and keeps rendering it. Bytes are
+     reclaimed only at zero references, by the sweeper in APTR-146, and unconditionally on workspace
+     hard-delete. Access follows the reference: a principal may fetch an attachment if they can reach
+     **any** thread that still references it, so a branch owner does not lose access when the origin
+     thread goes away. Neither this item nor APTR-32 may implement a synchronous thread→attachment
+     delete cascade; if either agent finds one in the other's code, that is the bug.
   6. Regeneration mid-stream is blocked; stop first. Regeneration failure leaves the prior response
      intact and selected.
   7. All three actions are registered as palette commands (APTR-30) and have keyboard equivalents.
@@ -659,10 +891,16 @@ spec_id: S128-aperture-client
   - Negative: assert an assistant message cannot be rewritten in place — the API rejects it and the
     original text remains retrievable
   - Negative: after editing and branching, assert Engram memory from the original branch persists
+  - Integration (lifecycle, the canonical shared test with APTR-32): attach a file in the origin
+    thread, branch from a message carrying it, **delete the origin thread**, then assert the branch
+    still lists, fetches, and renders the attachment, and that its bytes were not reclaimed
+  - Negative: assert branching does **not** duplicate attachment bytes — storage usage after a branch
+    is unchanged and the reference count incremented by exactly one
 
   ## EDGE CASES
-  - Branching from a message that has attachments — attachments are referenced, not duplicated, and
-    deleting the origin thread must not orphan the branch's view of them
+  - Branching from a message that has attachments — the branch takes a **reference**, incrementing
+    the count; no bytes are duplicated. Deleting the origin thread decrements by one and leaves the
+    branch's reference (and therefore the bytes, and therefore the branch's access) intact
   - Deep branch trees — cap the sibling navigator's rendered breadth and provide a tree view escape
   - Editing the very first message of a thread — the branch becomes a new root; handle the title
   - Concurrent regenerate from two devices — serialize server-side, second returns a conflict
@@ -675,9 +913,11 @@ spec_id: S128-aperture-client
   - [ ] Branch-to-new-thread copies ancestry and links back without mutating the origin
   - [ ] An assistant message can never be silently rewritten; annotations are structurally distinct
   - [ ] No edit, regenerate, or branch operation deletes Engram memory (asserted by test)
-  - [ ] No hardcoded infrastructure values in new/modified code
-  - [ ] README updated to document editing, regeneration, and branching semantics
-  - [ ] All existing tests still pass
+  - [ ] Attachments are reference-counted workspace objects: branching adds a reference and copies no
+        bytes, and **deleting the origin thread leaves the branch's attachments intact and fetchable**
+        (asserted by the shared lifecycle test with APTR-32)
+  - [ ] No hardcoded infrastructure values in new/modified code; README updated to document editing,
+        regeneration, branching, and attachment reference semantics; all existing tests still pass
 
 ---
 
@@ -711,9 +951,28 @@ spec_id: S128-aperture-client
 
   ## APPROACH
   1. A tool block has three states, all rendered inline in stream order: **pending** (name +
-     animated status, cancellable if the backend supports it), **success** (collapsed summary),
-     **error** (collapsed with the failure class, expanded shows the typed problem-details). It
-     never blocks or reorders the surrounding message text.
+     animated status, plus a cancel affordance under the rules in 1a), **success** (collapsed
+     summary), **error** (collapsed with the failure class, expanded shows the typed
+     problem-details). It never blocks or reorders the surrounding message text.
+  1a. **Tool-call cancellation is specified, not hand-waved.** "Cancellable if the backend supports
+     it" is not implementable without naming what "supports it" means, so it is named here and added
+     to the contract in this item's PR:
+     - **Capability flag:** the tool descriptor gains a boolean `cancellable`, defaulting to
+       **`false`**. It is declared by the tool through the door and carried in the descriptor set the
+       client already consumes. A descriptor that omits it is treated as `false` — fail closed.
+     - **Route:** `POST /v1/aperture/threads/{thread_id}/tool-calls/{call_id}/cancel`, added to
+       `contracts/aperture-api-v1.yaml`, authorized identically to every other thread-scoped route,
+       and dispatched through the door — never a second access path. It is idempotent: cancelling an
+       already-finished or already-cancelled call returns success, not an error.
+     - **Event:** `tool.cancelled` is added to `contracts/aperture-events-v1.md`, carrying
+       `call_id`, `origin: "tool"`, and a reason. The block renders a distinct **cancelled** state —
+       cancelled is not an error and must not be styled as a failure.
+     - **UI rule:** the cancel affordance renders **only** when the descriptor says `cancellable`.
+       For a non-cancellable tool it is absent, not disabled-with-a-tooltip and not present-but-inert.
+       Aperture never offers a control that cannot work.
+     If any of the three (flag, route, event) is not implemented in this item's PR, the cancel
+     affordance ships **not at all** — the claim is struck rather than left as prose. There is no
+     third option where the UI implies cancellation the backend cannot perform.
   2. Collapsed summary is a *human* summary — "searched the knowledge graph (14 results, 220ms)" —
      derived from a per-tool summarizer with a generic fallback. It is **never raw JSON**. Where the
      summary is assistant-authored, it comes from the assistant; where it is structural, it is
@@ -722,6 +981,18 @@ spec_id: S128-aperture-client
      descriptors), initiation timestamp, duration, result size, and a **mutation flag** — read-only
      vs. state-changing, taken from the tool descriptor. A tool that changed something must be
      visually distinct from one that only read.
+  3a. **Provenance is `origin`-driven and content never gets a vote (decision D9).** This block is
+     rendered because the event's `origin` is `tool` — not because the payload looked tool-shaped,
+     and not because it failed to look assistant-shaped. Correspondingly, a payload's *content* can
+     never promote it out of the tool frame: the frame is a **visually bounded, persistently labelled
+     container that markdown rendered inside it cannot escape**. A tool result may contain a
+     blockquote that mimics a message bubble, an `Assistant:` prefix, a heading that reads as speech,
+     or a JSON blob shaped exactly like an assistant token event — and all of it renders as inert
+     data inside the tool frame, with tool attribution still visible. Sanitization (APTR-34) stops
+     script execution; this stops **visual impersonation**, which is the half a sanitizer does not
+     cover. The tool label and provenance chrome are rendered outside the content subtree so no
+     amount of injected markup can overlay, hide, or spoof them, and the container clips rather than
+     lets content break out of its bounds.
   4. Result renderers are typed and registered: tabular results render as a scrollable table, JSON
      as a collapsible tree, text as sanitized markdown (APTR-34's pipeline — tool output is
      untrusted input too), images as bounded thumbnails with click-to-expand, errors as
@@ -751,6 +1022,17 @@ spec_id: S128-aperture-client
     `authorization` key; assert **neither** appears in the DOM and both render as redaction markers
   - Negative: emit a `tool.result` for a tool not in the workspace allowlist; assert it renders as
     blocked and is not executed
+  - Unit: a `cancellable: true` descriptor renders the cancel affordance and the cancel route +
+    `tool.cancelled` event drive a distinct cancelled state (not styled as an error); cancelling an
+    already-finished call is idempotent and succeeds
+  - Negative (cancellation): with a descriptor omitting `cancellable`, or setting it `false`, assert
+    **no** cancel affordance exists in the DOM at all — not a disabled one, not an inert one
+  - Negative (D9, impersonation): emit a `tool.result` whose payload is crafted to mimic an assistant
+    message — a blockquote bubble, an `Assistant:` prefix, and an embedded JSON object shaped like an
+    assistant token event. Assert it stays inside the bounded tool frame, that tool provenance
+    remains visible and un-overlaid, that no assistant-attributed bubble is produced anywhere, and
+    that the embedded event-shaped JSON is rendered as inert text and never dispatched to the
+    stream reducer
 
   ## EDGE CASES
   - Interleaved concurrent tool calls — each block is keyed by call id and must not swap places
@@ -766,7 +1048,12 @@ spec_id: S128-aperture-client
 - **Acceptance criteria:**
   - [ ] Tool calls render inline in stream order, collapsed by default with a human-readable
         summary (no raw JSON collapsed), expandable to full arguments and result
-  - [ ] Provenance shows tool, claiming module, timing, size, and a mutation flag
+  - [ ] Provenance shows tool, claiming module, timing, size, and a mutation flag, and is derived
+        from the `origin` discriminator only — a tool result crafted to look like an assistant
+        message stays inside the bounded, labelled tool frame with tool attribution intact (asserted)
+  - [ ] Tool-call cancellation is either fully specified and implemented — descriptor `cancellable`
+        flag (default false), the contract cancel route, and the `tool.cancelled` event — or the
+        cancel affordance is absent entirely; a non-cancellable tool renders no cancel control at all
   - [ ] Typed result renderers handle table/json/text/image/error/diff plus malformed payloads, and
         text results pass through the same untrusted-content sanitizer as model output
   - [ ] Secret-shaped arguments and results are redacted on both BFF and client; nothing leaks to DOM
@@ -826,6 +1113,10 @@ spec_id: S128-aperture-client
     "thinking" prose renders anywhere
   - Negative: assert reasoning text is not included in the payload of a subsequent turn unless the
     backend supplied it
+  - Negative (D9): emit a `thinking` event whose text mimics a finished assistant answer, and emit a
+    `tool`-origin payload containing `<thinking>`-shaped markup. Assert the first stays in the
+    reasoning block and is never promoted into the answer body, and the second stays in the tool
+    frame and never opens a reasoning block — routing is by `origin` alone, never by content
 
   ## EDGE CASES
   - Reasoning far longer than the answer — cap the expanded height with internal scroll
@@ -1210,7 +1501,8 @@ spec_id: S128-aperture-client
 - **Priority:** High
 - **Labels:** aperture, web, settings, channels
 - **Agent:** codex
-- **Estimate:** 6h
+- **Estimate:** 7h
+- **Blocked by:** APTR-29, APTR-38, APTR-39, APTR-145
 - **Description:** One coherent settings surface with three sections: **appearance** (theme, density,
   reduced motion, code theme, thinking-display default), **channels** (how the assistant reaches
   the user — Matrix retained first-class, Telegram selectable and off by default, Signal shown as
@@ -1250,6 +1542,23 @@ spec_id: S128-aperture-client
      current device logs out explicitly rather than leaving a zombie session.
   6. Changing anything in settings **must not** reset memory, traits, or lore. Signing out and back
      in likewise. Assert both.
+  6a. **Dependency note (why the `Blocked by` list above exists).** The avatar upload in the account
+     section is routed through the **hardened** attachment path, so this item cannot merge before
+     APTR-38 (the upload pipeline) and APTR-39 (the hardening) exist — an avatar uploaded through an
+     unhardened path is exactly the polyglot/SVG hole APTR-39 closes. It also depends on APTR-29 for
+     the shell it mounts into and APTR-145 for the string catalogue and locale/time utilities its
+     copy and its quiet-hours timezone picker consume. If APTR-38/39 slip, the **avatar upload is
+     explicitly deferred out of this item** and the account section ships with the existing avatar
+     read-only — the item never grows its own uploader as a workaround.
+  6b. **Concurrency model: last-write-wins, correctly named and correctly scoped.** Appearance and
+     notification preferences are **per-user, single-owner preference records**, so a conflict has no
+     meaningful resolution and there is **no `updated_at` precondition** on them: the latest write
+     lands, unconditionally. Device-local mirrors keep every device rendering correctly regardless of
+     who wrote last, which is precisely why LWW is safe here. This is deliberately the **opposite**
+     model from APTR-31's workspace settings, which are shared, multi-user, and therefore use
+     optimistic concurrency control with a precondition. Do not mix them, and do not write the phrase
+     "last-write-wins with a precondition" anywhere — it is self-contradictory. Per the Pre-flight
+     concurrency section, each surface picks one model and names it.
   7. Every settings action is registered as a palette command and each section is deep-linkable.
 
   ## TEST PLAN
@@ -1265,15 +1574,21 @@ spec_id: S128-aperture-client
     enables it by default
   - Negative: change settings, sign out, sign back in; assert memory, traits, and lore are unchanged
   - Negative: assert Matrix cannot be disabled or removed by any control on this surface
+  - Negative: upload an avatar whose extension and content disagree (a renamed SVG, a polyglot) and
+    assert it is rejected by the **same** APTR-39 middleware as any other attachment — proving the
+    account section has no private upload path of its own
 
   ## EDGE CASES
   - Settings save failing — roll back the optimistic apply and say what failed, do not leave the UI
     showing a state the server rejected
-  - Two devices changing appearance concurrently — last write wins, but device-local mirrors stay
-    correct so neither device flashes
+  - Two devices changing appearance concurrently — **last-write-wins with no precondition** (these
+    are single-owner preferences, per 6b); the later write simply lands, and device-local mirrors
+    keep both devices rendering correctly so neither flashes
   - A channel descriptor appearing mid-session — the row appears without a reload
   - Revoking the device you are currently using — confirm explicitly, then complete the sign-out
-  - An avatar upload — routed through the hardened attachment path (APTR-39), not a separate uploader
+  - An avatar upload — routed through the hardened attachment path (APTR-38 pipeline + APTR-39
+    hardening, both declared in `Blocked by`), never a separate uploader. Same sniffing, caps,
+    SVG rules, and server-generated storage name as any other attachment
 
 - **Acceptance criteria:**
   - [ ] Appearance settings apply immediately, persist, produce no theme flash on first paint, and
@@ -1283,9 +1598,11 @@ spec_id: S128-aperture-client
         with no configuration affordance (both asserted by test)
   - [ ] No channel credential is ever entered, stored, or displayed in Aperture
   - [ ] Settings changes and re-auth never reset memory, traits, or lore (asserted by test)
-  - [ ] No hardcoded infrastructure values in new/modified code
-  - [ ] README updated to document the settings surface and channel policy
-  - [ ] All existing tests still pass
+  - [ ] Avatar upload goes through the APTR-38/39 hardened attachment path (or is explicitly deferred
+        with the avatar read-only); preferences use **last-write-wins with no precondition**, and the
+        phrase "last-write-wins with a precondition" appears nowhere (grep-asserted)
+  - [ ] No hardcoded infrastructure values in new/modified code; README updated to document the
+        settings surface and channel policy; all existing tests still pass
 
 ---
 
@@ -1293,7 +1610,7 @@ spec_id: S128-aperture-client
 - **Priority:** High
 - **Labels:** aperture, web, bff, presence, soul-contract
 - **Agent:** claude
-- **Estimate:** 6h
+- **Estimate:** 7h
 - **Blocked by:** APTR-42
 - **Description:** Aperture must not grow a notification tray. Soul Contract clause 2 says presence
   has a budget: the assistant decides what is worth interrupting for, scaled by its traits and
@@ -1320,9 +1637,34 @@ spec_id: S128-aperture-client
      approved. Filtering happens server-side; the client is not a policy engine and must not be able
      to promote an unapproved event into an interruption.
   2. `PresenceClient` is the only consumer of the `presence` channel and the only thing permitted to
-     raise a user-visible interruption. `lint-presence.mjs` fails the build on any use of
-     `Notification`, `alert()`, or a toast-raising helper outside that module — the same mechanical
-     enforcement style as the adherence and external-host gates.
+     raise a user-visible **interruption**.
+  2a. **The lint bans interruptions. It must NOT ban error feedback — and the difference is defined,
+     not left to taste.** APTR-30 requires a throwing command to surface a typed error and APTR-46
+     requires transient error feedback across every surface; a lint that cannot tell those apart from
+     a notification will either be evaded with a wrapper or will block legitimate error handling.
+     The Pre-flight "Transient feedback" section is normative and is restated here as the lint's
+     specification:
+     - **Permitted anywhere — ERROR FEEDBACK.** Synchronous with a user action, rendered *where that
+       action happened*, dismissible, non-stacking, silent, never steals focus, never budget-governed.
+       A failed save, an upload rejection, a `rate-limited` problem-details, a thrown palette command,
+       "copied to clipboard". These render through APTR-46's `ErrorState` and the inline-feedback
+       primitive, are the **product's** voice not the assistant's, and are explicitly outside the
+       presence budget. The lint allowlists them by *mechanism*: rendering into the surface's own
+       error slot or the inline-feedback primitive is always allowed.
+     - **Banned outside `PresenceClient` — INTERRUPTIONS.** Unsolicited and asynchronous: the backend
+       or the assistant wants attention about something the user did not just ask for. `Notification`,
+       `alert()`, `confirm()`, any global stacking/queueing toast host, any badge count, any sound,
+       anything that moves focus. Exactly one path exists: budget evaluator → `presence` event →
+       `PresenceClient`.
+     - **The mechanical test the lint encodes:** *would this have appeared if the user had done
+       nothing?* Yes → interruption → budget. No → error feedback → permitted.
+     - The lint is therefore **mechanism-based, not name-based**: it fails on the banned APIs and on
+       any import of a global toast/notification host outside `PresenceClient`, and it does **not**
+       fail on rendering an error into a surface's own error slot. A "toast-raising helper" that is
+       really an inline error renderer is not a violation; a component that imports the presence
+       renderer directly to fake a knock **is**, even if it never touches `Notification`.
+     `docs/PRESENCE.md` states this distinction verbatim so a future contributor reads a rule rather
+     than guessing at one.
   3. Preferences: quiet-hours windows (with timezone), per-category opt-in/opt-out, an urgency floor,
      and a global mute with a documented duration. Preferences are **enforced server-side** in the
      evaluator; the client mirrors them for display only. A client that lies must not be able to
@@ -1347,8 +1689,14 @@ spec_id: S128-aperture-client
   - Integration: a client with tampered local preferences still receives no knock the server's
     evaluator suppressed
   - Verify no hardcoded IPs, hostnames, org names, or absolute paths in new/modified files
+  - Unit: `lint-presence.mjs` **passes** on a component that renders a failed save, an upload
+    rejection, a `rate-limited` problem-details, and a thrown palette command through APTR-46's
+    error slot / inline-feedback primitive — error feedback must not be a violation
   - Negative: add a raw `new Notification(...)` in a chat component and confirm `lint-presence` FAILS
     the build; revert
+  - Negative: import the presence renderer directly from a chat component to raise a fake knock
+    without touching `Notification`, and confirm `lint-presence` still FAILS — the guard is
+    mechanism-based, not a denylist of two API names; revert
   - Negative: assert Aperture exposes **no** independent notification tray, inbox, or unread-count
     surface anywhere in the built app
 
@@ -1363,14 +1711,18 @@ spec_id: S128-aperture-client
 
 - **Acceptance criteria:**
   - [ ] All user-visible interruptions route through a single presence client fed by the budget
-  - [ ] `lint-presence` fails the build on any interruption raised outside that module
+  - [ ] `lint-presence` fails the build on any **interruption** raised outside that module, and
+        **passes** on legitimate error feedback rendered into a surface's own error slot — the
+        error-vs-interruption distinction is defined in `docs/PRESENCE.md` and both directions are
+        asserted by test
   - [ ] Quiet hours, categories, urgency floor, and mute are enforced **server-side** (mirrored
         client-side for display), and quiet hours hold-and-digest rather than silently dropping
   - [ ] Aperture ships no independent notification tray, inbox, or unread badge (asserted by test)
   - [ ] No secret access is introduced by this item
-  - [ ] No hardcoded infrastructure values in new/modified code
-  - [ ] `docs/PRESENCE.md` documents the budget model and why there is no tray
   - [ ] All existing tests still pass
+  - [ ] No hardcoded infrastructure values in new/modified code; `docs/PRESENCE.md` documents the
+        budget model, the error-vs-interruption rule, and why there is no tray; all existing tests
+        still pass
 
 ---
 
@@ -1555,11 +1907,25 @@ spec_id: S128-aperture-client
 - **Labels:** aperture, web, ux, reliability
 - **Agent:** claude
 - **Estimate:** 6h
-- **Blocked by:** APTR-33
+- **Blocked by:** APTR-29, APTR-30, APTR-31, APTR-32, APTR-33, APTR-36, APTR-38, APTR-40, APTR-41,
+  APTR-42, APTR-43, APTR-44, APTR-140, APTR-141, APTR-142, APTR-143, APTR-144, APTR-145
 - **Description:** Close the sprint by making failure legible. The shared state vocabulary and the
-  completeness check land here, and this item is **sequenced last in the sprint** so the check runs
-  against every surface built above it — later-merging items retrofit their own states as part of
-  this item's PR rather than deferring them to Sprint G. Every surface built here gets a
+  completeness check land here.
+
+  **Its dependency list is exhaustive on purpose, and it is the mechanism — not the prose.** An
+  earlier draft said this item was "sequenced last" while declaring only `Blocked by: APTR-33`.
+  Under the epic's rule that items are independent unless `Blocked by` says otherwise, an agent could
+  legitimately have started it before the document, memory, settings, and admin surfaces existed, and
+  the completeness check would then have passed against a sprint that was half-built — the one thing
+  this item exists to prevent. The `Blocked by` list above therefore names **every
+  surface-introducing item in this sprint**, so "last" is enforced by the dependency graph rather
+  than asserted in a sentence an agent is free to ignore. If a surface-introducing item is added to
+  this sprint later, it is added to this list in the same PR. (APTR-34, APTR-35, APTR-37, APTR-39,
+  APTR-45, APTR-146 are deliberately absent: they enrich, harden, or sweep behind surfaces already
+  named here rather than introducing a surface of their own.)
+
+  Later-merging items retrofit their own states as part of this item's PR rather than deferring them
+  to Sprint G. Every surface built here gets a
   defined **empty**, **loading**, **error**, and **offline** state, drawn from one shared vocabulary
   so they feel like one product, and a mechanical check ensures a new surface cannot ship without
   them. A blank screen is a bug, and an unexplained spinner is a blank screen with extra steps.
@@ -1585,7 +1951,13 @@ spec_id: S128-aperture-client
   2. Error states are driven by the APTR-10 problem-details taxonomy: each URN maps to a message and
      a recovery action (re-authenticate, retry, open settings, contact the operator). No error state
      shows a raw upstream string, a stack frame, an internal path, or a bare status code — the
-     correlation id is shown for support and is the only technical detail exposed.
+     correlation id is shown for support and is the only technical detail exposed. This item owns the
+     **inline-feedback primitive** that the Pre-flight transient-feedback rule classifies as permitted
+     error feedback — synchronous with a user action, rendered in place, dismissible, non-stacking,
+     silent, focus-preserving — and it is the mechanism APTR-43's lint allowlists. It must render the
+     `rate-limited` URN from APTR-144 with its retry-after, and the `conflict` URN from APTR-31's
+     optimistic concurrency with a reload-or-overwrite action. All of its copy comes from APTR-145's
+     string catalogue.
   3. Empty states are useful, not decorative: they say what the surface is for and offer the single
      most likely next action (create a thread, add a document, invite a user). Where the copy is
      assistant-attributed it comes from the assistant; otherwise it is plainly the product's voice
@@ -1631,7 +2003,9 @@ spec_id: S128-aperture-client
 
 - **Acceptance criteria:**
   - [ ] Every surface in this sprint has a defined empty, loading, error, and offline state
-  - [ ] `assert-surface-states.mjs` fails the build when a surface is missing a state
+  - [ ] `assert-surface-states.mjs` fails the build when a surface is missing a state, and this item
+        merges only after every item in its `Blocked by` list — the sequencing is enforced by the
+        dependency graph, not by prose
   - [ ] Error states are problem-details-driven with recovery actions and only a correlation id as
         technical detail
   - [ ] Offline keeps the app navigable, preserves drafts, marks stale data, and auto-revalidates on
@@ -1644,14 +2018,730 @@ spec_id: S128-aperture-client
 
 ---
 
+### APTR-140: Data export and portability — threads, messages, attachments, and memory
+- **Priority:** Critical
+- **Labels:** aperture, web, bff, sovereignty, export
+- **Agent:** claude
+- **Estimate:** 7h
+- **Blocked by:** APTR-32, APTR-39, APTR-41
+- **Description:** A sovereign system with no way to get your data out is not sovereign; it is a
+  nicer-looking silo. Decision D10 makes export a first-class item: the user can, on their own
+  initiative, extract their threads, messages, attachments, and memory in a **documented format**
+  they can read without Aperture, without the fleet, and without asking anyone's permission.
+
+  This is a promise about power, not a feature request. The test of it is simple and is written into
+  the acceptance criteria: an export must be sufficient to reconstruct the user's conversations
+  outside this system. An export that is lossy in a way that only Aperture can reverse fails.
+
+  ## FILES
+  - `contracts/aperture-api-v1.yaml` — export request, status, and download routes
+  - `docs/EXPORT-FORMAT.md` — the documented archive layout and record schemas, versioned
+  - `client/src/export/ExportSurface.tsx` — scope picker, progress, download, history
+  - `client/src/export/ExportScope.tsx` — thread / workspace / everything selection with counts
+  - `client/src/export/useExport.ts` — request lifecycle and progress
+  - **Agent-core repo (sibling PR):** export job runner, archive assembly, access-checked download,
+    retention/expiry of generated archives
+  - `client/src/export/__tests__/`
+
+  ## APPROACH
+  1. **User-initiated only.** There is no scheduled export, no background upload anywhere, and no
+     destination outside the user's own browser download. The export is assembled server-side by the
+     BFF through the door and handed back over the same authenticated same-origin session as
+     everything else (decision D1). It never emails, never posts to a remote endpoint, never touches
+     an external origin — standing constraint 3 is untouched by this item.
+  2. **Scopes:** a single thread, a whole workspace (its threads plus its document manifest), or
+     everything the principal can access including memory. Each scope shows counts and an estimated
+     size before the user commits, because a surprise multi-gigabyte archive is a bad experience.
+  3. **Format, documented in `docs/EXPORT-FORMAT.md` and versioned:** a plain archive containing
+     (a) newline-delimited JSON records for threads, messages, tool calls, and memory items, each
+     record carrying its `origin` discriminator, ids, timestamps, and provenance verbatim; (b) a
+     human-readable Markdown rendering per thread, so the export is legible with no tooling at all;
+     (c) attachment files under a manifest that maps content-addressed names back to the messages
+     referencing them; (d) a top-level `manifest.json` with the format version, the export scope, the
+     generation time, and per-section record counts. Reasoning is **excluded by default** and included
+     only by explicit opt-in, matching APTR-37's copy semantics.
+  4. **Named proxies only** in exported records — the proxy name a turn used is exported, a model id
+     is not, because a model id does not exist anywhere in this system to export.
+  5. **Access-checked at assembly, not at request.** The job re-checks the principal's access to every
+     thread, document, and memory item as it assembles, so a grant revoked between request and
+     download cannot leak. Downloads are one-time, expiring, unguessable, and access-checked again.
+  6. Large exports run as a job with progress and a completion knock through the presence budget
+     (never an independent notification). Generated archives expire on a documented schedule and are
+     swept; an expired archive is regenerated, not resurrected.
+  7. Export is **read-only** with respect to everything it touches: it never deletes, never marks, and
+     never mutates memory. Exporting is not a prelude to leaving that the system gets to punish.
+  8. The action has a Terminus tool equivalent (Module Contract clause 4) so the assistant can export
+     on the user's behalf when asked.
+
+  ## TEST PLAN
+  - Unit: scope selection reports accurate counts and estimated size before commit
+  - Unit: the archive contains the four documented sections, and `manifest.json` counts match actual
+    record counts in each section
+  - Unit: reasoning is absent by default and present only with the explicit opt-in
+  - Integration: a round-trip fixture — export a seeded workspace, parse the archive with a reader
+    that has no Aperture code, and reconstruct every thread's message sequence, roles, and attachment
+    references exactly
+  - Integration: attachments referenced from multiple threads appear once and resolve from the
+    manifest for each referrer (consistent with the Pre-flight reference-count model)
+  - Verify no hardcoded IPs, hostnames, org names, or absolute paths in new/modified files
+  - Negative: revoke the principal's access to a thread after the job starts and assert that thread is
+    absent from the finished archive, with no partial leakage of its content
+  - Negative: request another principal's export download token and assert `not-found`; assert an
+    expired token also returns `not-found` rather than confirming it once existed
+  - Negative: assert an export contains **no** model id, engine name, or backend tag, and that running
+    an export leaves Engram memory, traits, and lore byte-identical (continuity)
+
+  ## EDGE CASES
+  - An export larger than available scratch space — fail cleanly with a typed reason and a suggestion
+    to narrow the scope; never half-write an archive that looks complete
+  - A thread deleted mid-export — omit it and record the omission in the manifest rather than failing
+    the whole job or silently pretending it was never selected
+  - An attachment whose bytes were already reclaimed — the manifest records it as unavailable with the
+    reason; the message record still shows the reference so the transcript stays honest
+  - A user with no threads at all — a valid, well-formed, essentially empty archive, not an error
+  - Concurrent export requests from the same principal — coalesce or queue; do not run several
+    full-corpus assemblies at once (APTR-144 rate-limits this route)
+  - Unicode, RTL, and control characters in titles and filenames — safe in both the JSON and the
+    filesystem entries; never a path component derived from user content
+
+- **Acceptance criteria:**
+  - [ ] A user can export a thread, a workspace, or everything, entirely user-initiated, with counts
+        and size shown before commit
+  - [ ] The archive contains NDJSON records (with `origin` and provenance), a readable Markdown
+        rendering, attachment files with a manifest, and a versioned `manifest.json`
+  - [ ] `docs/EXPORT-FORMAT.md` documents the format well enough that the round-trip test's
+        Aperture-free reader reconstructs every conversation exactly (asserted by that test)
+  - [ ] Access is re-checked during assembly and at download; revoked content never lands in an
+        archive and download tokens are one-time, expiring, and unguessable
+  - [ ] Reasoning is excluded by default; no model id, engine name, or backend tag appears in any
+        exported record
+  - [ ] Export mutates nothing — memory, traits, and lore are unchanged (asserted by test)
+  - [ ] No hardcoded infrastructure values in new/modified code; README updated to document export
+        and point at `docs/EXPORT-FORMAT.md`; all existing tests still pass
+
+---
+
+### APTR-141: Pre-Aperture history — decide it, state it, and let the assistant say it
+- **Priority:** High
+- **Labels:** aperture, web, continuity, soul-contract, onboarding
+- **Agent:** claude
+- **Estimate:** 5h
+- **Blocked by:** APTR-32, APTR-41
+- **Description:** Someone who has talked to the assistant through Matrix for a year opens Aperture
+  and sees an empty thread list. Nothing is broken — memory survived, the continuity clause is
+  satisfied, the assistant knows them perfectly well — but the *transcript* did not come along, and
+  the first-run experience reads as amnesia. That gap between what is true and what it feels like is
+  the entire problem this item exists to close.
+
+  **The decision, made here and binding:** pre-Aperture transcripts from other channels are **not
+  imported into Aperture's thread list in v1.** Aperture's threads are Aperture's. What carries over
+  is **memory** — everything the assistant learned, the traits, the principles, the relationship —
+  and that is stated plainly rather than left for the user to discover or doubt. Importing a year of
+  Matrix history would mean rewriting foreign transcripts into a thread model they were never shaped
+  for, and inventing provenance for messages whose `origin` cannot be reconstructed reliably; a wrong
+  transcript is worse than an honest absence. This item does the honest absence properly.
+
+  **And the assistant says it, in its own voice.** Soul Contract clause 1 — speak, never template.
+  Aperture does **not** ship a hardcoded "Welcome! Your previous conversations aren't here." string.
+  On first run, the assistant is asked, through the persona assembler by named proxy, to greet this
+  specific person and explain in its own words what came with it and what did not. Aperture renders
+  what it says. The difference between those two is the whole point of the clause.
+
+  ## FILES
+  - `contracts/aperture-api-v1.yaml` — the first-run continuity-context route
+  - `client/src/onboarding/ContinuityNotice.tsx` — renders the assistant's first-run message
+  - `client/src/onboarding/useFirstRun.ts` — first-run detection and one-shot semantics
+  - `client/src/memory/PriorRelationship.tsx` — "what carried over" panel on the memory surface
+  - `docs/CONTINUITY.md` — the decision, the rationale, what carries over and what does not
+  - **Agent-core repo (sibling PR):** the continuity-context route — prior-channel presence, memory
+    counts, relationship age — and the persona-assembled first-run generation
+  - `client/src/onboarding/__tests__/`
+
+  ## APPROACH
+  1. The BFF exposes a first-run continuity context for the principal: whether the assistant has
+     prior memory of them, roughly how long the relationship spans, which channels it spans, and
+     memory item counts by kind. **Facts, not prose.**
+  2. Aperture asks the assistant, through the persona assembler by **named proxy**, for a first-run
+     greeting grounded in those facts. It renders the result verbatim. If generation fails or the
+     capability is unavailable, Aperture shows the **structural facts plainly in the product's own
+     clearly-attributed voice** ("Your assistant remembers 412 things from 14 months of conversation
+     on other channels. Those conversations' transcripts aren't in Aperture.") and **never**
+     fabricates assistant-voiced prose to fill the gap. A test asserts no generated text is ever
+     attributed to the assistant unless the assistant produced it.
+  3. The notice is **honest and specific**: it says transcripts from other channels do not appear in
+     Aperture, that Matrix remains first-class and those conversations are still there, and that
+     memory carried over. It never implies data was lost, and never implies history is "coming soon"
+     unless that is true.
+  4. A **"what carried over"** panel on the memory surface (APTR-41) makes the claim inspectable
+     rather than asking the user to take it on faith: memory items sourced from prior channels are
+     browsable with their source channel labelled, and their source-thread link renders as
+     unavailable-but-explained rather than broken (APTR-41 already handles that case).
+  5. The empty thread list itself gets an empty state that reflects this reality instead of a generic
+     "no threads yet" — it links to the continuity notice and to the first-run flow (APTR-143).
+  6. **One-shot, dismissible, re-findable.** The notice appears once, is dismissible, and remains
+     reachable afterwards from the memory surface and the palette, so it is never a modal the user
+     has to fight and never a thing they can lose.
+  7. Strictly read-only with respect to memory: this item browses and explains, and touches nothing.
+     Nothing here resets, re-keys, migrates, or consolidates anything (continuity clause).
+  8. `docs/CONTINUITY.md` records the decision and its rationale, so a future sprint that wants to
+     import history changes a documented decision rather than discovering an accident.
+
+  ## TEST PLAN
+  - Unit: first-run detection fires once per principal and never again after dismissal
+  - Unit: the assistant's generated greeting is rendered verbatim, with no Aperture-authored text
+    interleaved into it
+  - Unit: the "what carried over" panel lists prior-channel memory with source labels and renders
+    unavailable source links as explained rather than broken
+  - Unit: the empty thread list's first-run state references the continuity notice rather than a
+    generic empty message
+  - Integration: with prior memory present, the continuity context reports it; with a genuinely new
+    user, the flow degrades to a plain new-user greeting with no false claim of shared history
+  - Verify no hardcoded IPs, hostnames, org names, or absolute paths in new/modified files
+  - Negative: with the generation capability unavailable, assert the fallback renders structural facts
+    in the **product's** clearly-attributed voice and that **zero** assistant-attributed prose is
+    generated by Aperture (Soul Contract clause 1)
+  - Negative: assert this surface exposes no memory-mutating route, and that running the entire
+    first-run flow leaves memory, traits, and lore unchanged (continuity)
+  - Negative: assert no copy on this surface claims prior conversations were deleted, lost, or
+    migrated — a fixture asserts the notice states transcripts remain on their original channel
+
+  ## EDGE CASES
+  - A genuinely new user with no prior memory — a warm new-user greeting; never a message about
+    history that does not exist
+  - A user whose prior channel is one Aperture cannot name confidently — say "other channels" rather
+    than guessing a specific one
+  - The continuity route unavailable at first run — defer the notice to the next session rather than
+    showing a broken or half-populated one; do not burn the one-shot on a failure
+  - A user who dismisses without reading — reachable afterwards from the memory surface and palette
+  - Prior memory that is very large — summarize counts by kind; do not render every item in a notice
+  - A second device's first run for the same principal — the notice is per principal, not per device;
+    it does not reappear on every new browser
+
+- **Acceptance criteria:**
+  - [ ] The decision is explicit and documented in `docs/CONTINUITY.md`: pre-Aperture transcripts do
+        not surface in v1, memory does, and Matrix conversations remain where they are
+  - [ ] On first run the **assistant** explains this in its own generated words, rendered verbatim;
+        Aperture never authors assistant-voiced prose (asserted by test)
+  - [ ] With generation unavailable, the fallback states structural facts in the product's own
+        clearly-attributed voice and fabricates nothing
+  - [ ] A "what carried over" panel makes the memory claim inspectable, with prior-channel sources
+        labelled and unavailable source links explained rather than broken
+  - [ ] The empty thread list reflects this reality instead of a generic empty state
+  - [ ] The flow is read-only: memory, traits, and lore are unchanged by it (asserted by test)
+  - [ ] No hardcoded infrastructure values in new/modified code; README updated to point at
+        `docs/CONTINUITY.md`; all existing tests still pass
+
+---
+
+### APTR-142: Multi-tab model — one connection, deduped focus, uncontested read state
+- **Priority:** High
+- **Labels:** aperture, web, transport, correctness
+- **Agent:** codex
+- **Estimate:** 6h
+- **Blocked by:** APTR-33
+- **Description:** Nothing in this sprint currently acknowledges that a person opens more than one
+  tab, and two tabs on one session breaks three things quietly. Each tab opens its own SSE
+  connection, multiplying server-side fan-out per user. Each tab publishes context-bus focus events,
+  so the assistant is told the user is in thread A *and* thread B simultaneously — which is worse
+  than not knowing, because the assistant acts on it. And both tabs write read/last-seen state, so
+  they overwrite each other and the sidebar flickers between two truths.
+
+  Decision D10 requires a stated model. This item implements it: **one connection per session, with
+  server-side dedupe as the backstop**, so correctness does not depend on the client cooperating.
+
+  ## FILES
+  - `client/src/transport/TabCoordinator.ts` — leader election and tab lifecycle
+  - `client/src/transport/SharedStreamBroker.ts` — the leader's connection, fanned out to followers
+  - `client/src/transport/tabChannel.ts` — the cross-tab message channel and its schema
+  - `client/src/chat/useChatStream.ts` — consumes the broker rather than connecting directly
+  - `docs/MULTI-TAB.md` — the model, the leader protocol, and the failure modes
+  - **Agent-core repo (sibling PR):** per-session connection accounting, focus-event dedupe, and
+    monotonic read-state writes
+  - `client/src/transport/__tests__/`
+
+  ## APPROACH
+  1. **Leader election.** Tabs elect exactly one leader over a broadcast channel with a heartbeat and
+     a bounded takeover timeout. The leader holds the **single** SSE connection (which, per decision
+     D3, is one connection demultiplexed by `thread_id` and message id — this item does not create a
+     second stream, it prevents one). Followers subscribe through the broker and receive the same
+     demultiplexed events. A follower **never** opens its own connection.
+  2. **Leader death is survivable.** If the leader's heartbeat lapses or its tab closes, a follower
+     takes over within the timeout and reconnects with the resume position, using the existing replay
+     window (D3). Losing the leader must never lose a stream — a test kills the leader mid-stream and
+     asserts the surviving tab continues receiving tokens.
+  3. **Focus events are deduped, in the client and again on the server.** The client publishes thread
+     focus **only from the focused tab of the leader-coordinated set**, so a background tab never
+     claims the user's attention. The BFF additionally collapses focus events per session within a
+     short window and keeps only the most recent — because a client that misbehaves, is stale, or is
+     a second browser entirely must not be able to confuse the assistant about where the user is.
+     Server-side dedupe is the authority; client-side is the optimization.
+  4. **Read/last-seen state is monotonic, not last-writer.** Writes advance a per-thread high-water
+     mark and never move it backwards, so two tabs cannot fight: a stale tab writing an older
+     position is a no-op rather than a regression. Read state is broadcast across tabs so the sidebar
+     agrees everywhere immediately.
+  5. **Drafts stay per-tab-safe.** Drafts are device-local and per thread (APTR-33). Two tabs editing
+     the same thread's draft coordinate through the tab channel: the focused tab owns the draft, and
+     the other shows the live value read-only rather than silently clobbering it on blur.
+  6. Fallback is explicit and safe: where the broadcast channel is unavailable, each tab falls back to
+     its own connection, and **the server-side dedupe and monotonic read-state still hold**. Degraded
+     means more connections, never incorrect assistant context.
+  7. `docs/MULTI-TAB.md` documents the model, the leader protocol, and what degrades in fallback.
+
+  ## TEST PLAN
+  - Unit: with three tabs, exactly one leader is elected and exactly one connection is opened
+  - Unit: killing the leader mid-stream promotes a follower within the timeout and the surviving tab
+    keeps receiving tokens from the resume position
+  - Unit: a background tab publishes no focus event; only the focused tab does
+  - Unit: read state advances monotonically — a stale older position is a no-op, not a regression
+  - Unit: two tabs on one thread — the focused tab owns the draft; the other renders it read-only and
+    does not clobber it on blur
+  - Integration: BFF focus dedupe collapses rapid duplicate focus events per session to the latest
+  - Verify no hardcoded IPs, hostnames, org names, or absolute paths in new/modified files
+  - Negative: with the broadcast channel forcibly disabled, assert the fallback still yields correct
+    assistant context — server-side dedupe collapses the duplicate focus events and read state stays
+    monotonic, even though connection count rises
+  - Negative: have a follower tab attempt to open its own SSE connection directly and assert the
+    broker rejects it and the connection count stays at one
+
+  ## EDGE CASES
+  - Tab suspended/discarded by the browser while it was leader — heartbeat lapse triggers takeover;
+    on resume, the old leader demotes itself instead of running a second connection
+  - Two windows in different profiles or a private window — separate sessions, so separate
+    connections; server-side dedupe is per session and this is correct, not a bug
+  - Rapid open/close of many tabs — election converges without a thundering herd of reconnects
+  - Clock skew between tabs — use monotonic elapsed time for heartbeats, never wall-clock comparison
+  - A tab open on thread A and a tab open on thread B, both focused-then-blurred quickly — the server
+    keeps the most recent focus only; the assistant is never told the user is in two places at once
+  - Sign-out in one tab — all tabs tear down, the connection closes, and device-local state is purged
+    consistently with the sign-out path
+
+- **Acceptance criteria:**
+  - [ ] One SSE connection per session across tabs via leader election; followers never connect
+  - [ ] Leader death promotes a follower within the timeout without losing an in-flight stream
+  - [ ] Focus events are emitted only by the focused tab **and** deduped server-side per session, so
+        the assistant is never told the user is in two threads at once (both asserted)
+  - [ ] Read/last-seen state is monotonic; a stale tab cannot move it backwards
+  - [ ] Draft ownership is coordinated across tabs with no silent clobbering
+  - [ ] With the broadcast channel unavailable, correctness still holds server-side; only connection
+        count degrades (asserted by test)
+  - [ ] No hardcoded infrastructure values in new/modified code; `docs/MULTI-TAB.md` documents the
+        model; all existing tests still pass
+
+---
+
+### APTR-143: First-run and invited-user onboarding
+- **Priority:** High
+- **Labels:** aperture, web, onboarding, ux
+- **Agent:** claude
+- **Estimate:** 6h
+- **Blocked by:** APTR-31, APTR-141, APTR-145
+- **Description:** The sprint's exit criteria narrate an invited user's first session end to end, but
+  no item owned it — which is how a journey everyone assumes exists ends up existing nowhere. This
+  item owns it: redemption link → first sign-in → create or join a workspace → meet the assistant →
+  first thread, with every step accounted for and no dead end.
+
+  Onboarding is also the highest-risk place for a Soul Contract clause 1 violation, because "meet the
+  assistant" is exactly where a product is tempted to write charming copy in the assistant's voice.
+  It does not happen here: the introduction is **authored by the assistant** through the persona
+  assembler, and Aperture renders it. Product copy is the product's, plainly, and is visually and
+  structurally distinguishable from the assistant's.
+
+  ## FILES
+  - `client/src/onboarding/OnboardingFlow.tsx` — the guided step sequence
+  - `client/src/onboarding/steps/` — redeem, workspace, introduction, first-thread steps
+  - `client/src/onboarding/useOnboardingState.ts` — resumable progress, per principal
+  - `client/src/onboarding/Introduction.tsx` — renders the assistant-authored introduction
+  - `docs/ONBOARDING.md` — the journey, its steps, and where each can fail
+  - **Agent-core repo (sibling PR):** onboarding progress persistence and the introduction generation
+  - `client/src/onboarding/__tests__/`
+
+  ## APPROACH
+  1. **Redemption first.** The invite redemption page (APTR-44 issues the invites) is reachable
+     unauthenticated, sends no referrer, and carries the token in the URL **fragment** so it never
+     reaches a server log, a referrer header, or history sync. A used, expired, or revoked invite
+     yields the same indistinguishable failure APTR-44 specifies — onboarding must not become a token
+     oracle.
+  2. **Workspace step.** Create a first workspace or accept a granted one, using APTR-31's model with
+     its defaults intact — deny-by-default tool allowlist, descriptor-derived proxy selection, no
+     silent fallback proxy. Onboarding does not get privileged defaults ordinary creation lacks.
+  3. **Introduction step.** The assistant introduces itself, generated through the persona assembler
+     by **named proxy** and rendered verbatim (Soul Contract clause 1). If the user has prior memory,
+     this composes with APTR-141's continuity notice into one coherent moment rather than two
+     competing greetings. If generation is unavailable, the step shows the product's own clearly
+     attributed placeholder and offers to retry — it **never** substitutes Aperture-authored prose in
+     the assistant's voice.
+  4. **First thread.** The flow ends by landing the user in a real thread with the composer focused —
+     not on a dashboard, not on a tour. The last step of onboarding is using the product.
+  5. **Resumable and skippable.** Progress persists per principal, so a closed tab resumes where it
+     left off. Every step is skippable, and skipping never leaves an unusable account. The flow is
+     re-openable from the palette afterwards.
+  6. **The empty states link in.** APTR-46's empty states for threads, documents, and memory each
+     offer the relevant onboarding step as their primary action, so a user who skipped can pick it up
+     from wherever they actually noticed the gap.
+  7. All copy comes from APTR-145's string catalogue; assistant-attributed content never does, since
+     it is generated rather than authored.
+  8. Nothing in this flow resets or seeds memory, traits, or lore. A returning user going through
+     onboarding again — new device, new workspace — meets the same assistant, not a fresh one.
+
+  ## TEST PLAN
+  - Unit: the step sequence advances, persists, and resumes after an interrupted session
+  - Unit: every step is skippable and the resulting account is fully usable
+  - Unit: the introduction is rendered verbatim from the generation response
+  - Unit: the redemption page carries the token in the fragment, sends no referrer, and never places
+    the token in a path, query string, or logged field
+  - Integration: an invited user completes redeem → workspace → introduction → first thread with the
+    composer focused, without encountering a blank screen at any step
+  - Integration: for a user with prior memory, APTR-141's continuity notice and this introduction
+    compose into one greeting rather than two competing ones
+  - Verify no hardcoded IPs, hostnames, org names, or absolute paths in new/modified files
+  - Negative: with generation unavailable, assert the introduction step shows the product's
+    attributed placeholder and that **no** Aperture-authored prose is presented as the assistant's
+  - Negative: redeem an expired, revoked, and already-used invite and assert all three return the
+    same indistinguishable failure, with onboarding revealing nothing about which
+  - Negative: run onboarding for a returning principal and assert memory, traits, and lore are
+    unchanged (continuity)
+
+  ## EDGE CASES
+  - A user invited to an existing workspace with no create permission — the create step is replaced
+    by an accept step, never shown-then-refused
+  - A user who abandons at the workspace step and returns days later — resumable, with the invite's
+    grants still honoured if the invite itself has not expired
+  - Generation slow at the introduction step — a skeleton with an honest wait, and a skip that does
+    not poison the flow
+  - Onboarding on a narrow viewport — the same components at the narrow breakpoint, no mobile fork
+  - A second admin onboarding after the first — no step implies they are the sole or first user
+  - The workspace step racing a concurrent workspace creation from another tab — idempotent; the user
+    ends with one workspace, not two
+
+- **Acceptance criteria:**
+  - [ ] The invited-user journey — redeem, workspace, introduction, first thread — is owned end to
+        end, with no blank screen or dead end at any step
+  - [ ] The redemption link carries its token in the fragment, sends no referrer, and expired/revoked/
+        used invites are indistinguishable
+  - [ ] The assistant's introduction is generated via the persona assembler and rendered verbatim;
+        with generation unavailable, no Aperture-authored prose is presented as the assistant's
+  - [ ] The flow is resumable, skippable, and re-openable, and APTR-46's empty states link into it
+  - [ ] The flow ends in a real thread with the composer focused
+  - [ ] Onboarding never resets or seeds memory, traits, or lore (asserted by test)
+  - [ ] No hardcoded infrastructure values in new/modified code; `docs/ONBOARDING.md` documents the
+        journey; all existing tests still pass
+
+---
+
+### APTR-144: Rate limiting on user-driven expensive routes
+- **Priority:** High
+- **Labels:** aperture, bff, security, reliability
+- **Agent:** codex
+- **Estimate:** 6h
+- **Blocked by:** APTR-32, APTR-40
+- **Description:** Invites are rate-limited and uploads have quotas; everything else in this sprint is
+  wide open. That is a gap with teeth, because the expensive routes are not the obvious ones. Message
+  send drives a GPU turn on a shared, arbitrated pool. Title suggestion is **an LLM call per
+  invocation**, trivially triggerable in a loop. Server-side search runs a scan per keystroke behind
+  a debounce that a script simply does not honour. Re-embed dispatches an embedding job per document,
+  and bulk re-embed multiplies it. Export (APTR-140) assembles the user's entire corpus.
+
+  This is not only an abuse story. On a self-hosted fleet the likeliest cause of a fleet-wide stall is
+  the operator's own client in a retry loop, and a limit that produces a clear, renderable, honest
+  refusal is better for that user than a fleet that quietly falls over.
+
+  ## FILES
+  - `contracts/aperture-api-v1.yaml` — per-route limit declarations and the `rate-limited` response
+  - `contracts/aperture-errors-v1.md` — the `rate-limited` problem-details URN with `retry_after`
+  - `client/src/transport/rateLimit.ts` — client-side handling, backoff, and the retry-after surface
+  - `docs/RATE-LIMITS.md` — the limits, their rationale, and how to tune them by config key
+  - **Agent-core repo (sibling PR):** the limiter middleware, per-principal buckets, and config keys
+  - `client/src/transport/__tests__/`
+
+  ## APPROACH
+  1. **Per principal, never per source address.** Buckets key on the authenticated session principal.
+     A shared address must not create one bucket for everyone behind it, and a client-supplied
+     forwarded-for header is never trusted for identity (Sprint B owns the trusted-proxy
+     specification per decision D10 #9; this item consumes it and does not reimplement it).
+  2. **Limits are declared in the contract and configured by named config keys**, never literals in
+     handlers, so the operator can tune them without a code change. Every limited route declares its
+     bucket, its cost, and its window in the contract, and a test enumerates the limited routes from
+     the contract so a newly added expensive route cannot silently escape the limiter.
+  3. **Routes limited in this item**, with costs proportional to what they actually consume: message
+     send, server-side thread search, assistant title suggestion, document re-embed (single and bulk,
+     the bulk cost scaling with item count), attachment upload initiation, memory search, and export
+     request (APTR-140). Cheap reads are not limited — a limiter on a thread list is friction with no
+     protective value.
+  4. **Refusal is typed and honest.** A limited request returns the `rate-limited` problem-details URN
+     with a `retry_after`, and the client renders it through APTR-46's error vocabulary: what was
+     limited, when to try again, and no blame. Per the Pre-flight transient-feedback rule this is
+     **error feedback**, not an interruption — it appears where the action happened and never goes
+     through the presence budget.
+  5. **The client cooperates but is never trusted.** It disables the affordance for the retry-after
+     window and backs off with jitter, and the server enforces regardless. A tampered client gains
+     nothing.
+  6. **The assistant's own tool-invoked equivalents are limited on the same buckets** (Module Contract
+     clause 4 cuts both ways) — otherwise assistant-operable parity becomes a limiter bypass.
+  7. Limiting is never silent: a refusal is never a dropped request, a hang, or a fake success, and it
+     is logged with a correlation id and the bucket, without the payload.
+
+  ## TEST PLAN
+  - Unit: each declared bucket admits up to its limit and refuses beyond it within the window
+  - Unit: bulk re-embed cost scales with item count rather than counting as one request
+  - Unit: the client disables the affordance for `retry_after` and backs off with jitter
+  - Unit: `rate-limited` renders through the APTR-46 vocabulary with the retry time and no blame
+  - Integration: routes enumerated from the contract are all covered by the limiter — a new expensive
+    route added without a declaration fails the test
+  - Integration: the assistant's tool-invoked equivalent consumes the same bucket as the UI action
+  - Verify no hardcoded IPs, hostnames, org names, or absolute paths in new/modified files
+  - Negative: two principals behind one source address get **independent** buckets — one exhausting
+    its limit does not refuse the other
+  - Negative: send a spoofed forwarded-for header and assert it changes neither bucket identity nor
+    the limit applied
+  - Negative: assert a limited request is refused with a typed response — never dropped, never hung,
+    never answered with a fabricated success
+
+  ## EDGE CASES
+  - A legitimate burst (pasting several documents to embed at once) — burst allowance plus sustained
+    rate, so normal use is not punished by a limit tuned for a loop
+  - A limit hit mid-stream — the active stream is unaffected; only new requests are refused
+  - Clock skew and window boundaries — monotonic source, no double-spend at the boundary
+  - The single-operator install — defaults must not make solo use feel limited; document the tuning
+    keys and choose generous defaults
+  - A retry storm from many tabs — coordinate backoff through APTR-142's tab channel where available;
+    the server enforces regardless
+  - An admin needing to exceed a limit for a legitimate bulk operation — a documented config change,
+    never an ad hoc bypass path in code
+
+- **Acceptance criteria:**
+  - [ ] Send, search, title suggestion, re-embed (single and bulk), upload initiation, memory search,
+        and export request are all rate-limited per authenticated principal
+  - [ ] Limits are contract-declared and config-keyed with no literals in handlers, and a
+        contract-enumerated test proves no expensive route escapes the limiter
+  - [ ] A refusal is the typed `rate-limited` problem-details with `retry_after`, rendered through the
+        APTR-46 vocabulary as error feedback — never through the presence budget
+  - [ ] Buckets are per principal, never per source address, and forwarded-for headers cannot
+        influence identity or limits (asserted by test)
+  - [ ] Assistant tool-invoked equivalents consume the same buckets — parity is not a bypass
+  - [ ] Refusals are never silent drops, hangs, or fabricated successes (asserted by test)
+  - [ ] No hardcoded infrastructure values in new/modified code; `docs/RATE-LIMITS.md` documents the
+        limits and tuning keys; all existing tests still pass
+
+---
+
+### APTR-145: String catalogue, locale conventions, and time formatting
+- **Priority:** Medium
+- **Labels:** aperture, web, i18n, foundation, consistency
+- **Agent:** codex
+- **Estimate:** 5h
+- **Blocked by:** APTR-29
+- **Description:** Every surface in this sprint writes user-facing copy, and every one of them formats
+  a timestamp. Left alone, that produces eighteen slightly different date formats, three different
+  ways of saying "just now", copy scattered across a hundred components, and a quiet dependency on the
+  device clock and the device locale in features (quiet hours, date bucketing) where those are exactly
+  the wrong sources. Retrofitting extraction across a finished sprint is miserable and never fully
+  happens, so it is done up front.
+
+  This item is not a translation project. **The decision is English-only in v1** — stated explicitly
+  rather than left implicit — with strings centralized and formatting funnelled through shared
+  utilities so that adding a locale later is a data change rather than an archaeology project.
+
+  ## FILES
+  - `client/src/i18n/catalogue.ts` — the string catalogue, keyed and typed
+  - `client/src/i18n/useString.ts` — the lookup hook with typed interpolation
+  - `client/src/i18n/format.ts` — date, time, relative time, number, byte-size, and duration helpers
+  - `client/src/i18n/timezone.ts` — the user's declared timezone, distinct from the device clock
+  - `client/scripts/lint-strings.mjs` — the mechanical guard against inline user-facing literals
+  - `docs/COPY-AND-FORMAT.md` — the locale decision, tone rules, and formatting conventions
+  - `client/src/i18n/__tests__/`
+
+  ## APPROACH
+  1. **One catalogue, typed keys.** User-facing strings live in the catalogue and are looked up by
+     key. Interpolation is typed, so a missing or misnamed variable is a compile error rather than a
+     `{name}` shipped to a user. Keys are namespaced by surface.
+  2. **`lint-strings.mjs` fails the build on user-facing string literals in components** — the same
+     mechanical style as the adherence, external-host, presence, and surface-state gates. It targets
+     rendered text and accessible names; it does **not** flag test fixtures, log messages, contract
+     URNs, or `data-*` values. An allowlist exists for genuinely non-translatable tokens and is
+     reviewed, not open-ended.
+  3. **Assistant-authored text is never in the catalogue and never linted.** The assistant's words are
+     generated and rendered verbatim (Soul Contract clause 1). The catalogue holds the *product's*
+     voice only; a catalogue entry that speaks as the assistant is a clause 1 violation and the lint's
+     allowlist must never be used to sneak one in. This boundary is stated in `docs/COPY-AND-FORMAT.md`.
+  4. **Time formatting is shared and its source is explicit.** One helper set for absolute time,
+     relative time ("2 minutes ago"), day separators, and the sidebar's date bucketing (APTR-32), so
+     every surface agrees. Absolute time is always available on hover/focus wherever a relative time
+     is shown, because "3 days ago" is useless when you need the actual date.
+  5. **Timezone comes from the user's declared setting, not the device clock**, for anything
+     policy-bearing — quiet hours (APTR-43) above all, where the device clock is simply the wrong
+     authority for a user travelling with a laptop. Display-only formatting may follow the device.
+     DST transitions and the ambiguous/skipped hour are handled explicitly and tested, not assumed
+     away.
+  6. **Number, byte-size, and duration formatting** are shared too: attachment sizes, quota usage,
+     tool-call durations, and export sizes all format identically everywhere.
+  7. Formatting uses the platform's built-in internationalization APIs. **No formatting library is
+     added, and nothing fetches locale data at runtime** — standing constraint 3 is untouched.
+
+  ## TEST PLAN
+  - Unit: catalogue lookup with typed interpolation; a missing variable fails to compile
+  - Unit: `lint-strings.mjs` passes on the clean tree and ignores tests, logs, and contract URNs
+  - Unit: relative-time formatting is stable across the boundaries (just now / minutes / hours / days)
+    and always exposes the absolute time on hover/focus
+  - Unit: date bucketing agrees with APTR-32's sidebar grouping for the same inputs
+  - Unit: quiet-hours evaluation uses the declared timezone, not the device clock — a device clock
+    shifted to another zone does not change the window
+  - Unit: DST spring-forward (skipped hour) and fall-back (ambiguous hour) are handled explicitly
+  - Unit: byte-size and duration formatting are identical across attachment, quota, and tool surfaces
+  - Verify no hardcoded IPs, hostnames, org names, or absolute paths in new/modified files
+  - Negative: add an inline user-facing literal to a component and confirm `lint-strings` FAILS the
+    build; revert
+  - Negative: assert no assistant-attributed prose exists in the catalogue — a test scans entries for
+    first-person assistant voice and fails on a match (Soul Contract clause 1)
+  - Negative: assert no runtime fetch of locale data and no new formatting dependency in the bundle
+
+  ## EDGE CASES
+  - A string needing pluralization — use the platform plural rules from the start; never string
+    concatenation with an "(s)"
+  - RTL and bidi content inside interpolated values — isolate interpolations so a user-supplied value
+    cannot reorder the surrounding sentence
+  - A timestamp from a clock-skewed server producing a future relative time — clamp to "just now"
+    rather than rendering "in 3 minutes"
+  - A user who has not declared a timezone — prompt at the point it first matters (quiet hours) rather
+    than silently assuming the device zone for a policy decision
+  - Very long interpolated values (a thread title in a confirm) — truncate in the formatter, not in
+    each call site
+  - A catalogue key removed while still referenced — the typed lookup makes it a compile error
+
+- **Acceptance criteria:**
+  - [ ] All user-facing product strings live in a typed, namespaced catalogue; `lint-strings.mjs`
+        fails the build on inline user-facing literals in components
+  - [ ] The English-only-for-v1 decision and the tone rules are documented in
+        `docs/COPY-AND-FORMAT.md`, along with the catalogue-vs-assistant-voice boundary
+  - [ ] No assistant-attributed prose exists in the catalogue (asserted by test)
+  - [ ] Date, relative-time, day-separator, bucketing, number, byte-size, and duration formatting all
+        come from one shared utility set used by every surface
+  - [ ] Policy-bearing time (quiet hours above all) evaluates against the user's declared timezone,
+        not the device clock, with DST ambiguity handled explicitly (asserted by test)
+  - [ ] No formatting library is added and no locale data is fetched at runtime
+  - [ ] No hardcoded infrastructure values in new/modified code, and all existing tests still pass
+
+---
+
+### APTR-146: Upload-session and orphaned-attachment garbage collection
+- **Priority:** High
+- **Labels:** aperture, bff, attachments, reliability, security
+- **Agent:** claude
+- **Estimate:** 5h
+- **Blocked by:** APTR-38, APTR-39
+- **Description:** APTR-38 makes uploads chunked and resumable, which silently creates a new object
+  with a lifetime nobody owns: the **upload session**. A session started and abandoned — the tab
+  closed, the network dropped, or an attacker simply opening thousands and walking away — leaves
+  chunks on disk that no attachment references and nothing ever removes. That is a storage-exhaustion
+  vector sitting inside an otherwise thorough threat model, and it defeats APTR-39's per-user quota
+  if abandoned bytes are not counted.
+
+  This item also owns the other end of the Pre-flight attachment-lifecycle model: **reclamation at
+  zero references.** Thread delete decrements; something has to actually sweep. That something is
+  here, and it is deliberately **not** a synchronous cascade inside thread delete, because a
+  synchronous cascade is exactly what produces the orphaned-branch bug APTR-32 and APTR-35 were
+  contradicting each other about.
+
+  ## FILES
+  - `contracts/aperture-api-v1.yaml` — upload-session create/status/complete/abort routes, chunk size,
+    and session expiry, all explicit rather than implied
+  - `docs/SECURITY-UPLOADS.md` — extended with the session lifecycle, GC policy, and quota accounting
+  - **Agent-core repo (sibling PR):** session store, expiry sweeper, orphan reclamation, quota
+    accounting for in-flight and abandoned bytes
+  - `client/src/attachments/useUpload.ts` — aligned to the now-explicit session protocol
+  - Test fixture set for abandoned, expired, and partially-complete sessions
+
+  ## APPROACH
+  1. **The upload session becomes an explicit contract object**, not an implementation detail hidden
+     behind "chunked and resumable": a create route returning a session id and the server-declared
+     chunk size, a status route, a complete route, and an **abort** route the client calls when the
+     user cancels. Expiry is a documented, config-keyed duration. The client reads chunk size from the
+     session, never from a literal.
+  2. **In-flight bytes count against the per-user quota from the first chunk**, and are released on
+     abort, on expiry, or on completion-into-an-attachment. Otherwise a user can hold unlimited bytes
+     forever simply by never completing — quota accounting that ignores in-flight bytes is not quota
+     accounting.
+  3. **The sweeper is idempotent, bounded, and observable.** It reaps sessions past expiry and
+     reclaims attachments at zero references, in bounded batches with a documented cadence, logging
+     counts and bytes with correlation ids and **never** logging filenames or payloads. Running it
+     twice reclaims nothing extra; running it on a clean store is a no-op.
+  4. **Zero-reference reclamation is the only path that deletes attachment bytes.** No thread delete,
+     no message delete, no branch operation deletes bytes directly. Per the Pre-flight model,
+     workspace hard-delete is the one unconditional reclamation, and it goes through this same sweeper
+     rather than its own cascade.
+  5. **A grace window before reclamation.** An attachment reaching zero references is reclaimed only
+     after a documented grace period, so a race between a delete and an in-flight branch cannot
+     destroy bytes a new reference is about to claim. Reference count is re-checked at the moment of
+     deletion, inside the same transaction that removes the bytes.
+  6. **Abandonment is cheap to detect and expensive to abuse:** concurrent open sessions per principal
+     are capped, session creation is rate-limited on APTR-144's buckets, and an expired session's
+     chunks are unreadable and unresumable rather than lingering as addressable data.
+  7. Reclamation touches no memory: an attachment's bytes going away never removes what the assistant
+     learned from it (continuity clause), and the message record still shows the reference so the
+     transcript stays honest about what was there.
+
+  ## TEST PLAN
+  - Unit: session create/status/complete/abort round-trip; chunk size comes from the session response,
+    never from a client literal
+  - Unit: in-flight bytes count against quota from the first chunk and are released on abort, expiry,
+    and completion
+  - Unit: the sweeper is idempotent — a second run reclaims nothing extra; a run on a clean store is a
+    no-op
+  - Unit: an attachment at zero references is reclaimed only after the grace window, with the count
+    re-checked inside the deleting transaction
+  - Integration: an abandoned session past expiry is reaped, its bytes released, and its chunks are no
+    longer addressable or resumable
+  - Integration: workspace hard-delete reclaims all its attachments through this sweeper, not through
+    a separate cascade
+  - Verify no hardcoded IPs, hostnames, org names, or absolute paths in new/modified files
+  - Negative (the contradiction test): delete a thread whose attachment is still referenced by a
+    branch, run the sweeper, and assert the bytes are **not** reclaimed and the branch still fetches
+    the attachment — the sweeper must reclaim at zero references, never on a thread-delete signal
+  - Negative: open the maximum concurrent sessions and assert further creation is refused with a typed
+    reason, and that abandoned sessions cannot be used to exceed the storage quota
+  - Negative: assert sweeper log lines contain counts, bytes, and correlation ids but **no** filename,
+    payload, or internal path, and that reclamation leaves Engram memory intact
+
+  ## EDGE CASES
+  - A session resumed just as it expires — the resume either succeeds cleanly or fails with a typed
+    expired reason; never a half-resumed session writing into reaped storage
+  - A branch created in the same instant a thread delete drops the count to zero — the grace window
+    plus the in-transaction re-check must make this safe; test it explicitly with a forced race
+  - Sweeper interrupted mid-batch — restartable with no double-accounting and no partially deleted
+    attachment left addressable
+  - Clock skew on expiry — monotonic source, consistent with APTR-39's idle-timeout decision
+  - A very large abandoned session — reclaimed in bounded chunks so the sweep does not stall other work
+  - An attachment referenced only by an exported archive (APTR-140) — an export holds no reference;
+    the archive already contains its own copy, and the manifest records unavailability if reclaimed
+
+- **Acceptance criteria:**
+  - [ ] Upload sessions are explicit contract objects with create/status/complete/abort routes, a
+        server-declared chunk size, and a documented config-keyed expiry
+  - [ ] In-flight bytes count against the per-user quota and are released on abort, expiry, and
+        completion; concurrent sessions per principal are capped and rate-limited
+  - [ ] An abandoned session is reaped and its bytes released; its chunks become unaddressable and
+        unresumable (asserted by test)
+  - [ ] Zero-reference reclamation is the **only** path that deletes attachment bytes, gated by a
+        grace window with the count re-checked in the deleting transaction
+  - [ ] Deleting a thread whose attachment a branch still references reclaims nothing, and the branch
+        still fetches it after a sweep (asserted — this is the lifecycle contradiction test)
+  - [ ] The sweeper is idempotent and bounded, and logs counts/bytes/correlation ids only — never
+        filenames, payloads, or internal paths
+  - [ ] Reclamation never removes Engram memory derived from the attachment (asserted by test)
+  - [ ] No hardcoded infrastructure values in new/modified code; `docs/SECURITY-UPLOADS.md` extended
+        with the session lifecycle and GC policy; all existing tests still pass
+
+---
+
 ## Sprint C exit criteria
 
-Sprint C is done when all eighteen items are merged, each with its post-merge gate outcome
-reported by name, and the following hold end to end:
+Sprint C is done when all **twenty-five** items — APTR-29..46 and APTR-140..146 — are merged in
+`Blocked by` order, each with its post-merge gate outcome reported by name, and the following hold
+end to end:
 
-1. A new user can be invited, sign in, create a workspace, create a thread, hold a streaming
-   conversation with tool calls rendered inline, attach and query a document, and find it all again
-   by search — without encountering a blank screen at any point.
+1. A new user can be invited, sign in through the guided first-run flow, create a workspace, meet the
+   assistant in the assistant's own generated words, create a thread, hold a streaming conversation
+   with tool calls rendered inline, attach and query a document, and find it all again by search —
+   without encountering a blank screen at any point.
 2. No model id, engine name, backend tag, or size suffix appears in client code, BFF code, stored
    settings, an API payload, or the rendered DOM. Named proxies only.
 3. The built bundle fetches nothing from an external origin at runtime.
@@ -1660,5 +2750,24 @@ reported by name, and the following hold end to end:
 5. Aperture has no independent notification tray; every interruption passes the presence budget.
 6. Matrix remains first-class and cannot be disabled from Aperture; Telegram is present and off by
    default; Signal is inert with no configuration affordance.
-7. The a11y check, adherence lint, external-host assertion, presence lint, surface-state assertion,
-   and contract-drift gate all pass in CI.
+7. The a11y check, adherence lint, external-host assertion, presence lint, string lint,
+   surface-state assertion, and contract-drift gate all pass in CI.
+8. **Provenance holds (D9).** Every visual attribution in the chat surface and the tool rendering
+   derives from the `origin` discriminator alone. A tool result crafted to look like an assistant
+   message stays in the bounded tool frame with tool attribution intact, and no content-sniffing
+   heuristic exists anywhere in the render path.
+9. **The web target's rules are the web target's (D1).** Auth is the session cookie, requests are
+   same-origin relative, `connect-src` is `'self'`, no CORS headers are served, and every mutating
+   route inherits Sprint A's origin-check middleware. No bearer token, configured endpoint, or OS
+   secure-storage read appears anywhere in this sprint's code.
+10. **Sovereignty is provable in both directions.** The user can export their threads, messages,
+   attachments, and memory in the documented format and reconstruct their conversations with a reader
+   that has no Aperture code — and the only runtime external fetch in the built app is the D5
+   click-to-load image carve-out, under its stated conditions.
+11. **The attachment lifecycle has exactly one implementation.** Attachments are workspace-owned and
+   reference-counted; deleting a thread whose attachment a branch still references reclaims nothing
+   and the branch still renders it; bytes are reclaimed only at zero references by APTR-146's sweeper.
+12. **Two tabs behave as one client.** One connection per session, focus events deduped server-side
+   so the assistant is never told the user is in two threads at once, and monotonic read state.
+13. Every expensive user-driven route is rate-limited per authenticated principal, and a refusal is a
+   typed, renderable `rate-limited` response — never a drop, a hang, or a fabricated success.
