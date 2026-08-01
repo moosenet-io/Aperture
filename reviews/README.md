@@ -177,13 +177,47 @@ SSE-frame-shaped JSON.
 
 ---
 
+---
+
+## Two product-level findings worth surfacing above the technical ones
+
+Most of this review is engineering correction. These two are about what the product *feels* like,
+and both come from Sprint C:
+
+**Pre-Aperture history — first-run will feel like amnesia even though it isn't.** Someone who has
+talked to the assistant through Matrix for a year opens Aperture and sees an empty thread list.
+Memory, traits, and lore all survive (the Soul Contract's continuity clause is satisfied), but the
+*transcript* does not appear. The clause is technically met while the experience contradicts it.
+This needs a decision written down: either surface prior history, or state plainly that it does
+not carry over and why — and, ideally, have the assistant say so itself on first run rather than
+presenting a blank slate.
+
+**No data export.** There is no way to get content out. For a project whose entire premise is
+sovereignty, an assistant you cannot export from is not meaningfully yours — sovereignty without
+portability is just a nicer cage. This should be an item, not a backlog wish.
+
+Sprint C's sharpest technical catches: a direct contradiction between thread deletion cascading to
+attachments and branches referencing them (two agents would build incompatible semantics);
+"last-write-wins with an `updated_at` precondition", which is self-contradictory (a precondition
+that rejects stale writes is optimistic concurrency, the opposite of last-write-wins); and
+click-to-load remote images, which performs exactly the runtime external fetch the sovereignty
+constraint forbids — possibly the right carve-out, but it must be written down as one rather than
+left for the Sprint G security review to trip over.
+
+---
+
 ## Status
 
-These findings are recorded, not yet folded into the specs. Folding them in is the next action
+**Review coverage: complete — all seven sprints (A–G).** ~180 enhancements, ~57 P1, 48 defects.
+The per-sprint verbatim reviews are in this directory.
+
+These findings are recorded, **not yet folded into the specs**. Folding them in is the next action
 before Plane ingest, so the ingested items carry the corrections rather than the originals.
 
-Review coverage: Sprints A, B, D, E, F, G complete. Sprint C's first attempt hit
-`daemon unreachable` (seven concurrent reviewers) and its second hit `primary unreachable` —
-because it ran during a deliberate gateway restart to install mirror configuration. Both are
-infrastructure artifacts, **not** verdicts; per the gate rules an unavailable provider is never a
-pass, so C is being re-run rather than accepted.
+Process note, recorded because it cost four attempts: Sprint C failed three times before
+succeeding — once from running seven reviewers concurrently (review-daemon overload), and twice
+from the gateway being restarted *while the review was in flight* to install mirror and KG
+configuration. All three were infrastructure artifacts, never verdicts. Per the gate rules an
+unavailable provider is not a pass, so each failure was re-run rather than accepted. The lesson
+for the build: **do not restart the gateway while reviews are in flight**, and cap reviewer
+concurrency well below seven.
