@@ -844,10 +844,15 @@ paths:
         two directions. `#/components/schemas/StreamEvent` is the machine-readable form of that
         taxonomy and is what a conformance test validates event frames against.
 
-        **Resume.** A client reconnects with `Last-Event-ID` set to the last `seq` it processed.
-        Within the bounded replay window the server replays from that position. Beyond it the
-        server emits a `resync` event naming the lost range, and the client refetches over REST.
-        Resume is never unbounded.
+        **Resume.** A client reconnects with `Last-Event-ID` set to the composite
+        `"{stream_id}:{seq}"` of the last event it fully processed. Within the bounded replay
+        window the server replays from that position. Beyond it — and equally for an unknown
+        `stream_id` or a malformed value — the server issues a fresh `stream_id` and emits a
+        `resync` naming the reason, and the client refetches over REST. Resume is never
+        unbounded, and the only case that starts at live with no `resync` is a genuine first
+        connection with no `Last-Event-ID` at all. The single normative statement of this
+        behaviour is `contracts/aperture-events-v1.md` §5; this paragraph summarizes it and never
+        extends it.
 
         **Anti-buffering headers are mandatory on this route**, because a buffering reverse proxy
         turns a token stream into a wall of text delivered at the end:
@@ -1764,11 +1769,36 @@ components:
     Timestamp:
       type: string
       format: date-time
+      pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|\+00:00)$'
+      minLength: 20
+      maxLength: 36
       description: |
-        UTC ISO-8601 with an explicit offset, for example `2026-08-01T09:41:00Z`. A local-time
-        string never appears on the wire; rendering into the viewer's local zone is a client
-        concern. Timestamps are for **display and audit only** — they are never used to decide
-        ordering, replay position, or eviction. That is what `seq` is for.
+        **UTC** ISO-8601 with an explicit zero offset — `2026-08-01T09:41:00Z` or
+        `2026-08-01T09:41:00+00:00`. Optional fractional seconds are permitted.
+
+        The **pattern is the constraint**, not the description. Bare `format: date-time` accepts
+        any offset — `2026-08-01T09:41:00+02:00` validates against it — so a contract that says
+        "UTC" and checks only `date-time` lets several sprints emit several different wire forms
+        while all validating, and the mismatch surfaces as an off-by-hours bug in a client that
+        renders a "local" time twice. Non-UTC offsets are rejected here instead.
+
+        A local-time string never appears on the wire. Rendering into the viewer's local zone is a
+        **client** concern and happens at the render boundary.
+
+        Timestamps are for **display and audit only** — they are never used to decide ordering,
+        replay position, or eviction. That is what `seq` is for.
+
+        **This schema is the single definition.** Every timestamp field in this contract
+        `$ref`s it or `TimestampOrNull`; no field re-declares `format: date-time` inline.
+        Enforced by conformance test **T-CLOCK-2**.
+
+    TimestampOrNull:
+      description: A `Timestamp`, or `null` where the contract documents the value as
+        legitimately absent. Same UTC constraint when present — nullability is not an escape from
+        it.
+      oneOf:
+        - $ref: "#/components/schemas/Timestamp"
+        - type: "null"
 
     Origin:
       type: string
@@ -2145,11 +2175,38 @@ components:
       additionalProperties: false
       required: [id, thread_id, origin, created_at]
       description: |
-        A stored message. **`origin` is mandatory**, exactly as it is on stream events, and it is
-        the sole source of attribution: a client renders who is speaking from `origin`, never from
-        the message's content. A message with `origin: tool` is rendered as a tool result no
-        matter what bytes it contains — including bytes shaped like an assistant message, an SSE
-        frame, or an event envelope. Such content stays inert data.
+        A stored message, as returned over REST.
+
+        **`origin` is mandatory**, exactly as it is on stream events, and it is the sole source of
+        attribution: a client renders who is speaking from `origin`, never from the message's
+        content. A message with `origin: tool` is rendered as a tool result no matter what bytes
+        it contains — including bytes shaped like an assistant message, an SSE frame, or an event
+        envelope. Such content stays inert data.
+
+        **The REST representation is bound by the same provenance rule as the stream, and this is
+        the second door into the same room.** The stream path is closed by `message_origin` plus a
+        required `message_id` on every tool event; without an equivalent here, a REST response
+        could carry `origin: assistant` over tool-result bytes and launder exactly what the stream
+        forbids — the same shape as a client-published `context` event claiming assistant
+        authority. Two mechanisms close it:
+
+        1. **Structural, enforced by this schema.** `tool_call_id` is the linkage a tool message
+           carries. A message with `origin: tool` **must** have it; a message with any other
+           `origin` **must not**. So an assistant-attributed message cannot carry tool linkage,
+           and a tool result cannot be re-served as an assistant message without dropping the
+           linkage that makes it a tool result at all. This mirrors the stream's
+           `message_origin` ↔ `message_id` binding.
+        2. **Byte provenance, enforced by conformance test T-ORIGIN-8.** Whether the *bytes* in
+           `content` actually came from the party named by `origin` is a fact about how the
+           message was produced, not about its shape, and **no schema can check it** — a string is
+           a string. `T-ORIGIN-8` asserts round-trip provenance: content that arrived on the
+           stream as a `tool.result` is stored with `origin: tool` and is served over REST with
+           `origin: tool`, and no code path re-parents stored content from one origin to another.
+           **The REST path relies on that test**, stated plainly here so nobody reads the schema
+           alone and concludes the guarantee is structural end to end.
+
+        `origin` on a stored message and `message_origin` on the stream's `message.start` are the
+        same fact about the same message and must agree; **T-ORIGIN-8** asserts that too.
       properties:
         id:
           $ref: "#/components/schemas/Id"
@@ -2159,6 +2216,13 @@ components:
           $ref: "#/components/schemas/Id"
         origin:
           $ref: "#/components/schemas/Origin"
+        tool_call_id:
+          allOf:
+            - $ref: "#/components/schemas/Id"
+          description: |
+            The tool invocation this message carries the result of. **Required when `origin` is
+            `tool`, forbidden otherwise** — see the conditional below. It is the REST analogue of
+            the stream's required `message_id` on `tool.result`.
         content:
           type: string
           description: The message body. Untrusted for attribution purposes under all
@@ -2174,8 +2238,17 @@ components:
         created_at:
           $ref: "#/components/schemas/Timestamp"
         edited_at:
-          type: [string, "null"]
-          format: date-time
+          $ref: "#/components/schemas/TimestampOrNull"
+      if:
+        required: [origin]
+        properties:
+          origin:
+            const: tool
+      then:
+        required: [tool_call_id]
+      else:
+        not:
+          required: [tool_call_id]
 
     MessageCreate:
       type: object
@@ -2237,8 +2310,7 @@ components:
         started_at:
           $ref: "#/components/schemas/Timestamp"
         ended_at:
-          type: [string, "null"]
-          format: date-time
+          $ref: "#/components/schemas/TimestampOrNull"
 
     Attachment:
       type: object
@@ -2730,7 +2802,9 @@ components:
 
             **`from_seq` and `to_seq` are INCLUSIVE on both ends** — the closed interval
             `[from_seq, to_seq]` is exactly the set of `seq` values that were not delivered.
-            `from_seq == to_seq` means precisely one lost event. The `resync` event is **never
+            `from_seq == to_seq` means precisely one lost event, and `from_seq <= to_seq`
+            always — the latter enforced by **T-RESYNC-3**, not by the schema, because comparing
+            two sibling properties is outside what JSON Schema can express. The `resync` event is **never
             inside its own reported range**: it is a delivered event in the current domain, and
             the range describes undelivered events.
 
@@ -2784,6 +2858,31 @@ components:
                 $ref: "#/components/schemas/Id"
             origin:
               const: system
+        - description: |
+            **The `reason` / `lost_range` relationship, enforced.** Unlike this contract's
+            cross-event invariants, this one is a property of a single object, and OpenAPI 3.1 is
+            JSON Schema 2020-12 — so it is expressed rather than merely described:
+
+            - `window_aged_out` and `gap_detected` — the server has a trustworthy prior position,
+              so `lost_range` is **required**;
+            - `unknown_stream` and `unparseable_position` — there is no trustworthy prior position
+              to subtract from, so `lost_range` is **forbidden**, not merely optional. Emitting a
+              plausible-looking range for a position the server never had would be a fabricated
+              bound, and a client would reasonably trust it and under-refetch.
+
+            `from_seq <= to_seq` is a **cross-property** comparison and is genuinely not
+            expressible here — no keyword can compare two sibling values. It is enforced by
+            conformance test **T-RESYNC-3**.
+          if:
+            required: [reason]
+            properties:
+              reason:
+                enum: [window_aged_out, gap_detected]
+          then:
+            required: [lost_range]
+          else:
+            not:
+              required: [lost_range]
 
     HeartbeatEvent:
       allOf:

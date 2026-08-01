@@ -279,8 +279,20 @@ event it fully processed. The server replays every buffered event for that `stre
 `seq`, in order, and then continues live. A client that has never connected omits the header and
 receives only live events.
 
-A client persists the highest `seq` it has seen **per `stream_id`** across reconnects. An
-unparseable `Last-Event-ID` is treated as absent — never parse-guessed.
+A client persists the highest `seq` it has seen **per `stream_id`** across reconnects.
+
+The three input cases are distinguished, and there is no fourth:
+
+| `Last-Event-ID` | Meaning | Result |
+|---|---|---|
+| **Absent** | First connection. The client is not asking to resume. | Live delivery, **no** `resync`. Lossless. |
+| **Parses, position live** | Resume from a known position. | Replay from that `seq`, then live. |
+| **Parses, position aged out or `stream_id` unknown** | Resume from a position the server cannot honour. | Fresh `stream_id` + `resync` — §5.3, §5.4. |
+| **Malformed** | The client is asking to resume from *somewhere*. | Fresh `stream_id` + `resync(reason: unparseable_position)` — §5.4. **Never treated as absent, never parse-guessed.** |
+
+A malformed value is **not** the same as an absent one, and the difference is the whole point:
+absent means "I have never connected", malformed means "resume me", and answering the second with
+silent live delivery loses continuity without telling the client.
 
 ### 5.2 The window is bounded
 
@@ -312,6 +324,11 @@ live and does **not** pretend the gap did not happen.
 | `unknown_stream` | The `stream_id` is not one the server has — restart, or the connection was reaped. | **Absent** |
 | `unparseable_position` | The `Last-Event-ID` did not parse. | **Absent** |
 
+This table is **enforced by the schema**, not just documented: `ResyncEvent` carries an
+`if`/`then`/`else` requiring `lost_range` for the first two reasons and **forbidding** it for the
+last two. Absent means absent — a fabricated range for a position the server never had would be
+trusted by a client and cause it to under-refetch.
+
 #### The sequence domain of the reported range
 
 This is the part two implementers would otherwise read two ways, so it is pinned:
@@ -329,6 +346,12 @@ This is the part two implementers would otherwise read two ways, so it is pinned
 - `from_seq` and `to_seq` are **inclusive on both ends**. The closed interval
   `[from_seq, to_seq]` is exactly the set of `seq` values that were not delivered.
 - `from_seq == to_seq` means **precisely one** lost event.
+- `from_seq <= to_seq` always. This is a **cross-property** comparison and is therefore *not*
+  expressible in JSON Schema — no keyword can compare two sibling values, and `minimum` cannot
+  reference another field. It is enforced by conformance test **T-RESYNC-3**, which asserts the
+  server never emits an inverted range and that a client **rejects** one rather than normalizing
+  it by swapping the ends. Swapping would turn a server bug into a plausible-looking refetch over
+  the wrong range, which is worse than a visible failure.
 - A `resync` is **never inside its own reported range**. It is a delivered event in the current
   domain; the range describes undelivered events, in a domain it names explicitly. There is no
   case in which a client should subtract the `resync` itself from the range.
@@ -456,8 +479,11 @@ gap in this contract is named as one, in those words, and given a test id here.
 | **T-ORIGIN-5** | **The message-association invariant of §2.6.** A `token` may only reference a message opened `message_origin: assistant`; a `tool.call`/`tool.result` may only reference one opened `message_origin: tool`. Asserted on **both** sides: the server refuses to emit a violation when driven to, and a client receiving one fails closed rather than rendering it in place. | **No — spans two events.** This test is the only enforcement. |
 | **T-ORIGIN-6** | A `tool.result` whose `result` contains SSE-frame-shaped or assistant-event-shaped bytes is delivered as a `tool.result` and rendered as a tool result. The §2.2 negative test. | Partly — the rest is behavioural |
 | **T-ORIGIN-7** | `message.end.message_origin` equals the value declared at `message.start`; a mismatch is rejected and the client keeps the recorded value. | **No — spans two events.** |
+| **T-ORIGIN-8** | **The REST representation obeys the same provenance rule as the stream.** Round-trip: content that arrived as a `tool.result` is stored `origin: tool` and served over REST as `origin: tool`; no code path re-parents stored content from one origin to another; and a stored message's `origin` agrees with the `message_origin` its `message.start` declared. | **Partly.** The `origin` ↔ `tool_call_id` binding is schema-enforced; **byte provenance is not checkable by any schema** and this test is its only enforcement. |
 | **T-RESYNC-1** | `resync` round-trips with `reason`, `lost_range` (including its own `stream_id` domain), and affected ids; `from_seq`/`to_seq` are honoured as **inclusive**; `lost_range` is absent exactly for `unknown_stream` and `unparseable_position`. | Partly |
+| **T-RESYNC-3** | `from_seq <= to_seq` on every emitted `resync`, and a client **rejects** an inverted range rather than normalizing it by swapping the ends. | **No — cross-property comparison.** The `reason` ↔ `lost_range` relationship beside it *is* schema-enforced. |
 | **T-RESYNC-2** | An **unparseable** `Last-Event-ID` produces a fresh stream plus a `resync` with `reason: unparseable_position` — **never** silent live delivery. An unknown `stream_id` likewise, with `reason: unknown_stream`. A genuine first connection produces neither. | No — behavioural |
+| **T-CLOCK-2** | Every timestamp field `$ref`s `Timestamp` or `TimestampOrNull`; no field re-declares `format: date-time` inline; and the UTC pattern rejects a non-zero offset such as `+02:00`. | Yes — pattern + contract lint |
 | **T-CLOCK-1** | No code path compares two `ts` values to decide ordering, replay, or eviction. | No — static/grep gate |
 | **T-LIFECYCLE-1** | Every opened message receives exactly one `message.end`, including on cancellation and failure. | No — behavioural |
 | **T-PROBLEM-1** | Every error response is `application/problem+json`; `Problem.type` matches the `urn:aperture:error:<class>` pattern; the object is **closed**, so an extension member is rejected rather than passed through. | Yes |
