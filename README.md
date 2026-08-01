@@ -176,7 +176,8 @@ candidates, routes a `style` attribute through the CSS scanner, and routes `<scr
 treated as comment-strippable text.
 
 **Documented non-goals — accepted limitations, not silent gaps.** Each is covered by the
-runtime CSP, and each has a test recording the current behaviour so a change goes red:
+runtime CSP. Most have a test recording the current behaviour so a change goes red; where one
+does not, it says so:
 
 - **HTML character references are not decoded.** An origin written as `&#x2F;&#x2F;evil…` is
   not detected.
@@ -190,6 +191,9 @@ runtime CSP, and each has a test recording the current behaviour so a change goe
   in its metadata or trailing data, are both skipped. That is deliberate obfuscation — the case
   this lint already delegates to the CSP. Closing it would mean parsing container structure and
   scanning printable strings inside binaries, which is a different and much larger tool.
+  **Test coverage is partial:** the crafted-signature half is recorded by two tests; the
+  conforming-binary-with-an-origin-in-its-metadata half is **documented but untested**, because
+  it needs a real conforming fixture and the CSP is the control either way.
 
 Candidate values are compared **whole and never truncated at a delimiter**. That is what makes
 `http://www.w3.org/2000/svg;payload` and `…/2000/svg?exfil=1` fail rather than reduce to an

@@ -342,16 +342,30 @@ describe('unknown extensions fail closed, matching the documented claim', () => 
     });
   });
 
-  // The two tests below RECORD a documented limitation. They are not assertions of desired
-  // behaviour, and they must not be read as one: a signature identifies FORMAT, not INTENT, and
-  // binary content is never scanned. Both cases are deliberate obfuscation, which this lint
-  // delegates to the runtime CSP. Closing them would mean parsing container structure and
-  // scanning printable strings inside binaries — a different and much larger tool. If either
-  // outcome ever changes, update the recording and the NON-GOALS block together.
+  // The two tests below RECORD an observed behaviour. They are not assertions of desired
+  // behaviour: a signature identifies FORMAT, not INTENT, and binary content is never scanned.
+  //
+  // READ THE FIXTURES, NOT THE INTENT. Both are CRAFTED SIGNATURE MATCHES — a handful of
+  // signature bytes plus arbitrary content. Neither is a conforming file of its format: the
+  // first has no PNG chunk stream, the second has no WOFF2 table directory or compressed font
+  // data, and its origin bytes are not declared as metadata or private data, which a conforming
+  // WOFF2 would require. An earlier revision of this comment called the second one "a genuine
+  // binary with an origin in trailing data". It never was.
+  //
+  // So of the two limitations documented in NON-GOALS, these cover ONE:
+  //   * covered here — an asset crafted to carry a known signature is skipped
+  //   * NOT COVERED BY ANY TEST — a structurally conforming binary carrying an origin in its
+  //     metadata or trailing data. That remains a documented, UNTESTED limitation. Testing it
+  //     needs a real conforming fixture (a valid WOFF2 with a declared private-data block), and
+  //     it was judged not worth building: the limitation is documented either way and the CSP
+  //     is the control. An untested limitation that says so is fine; one that claims a test is
+  //     not, which is what this comment previously did.
+  //
+  // If either outcome changes, update the recording and the NON-GOALS block together.
 
-  it('OBSERVED LIMITATION (delegated to CSP): an asset crafted to carry a known signature is SKIPPED', () => {
-    // Real PNG magic bytes, then an origin as the "image" body. Nothing about the bytes after
-    // the signature is examined, so this is skipped and counted as binary.
+  it('OBSERVED (crafted signature match): PNG magic bytes plus arbitrary content are SKIPPED', () => {
+    // PNG's 8 magic bytes followed by an origin. This is NOT a valid PNG — there is no IHDR,
+    // no chunk stream, no CRC. It does not need to be: nothing past the signature is examined.
     const crafted = Buffer.concat([
       Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
       Buffer.from('https://evil.invalid/collect', 'latin1'),
@@ -364,23 +378,23 @@ describe('unknown extensions fail closed, matching the documented claim', () => 
     });
   });
 
-  it('OBSERVED LIMITATION (delegated to CSP): a genuine binary with an origin in trailing data is SKIPPED', () => {
-    // A structurally valid WOFF2 header — length field and all — with an origin appended after
-    // it, standing in for metadata or trailing data inside a real asset.
+  it('OBSERVED (crafted signature match): a WOFF2-shaped, length-consistent buffer is SKIPPED', () => {
+    // Not a font: `wOF2`, a total-length field agreeing with the buffer, and zeroes. It is here
+    // for the LENGTH-INVARIANT BOUNDARY, which is the genuinely useful part — appending past
+    // the declared length breaks the invariant and IS reported, while a buffer whose length
+    // field agrees is skipped whatever the bytes in between say.
     const header = Buffer.alloc(64);
     header.write('wOF2', 0, 'latin1');
     header.writeUInt32BE(64, 8);
-    const withTrailer = Buffer.concat([header, Buffer.from('https://evil.invalid/collect', 'latin1')]);
-    // Note the header's length field no longer matches the file, so this particular shape is
-    // reported; the same trailer INSIDE a correctly-sized asset would not be.
-    expect(identifyBinaryFormat(withTrailer)).toBeNull();
+    const appended = Buffer.concat([header, Buffer.from('https://evil.invalid/collect', 'latin1')]);
+    expect(identifyBinaryFormat(appended)).toBeNull(); // length field no longer matches the file
 
-    const consistent = Buffer.alloc(96);
-    consistent.write('wOF2', 0, 'latin1');
-    consistent.writeUInt32BE(96, 8);
-    consistent.write('https://evil.invalid/collect', 48, 'latin1');
-    expect(identifyBinaryFormat(consistent)).toBe('woff2');
-    withDist({ 'font.unknown': consistent }, (dir) => {
+    const lengthConsistent = Buffer.alloc(96);
+    lengthConsistent.write('wOF2', 0, 'latin1');
+    lengthConsistent.writeUInt32BE(96, 8);
+    lengthConsistent.write('https://evil.invalid/collect', 48, 'latin1');
+    expect(identifyBinaryFormat(lengthConsistent)).toBe('woff2');
+    withDist({ 'font.unknown': lengthConsistent }, (dir) => {
       const result = scanDist(dir, allowed);
       expect(result.findings).toEqual([]);
       expect(result.skippedBinary).toBe(1);
