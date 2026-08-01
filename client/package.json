@@ -11,9 +11,12 @@
   "scripts": {
     "dev": "vite",
     "typecheck": "tsc --noEmit",
-    "build": "tsc --noEmit && vite build && node scripts/assert-no-external-hosts.mjs",
+    "build": "npm run assert-api-current && npm run assert-sdk-clean && tsc --noEmit && vite build && node scripts/assert-no-external-hosts.mjs",
     "preview": "vite preview",
     "test": "vitest run",
+    "gen:api": "node scripts/gen-api.mjs",
+    "assert-api-current": "node scripts/assert-api-current.mjs",
+    "assert-sdk-clean": "node scripts/assert-sdk-clean.mjs",
     "assert-no-external-hosts": "node scripts/assert-no-external-hosts.mjs"
   },
   "dependencies": {
@@ -27,8 +30,10 @@
     "@types/react": "18.3.31",
     "@types/react-dom": "18.3.7",
     "@vitejs/plugin-react": "4.7.0",
+    "openapi-typescript": "7.13.0",
     "typescript": "5.6.3",
     "vite": "5.4.21",
-    "vitest": "2.1.9"
+    "vitest": "2.1.9",
+    "yaml": "2.8.1"
   }
 }
