@@ -20,9 +20,15 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import ts from 'typescript';
 import valueParser from 'postcss-value-parser';
 
-import { runAdherenceLint, findValueLiterals, findColorLiteralsInText } from './adherence-lint.mjs';
+import {
+  runAdherenceLint,
+  findValueLiterals,
+  findColorLiteralsInText,
+  compilerCapabilityErrors,
+} from './adherence-lint.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIR = resolve(SCRIPT_DIR, '..');
@@ -245,14 +251,18 @@ describe('JSX presentation attributes are CSS values too', () => {
     ['an expression container', "fill={'red'}"],
     ['a no-substitution template', 'fill={`red`}'],
     ['a parenthesised expression', "fill={('red')}"],
+    ['a non-null assertion', "fill={'red'!}"],
     ['an `as` assertion', "fill={'red' as string}"],
+    ['an `as const` assertion', "fill={'red' as const}"],
     ['a `satisfies` expression', "fill={'red' satisfies string}"],
-    ['nested wrappers', "fill={(('red') as string)}"],
+    ['nested wrappers', "fill={(('red')! as string)}"],
+    ['three nested wrappers', "fill={((('red' as const)!) as string)}"],
   ])('reports a named colour written as %s — static is static', (_name, attribute) => {
-    // An earlier revision unwrapped only a bare `StringLiteral`, so every one of these bypassed
-    // the CSS-value path and fell through to free-text scanning, which skips named colours —
-    // while the identical SVG markup was rejected. The rule is about the VALUE, not the
-    // spelling, and a lint that disagrees with itself by syntax teaches the wrong rule.
+    // These are one value written nine ways. The unwrapper does not enumerate them: it asks
+    // `ts.skipOuterExpressions` for TypeScript's own notion of a value-preserving wrapper, so
+    // this list is a SAMPLE of a general property rather than the definition of a narrow one.
+    // A hand-written case list was found incomplete four times, each time by a wrapper nobody
+    // had thought of.
     fixture({ 'src/Icon.tsx': `export const I = () => <svg><circle ${attribute} /></svg>;\n` });
     expect(lint().findings.map((f) => f.literal)).toContain('red');
   });
@@ -260,6 +270,8 @@ describe('JSX presentation attributes are CSS values too', () => {
   it.each([
     ['a static expression', "fill={'red'}"],
     ['a bare string', 'fill="red"'],
+    ['a non-null assertion', "fill={'red'!}"],
+    ['nested wrappers', "fill={(('red')! as string)}"],
   ])('agrees with the markup scanner when written as %s', (_name, attribute) => {
     fixture({ 'src/Icon.tsx': `export const I = () => <svg><circle ${attribute} /></svg>;\n` });
     const fromJsx = lint().findings.map((f) => f.literal);
@@ -292,14 +304,26 @@ describe('JSX presentation attributes are CSS values too', () => {
     );
   });
 
-  it('leaves a static expression on a NON-presentation attribute alone', () => {
-    fixture({ 'src/Icon.tsx': "export const I = () => <div className={'red'} />;\n" });
+  it.each([
+    ["className={'red'}", "export const I = () => <div className={'red'} />;\n"],
+    ["className={'red'!}", "export const I = () => <div className={'red'!} />;\n"],
+  ])('leaves %s alone — the registry still gates which attributes are CSS values', (_n, source) => {
+    fixture({ 'src/Icon.tsx': source });
+    expectClean(lint());
+  });
+
+  it.each([
+    ['a call', "declare const f: (s: string) => string;\nexport const I = () => <svg><circle fill={f('red')} /></svg>;\n"],
+  ])('leaves %s alone — a wrapper preserves a value, a call computes one', (_n, source) => {
+    fixture({ 'src/Icon.tsx': source });
     expectClean(lint());
   });
 
   it.each([
     ['a bare string', 'fill="#7C3AED"'],
     ['an expression container', "fill={'#7C3AED'}"],
+    ['a non-null assertion', "fill={'#7C3AED'!}"],
+    ['nested wrappers', "fill={(('#7C3AED')! as string)}"],
   ])('reports a hex ONCE for %s, not once per scanner', (_name, attribute) => {
     // The value is lexed as a CSS value AND is a string literal; only one path may claim it.
     // Claiming is recorded by NODE, so it holds however deeply the literal is wrapped.
@@ -328,6 +352,37 @@ describe('JSX presentation attributes are CSS values too', () => {
     const fromMarkup = lint().findings.map((f) => f.literal);
 
     expect(fromJsx).toEqual(fromMarkup);
+  });
+});
+
+describe('the compiler capability the TSX scanner depends on', () => {
+  it.each([
+    ['the helper is missing', { version: '9.0.0', OuterExpressionKinds: { All: 31 } }],
+    ['the enum is missing', { version: '9.0.0', skipOuterExpressions: () => undefined }],
+    ['the enum lost its All member', { version: '9.0.0', skipOuterExpressions: () => undefined, OuterExpressionKinds: {} }],
+    ['the namespace is empty', {}],
+  ])('FAILS CLOSED when %s', (_name, stub) => {
+    expect(compilerCapabilityErrors(stub).join('\n')).toMatch(/skipOuterExpressions/);
+  });
+
+  it('is satisfied by a compiler that exposes both', () => {
+    expect(compilerCapabilityErrors({ skipOuterExpressions: () => undefined, OuterExpressionKinds: { All: 31 } }))
+      .toEqual([]);
+  });
+
+  it('surfaces the failure through a real run, so the check is actually WIRED', () => {
+    // Testing the predicate alone would prove the logic and not the call site. This runs the
+    // lint with a stub compiler and asserts the error reaches the caller.
+    fixture({ 'src/Icon.tsx': 'export const I = () => <svg><circle fill="red" /></svg>;\n' });
+    const allowlistPath = join(root, 'allowlist.json');
+    writeFileSync(allowlistPath, '{ "entries": [] }');
+    const result = runAdherenceLint({ root, allowlistPath, compiler: {} });
+    expect(result.errors.join('\n')).toMatch(/skipOuterExpressions/);
+  });
+
+  it('is present in the pinned TypeScript, with the public enum it reads', () => {
+    expect(typeof ts.skipOuterExpressions).toBe('function');
+    expect(typeof ts.OuterExpressionKinds.All).toBe('number');
   });
 });
 

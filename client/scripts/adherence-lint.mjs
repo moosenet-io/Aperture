@@ -134,16 +134,16 @@
 //     An earlier revision claimed a named colour in TS had "no route to the DOM that another
 //     rule does not already close". THAT WAS FALSE: a JSX presentation attribute
 //     (`<circle fill="red" />`) was exactly such a route, and a reviewer found it. It is now
-//     covered. The NEXT revision covered only the bare-string spelling and claimed the
-//     remainder was "any non-static value" — ALSO FALSE, because `fill={'red'}` is entirely
-//     static and was uncovered. Both corrections were written from the fix just made rather
-//     than from what the code then did; this is the third time this one sentence has been
-//     wrong, so it is now stated from the unwrapper's actual cases.
-//     STATICALLY KNOWN values are covered in every spelling: bare string, expression container,
-//     no-substitution template, parenthesised, and `as`/`satisfies`/angle-bracket assertion.
-//     What remains is what a source lint genuinely cannot resolve: a value computed at runtime
-//     (`fill={colour}`, a template WITH substitutions, a value from props or state) and a colour
-//     handed to a third-party component's own prop.
+//     covered. The next two revisions each restated the claim as a LIST of spellings, and a
+//     reviewer found a wrapper missing from it each time — `as`/`satisfies`, then `x!`. A case
+//     list is only as complete as the last person's imagination, and stating one as though it
+//     were a general property is how this sentence was wrong four times.
+//     It is no longer a list. A JSX attribute value is resolved through
+//     `ts.skipOuterExpressions`, TypeScript's OWN definition of a wrapper that does not change
+//     the value, so any wrapper the language adds is covered by construction. What remains
+//     uncovered is what a source lint genuinely cannot resolve: a value computed at runtime
+//     (`fill={colour}`, a template WITH substitutions, a value from props or state), and a
+//     colour handed to a third-party component's own prop.
 //   * The markup scanner is PARTIAL. It is a hand-written scanner, not a spec-compliant HTML
 //     tokenizer: it ends a tag at the next `>`, so an attribute value CONTAINING `>`
 //     desynchronizes it and behaviour after that point is UNMODELLED — a violation there may
@@ -668,24 +668,79 @@ function fontLiteralDetail(decl) {
 /* ── TypeScript ──────────────────────────────────────────────────────────────────────────── */
 
 /**
+ * ── ASK THE COMPILER WHAT A VALUE-PRESERVING WRAPPER IS ────────────────────────────────────
+ *
+ * `ts.skipOuterExpressions` strips what TypeScript itself calls OUTER EXPRESSIONS: parentheses,
+ * type assertions (`as T`, `<T>x`, `satisfies`), non-null assertions (`x!`), partially-emitted
+ * expressions, and expressions with type arguments. That is the compiler's own definition of
+ * "wrapper that does not change the value", and it is precisely the question being asked here.
+ *
+ * This replaces a hand-written case list that was found incomplete FOUR times — first
+ * `JsxExpression`, then parentheses, then `as`/`satisfies`, then `x!`. Each fix added the
+ * wrapper a reviewer had just named, which is the same error as writing a claim from the diff
+ * instead of from the program: it is only ever as complete as the last person's imagination.
+ * A wrapper the language adds later is now handled by construction, because TypeScript will
+ * add it to `OuterExpressionKinds` and this reads that enum rather than restating it.
+ *
+ * NOT the type checker, deliberately, and this was measured rather than assumed: the checker
+ * answers "does this have a string-literal TYPE", which is a different question.
+ * `fill={'red' as string}` widens to `string` and would be reported as non-static even though
+ * its runtime value is plainly `"red"`; and a bare `fill="red"` types as `any` without full
+ * type resolution. A widening assertion discards the literal type while preserving the value,
+ * so type-identity is the wrong instrument. It would also require building a Program, which
+ * this parse-only lint does not need for anything else.
+ *
+ * `OuterExpressionKinds` IS in TypeScript's public `.d.ts`; `skipOuterExpressions` is exported
+ * at runtime but is NOT declared there. So it is used through a capability check that FAILS
+ * CLOSED — see `assertOuterExpressionSupport`. If a future TypeScript removes it, the lint
+ * stops with an explanation rather than silently narrowing back to bare string literals, which
+ * is the failure mode this whole class of finding has been.
+ */
+/**
+ * Fail-closed capability check for the compiler APIs the TSX scanner depends on.
+ *
+ * Takes the compiler namespace as a parameter so the failure path is genuinely TESTABLE. It
+ * cannot be tested by stubbing the real module — TypeScript's exports are non-configurable, so
+ * `delete ts.skipOuterExpressions` throws. An untested fail-closed path is a guard that only
+ * claims to exist, which is a defect this review round has already found once elsewhere.
+ *
+ * @param {typeof ts} [compiler]
+ * @returns {string[]} one error when the capability is missing, empty when present
+ */
+export function compilerCapabilityErrors(compiler = ts) {
+  const supported = typeof compiler?.skipOuterExpressions === 'function'
+    && compiler.OuterExpressionKinds
+    && typeof compiler.OuterExpressionKinds.All === 'number';
+  if (supported) return [];
+  return [
+    `typescript ${compiler?.version ?? '(unknown)'} does not expose \`skipOuterExpressions\`/`
+    + '`OuterExpressionKinds.All`. The TSX scanner uses it to resolve a JSX attribute value '
+    + 'through value-preserving wrappers; without it, statically-known values behind `as`, `!`, '
+    + 'or parentheses would silently stop being detected. Restore the capability or reimplement '
+    + 'it deliberately — this is not a check that may be skipped.',
+  ];
+}
+
+/**
  * The literal node behind a JSX attribute value, if the value is STATICALLY KNOWN.
  *
- * `fill="red"`, `fill={'red'}`, a no-substitution template, `fill={('red')}` and
- * `fill={'red' as string}` are the same value written five ways, and a lint that treats them
- * differently is telling people the rule is about syntax when it is about the value. Returns
- * the underlying literal (which carries `.text`), or undefined when the value is dynamic.
+ * `fill="red"`, `fill={'red'}`, ``fill={`red`}``, `fill={('red')}`, `fill={'red'!}` and
+ * `fill={'red' as string}` are one value written six ways. A lint that treats them differently
+ * is telling people the rule is about syntax when it is about the value.
  *
- * A template WITH substitutions is not static and is deliberately not unwrapped.
+ * Returns the underlying literal (which carries `.text`), or undefined when the value is not
+ * statically known — a runtime reference, a template WITH substitutions, a call.
  */
 function staticStringNode(node) {
   if (!node) return undefined;
-  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node;
-  if (ts.isJsxExpression(node)) return staticStringNode(node.expression);
-  if (ts.isParenthesizedExpression(node)) return staticStringNode(node.expression);
-  if (ts.isAsExpression(node)) return staticStringNode(node.expression);
-  if (ts.isSatisfiesExpression && ts.isSatisfiesExpression(node)) return staticStringNode(node.expression);
-  if (ts.isTypeAssertionExpression && ts.isTypeAssertionExpression(node)) return staticStringNode(node.expression);
-  return undefined;
+
+  // A JSX expression CONTAINER is JSX syntax rather than an expression wrapper, so it is not an
+  // "outer expression" and is unwrapped here.
+  const expression = ts.isJsxExpression(node) ? node.expression : node;
+  if (!expression) return undefined;
+
+  const inner = ts.skipOuterExpressions(expression, ts.OuterExpressionKinds.All);
+  return ts.isStringLiteral(inner) || ts.isNoSubstitutionTemplateLiteral(inner) ? inner : undefined;
 }
 
 function scriptKindFor(ext) {
@@ -1142,7 +1197,9 @@ function collectFiles(absPath, root, out) {
 /* ── The lint ────────────────────────────────────────────────────────────────────────────── */
 
 /**
- * @param {{ root?: string, allowlistPath?: string }} [options]
+ * @param {{ root?: string, allowlistPath?: string, compiler?: typeof ts }} [options]
+ *   `compiler` exists ONLY so the fail-closed capability check can be exercised with a stub;
+ *   it is never passed in production and does not change what is scanned.
  * @returns {{ findings: Array<object>, errors: string[], scanned: string[] }}
  */
 export function runAdherenceLint(options = {}) {
@@ -1159,6 +1216,12 @@ export function runAdherenceLint(options = {}) {
   } catch (error) {
     return { findings, errors: [error instanceof Error ? error.message : String(error)], scanned };
   }
+
+  // FAIL CLOSED on the compiler capability the TSX scanner depends on. `skipOuterExpressions`
+  // is exported at runtime but not declared in TypeScript's public `.d.ts`, so a future version
+  // could remove it. Without this the scanner would quietly narrow to bare string literals and
+  // every wrapped presentation value would become a false negative — silently.
+  errors.push(...compilerCapabilityErrors(options.compiler));
 
   const files = [];
   for (const target of SCAN_TARGETS) {

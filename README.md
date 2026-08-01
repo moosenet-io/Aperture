@@ -355,16 +355,24 @@ inverted so the unanticipated case fails rather than passes, it is.**
   seen. (There is no such dependency today.)
 - CSS **named** colours are checked in CSS, in markup presentation attributes and in JSX
   presentation attributes — not in ordinary TypeScript strings, where the false-positive cost on
-  prose is not worth it. In JSX every **statically known** spelling counts: a bare string, an
-  expression container (`fill={'red'}`), a no-substitution template, a parenthesised expression,
-  and an `as` / `satisfies` / angle-bracket assertion. The rule is about the value, not the
-  syntax, and a test asserts the JSX and markup scanners return identical findings for the same
-  element.
+  prose is not worth it. In JSX every **statically known** value counts, whatever the spelling.
+  The rule is about the value, not the syntax, and a test asserts the JSX and markup scanners
+  return identical findings for the same element.
 
-  This sentence has been wrong twice, so it is worth being precise about what is *not* covered:
-  a value computed at runtime (`fill={colour}`, a template **with** substitutions, a value from
-  props or state) and a colour handed to a third-party component's own prop. Both are outside
-  what a source lint can resolve.
+  That is a **general property, not a list**. The lint resolves a JSX attribute value through
+  `ts.skipOuterExpressions` — TypeScript's own definition of a wrapper that does not change the
+  value (parentheses, `as`/`satisfies`/angle-bracket assertions, non-null `!`, and any future
+  member of `OuterExpressionKinds`). It replaced a hand-written case list that four separate
+  reviews found incomplete, each time by a wrapper nobody had thought of; a wrapper the language
+  adds next is now handled by construction.
+
+  It is deliberately **not** the type checker: that answers "does this have a string-literal
+  *type*", which is a different question. `fill={'red' as string}` widens to `string` while its
+  runtime value is plainly `"red"`, so type-identity would report a static value as dynamic.
+
+  What is genuinely *not* covered: a value computed at runtime (`fill={colour}`, a template
+  **with** substitutions, a call, a value from props or state) and a colour handed to a
+  third-party component's own prop. Both are outside what a source lint can resolve.
 - other CSSOM routes to a stylesheet (`insertRule`, `adoptedStyleSheets`, an aliased tag name)
   are not detected.
 - the HTML/SVG scanner is **partial** — a hand-written scanner, not a spec tokenizer. An
