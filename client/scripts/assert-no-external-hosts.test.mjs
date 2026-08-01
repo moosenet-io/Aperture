@@ -271,7 +271,7 @@ describe('unknown extensions fail closed, matching the documented claim', () => 
     });
   });
 
-  it('skips a font that positively identifies by magic bytes', () => {
+  it('skips a font that matches a known format signature', () => {
     const header = Buffer.alloc(64);
     header.write('wOF2', 0, 'latin1');
     header.writeUInt32BE(64, 8); // WOFF2 carries its total length at offset 8
@@ -284,7 +284,7 @@ describe('unknown extensions fail closed, matching the documented claim', () => 
 
   it('REPORTS a UTF-16 asset instead of mistaking its NUL bytes for binary', () => {
     // The defect: "no NULs" was used to infer text, so UTF-16 (full of NULs) read as binary and
-    // was skipped. Identification is now positive — magic bytes — so this is reported.
+    // was skipped. Skipping now requires a signature MATCH, so this is reported instead.
     withDist({ 'data.unknown': Buffer.from('https://evil.invalid/collect', 'utf16le') }, (dir) => {
       const result = scanDist(dir, allowed);
       expect(result.skippedBinary).toBe(0);
@@ -339,6 +339,51 @@ describe('unknown extensions fail closed, matching the documented claim', () => 
       const result = scanDist(dir, allowed);
       expect(result.skippedBinary).toBe(0);
       expect(result.findings).toHaveLength(1);
+    });
+  });
+
+  // The two tests below RECORD a documented limitation. They are not assertions of desired
+  // behaviour, and they must not be read as one: a signature identifies FORMAT, not INTENT, and
+  // binary content is never scanned. Both cases are deliberate obfuscation, which this lint
+  // delegates to the runtime CSP. Closing them would mean parsing container structure and
+  // scanning printable strings inside binaries — a different and much larger tool. If either
+  // outcome ever changes, update the recording and the NON-GOALS block together.
+
+  it('OBSERVED LIMITATION (delegated to CSP): an asset crafted to carry a known signature is SKIPPED', () => {
+    // Real PNG magic bytes, then an origin as the "image" body. Nothing about the bytes after
+    // the signature is examined, so this is skipped and counted as binary.
+    const crafted = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from('https://evil.invalid/collect', 'latin1'),
+    ]);
+    expect(identifyBinaryFormat(crafted)).toBe('png');
+    withDist({ 'decoy.unknown': crafted }, (dir) => {
+      const result = scanDist(dir, allowed);
+      expect(result.findings).toEqual([]);
+      expect(result.skippedBinary).toBe(1);
+    });
+  });
+
+  it('OBSERVED LIMITATION (delegated to CSP): a genuine binary with an origin in trailing data is SKIPPED', () => {
+    // A structurally valid WOFF2 header — length field and all — with an origin appended after
+    // it, standing in for metadata or trailing data inside a real asset.
+    const header = Buffer.alloc(64);
+    header.write('wOF2', 0, 'latin1');
+    header.writeUInt32BE(64, 8);
+    const withTrailer = Buffer.concat([header, Buffer.from('https://evil.invalid/collect', 'latin1')]);
+    // Note the header's length field no longer matches the file, so this particular shape is
+    // reported; the same trailer INSIDE a correctly-sized asset would not be.
+    expect(identifyBinaryFormat(withTrailer)).toBeNull();
+
+    const consistent = Buffer.alloc(96);
+    consistent.write('wOF2', 0, 'latin1');
+    consistent.writeUInt32BE(96, 8);
+    consistent.write('https://evil.invalid/collect', 48, 'latin1');
+    expect(identifyBinaryFormat(consistent)).toBe('woff2');
+    withDist({ 'font.unknown': consistent }, (dir) => {
+      const result = scanDist(dir, allowed);
+      expect(result.findings).toEqual([]);
+      expect(result.skippedBinary).toBe(1);
     });
   });
 

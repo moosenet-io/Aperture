@@ -80,10 +80,12 @@
 //     extracts the body up to the matching close tag and routes it to the JavaScript, JSON, or
 //     CSS scanner — so a `<script>` body is never treated as comment-strippable text.
 //   * Only the file extensions in SCANNED are parsed. An asset with no registered parser is
-//     skipped ONLY IF its magic bytes positively identify an approved binary format (see
-//     BINARY_FORMATS); everything else is reported as a failure rather than skipped. Note this
-//     is a NON-GOAL only in the sense that such an asset is not *scanned* — it is never passed
-//     over in silence.
+//     skipped ONLY IF it matches a known binary format's signature (see BINARY_FORMATS);
+//     everything else is reported rather than skipped, so an unrecognised asset is never passed
+//     over in silence. But a signature identifies FORMAT, NOT INTENT: an asset crafted to begin
+//     with a known signature, and a genuine binary carrying an origin in metadata or trailing
+//     data, are both skipped. Binary CONTENT is never scanned. That is deliberate obfuscation,
+//     already delegated to the CSP above.
 //
 // ── EXACTNESS ───────────────────────────────────────────────────────────────────────────────
 //
@@ -132,14 +134,22 @@ export const RECOGNISED_NAMESPACE_URIS = Object.freeze([
  * is full of NULs — look binary, so an unknown UTF-16 asset carrying an origin was skipped and
  * counted as safe. That is absence of evidence treated as evidence, the same mistake as
  * "unparseable means fine". The default is therefore inverted: an unrecognised asset is SKIPPED
- * ONLY IF it positively identifies as one of these formats. Anything else is reported.
+ * ONLY IF it MATCHES one of these formats' signatures. Anything else is reported.
  *
- * A signature that is merely a printable prefix is not positive identification either — a
- * TEXTUAL file can start with those same bytes. `PK` alone let `PKhttps://evil.invalid` be
- * skipped as a ZIP, which is precisely the hole this function exists to close. So every entry
- * below requires either non-printable signature bytes or a STRUCTURAL invariant (a length field
- * that matches the file, a header relation, a known brand), and formats whose signature cannot
- * meet that bar are simply NOT LISTED:
+ * WHAT SIGNATURE MATCHING ESTABLISHES, AND WHAT IT DOES NOT. An asset is skipped only if it
+ * matches a known binary format's signature. That identifies FORMAT, not INTENT. An asset
+ * deliberately crafted to carry a known signature, and a structurally genuine binary carrying
+ * an origin in metadata or trailing data, are both skipped. That case is deliberate
+ * obfuscation, which is an already-documented non-goal delegated to the runtime CSP — closing
+ * it would mean parsing container structure and scanning printable strings inside binaries,
+ * which is a different and much larger tool than a build lint.
+ *
+ * What the bar below DOES buy: a signature that is merely a printable prefix is not
+ * identification at all, because ordinary TEXT starts with those bytes by accident. `PK` alone
+ * let `PKhttps://evil.invalid` be skipped as a ZIP. So every entry requires either
+ * non-printable signature bytes or a STRUCTURAL invariant (a length field that matches the
+ * file, a header relation, a known brand), and formats whose signature cannot meet that bar are
+ * simply NOT LISTED:
  *
  *   * brotli — no magic number at all
  *   * mp3 (`ID3`), ogg (`OggS`), flac (`fLaC`), pdf (`%PDF-`), font collections (`ttcf`), the
@@ -705,8 +715,12 @@ function* walk(dir) {
 }
 
 /**
- * Positively identify an approved binary format by its magic bytes.
- * @returns {string|null} format name, or null if it is not recognised as binary
+ * Match an asset against the known binary format signatures.
+ *
+ * This answers "does this look like format X", not "is this safe". A match means the bytes
+ * carry that format's signature — nothing about the content behind it, which is never scanned.
+ *
+ * @returns {string|null} format name, or null if no signature matches
  */
 export function identifyBinaryFormat(buffer) {
   for (const format of BINARY_FORMATS) {
@@ -723,9 +737,13 @@ export function identifyBinaryFormat(buffer) {
  * Scan a built output directory.
  *
  * Unknown extensions do NOT pass silently — that would contradict the fail-closed claim above.
- * A file with no registered parser is skipped ONLY IF its magic bytes positively identify an
- * approved binary format. Everything else is reported as an unscanned asset (fix it by adding
- * the type to SCANNED with a parser, or to BINARY_FORMATS with a magic-byte test).
+ * A file with no registered parser is skipped ONLY IF it matches a known binary format's
+ * signature. Everything else is reported as an unscanned asset (fix it by adding the type to
+ * SCANNED with a parser, or to BINARY_FORMATS with a signature test).
+ *
+ * A signature identifies FORMAT, not INTENT: a crafted asset carrying a known signature, or a
+ * genuine binary carrying an origin in its metadata or trailing data, is skipped. Binary
+ * content is never scanned. See the NON-GOALS block at the top of this file.
  *
  * @returns {{ scanned: number, skippedBinary: number, findings: {file:string,line:number,value:string}[] }}
  */
@@ -807,7 +825,8 @@ function main(argv) {
   console.log(`${tag} lint only — not a security boundary. Runtime egress is enforced by the CSP (APTR-99).`);
   console.log(`${tag} known limitations: HTML character references and CSS escapes are not decoded;`);
   console.log(`${tag} an attribute value containing '>' desynchronizes the markup scanner and detection after`);
-  console.log(`${tag} that point is unmodelled — it may miss or garble an origin. The runtime CSP covers these.`);
+  console.log(`${tag} that point is unmodelled — it may miss or garble an origin; and a binary signature`);
+  console.log(`${tag} identifies format, not intent — binary content is never scanned. The runtime CSP covers these.`);
   console.log(`${tag} allowlisted namespace URIs (exact match): ${[...reasons.keys()].join(', ')}`);
   return 0;
 }

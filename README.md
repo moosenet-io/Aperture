@@ -163,8 +163,9 @@ dependencies, so nothing is added to the tree — and JSON through `JSON.parse`.
 literals, and string boundaries are therefore correct **by construction**: a licence banner's
 URL is inert because comments do not exist in an AST, not because a stripping pass removed it.
 An asset that is scanned but cannot be parsed **fails** — an unparseable asset is not evidence
-of safety, and an asset with an unrecognised extension whose content is textual is reported
-rather than skipped, so silence always means the lint looked.
+of safety, and an asset with no registered parser is skipped only if it matches a known binary
+format's signature — everything else is reported rather than skipped, so an unrecognised asset
+is never passed over in silence.
 
 **HTML and SVG are the exception: they are scanned by a partial, hand-written scanner, not an
 HTML parser.** No HTML parser is in the dependency tree and one is not being added for a
@@ -183,6 +184,12 @@ runtime CSP, and each has a test recording the current behaviour so a change goe
 - **An attribute value containing `>` desynchronizes the markup scanner.** Detection after that
   point is **unmodelled**: an origin there may be missed, or reported as a garbled fragment.
   Do not rely on it.
+- **A binary signature identifies format, not intent.** An asset is skipped only if it matches a
+  known binary format's signature, and binary content is never scanned. An asset deliberately
+  crafted to begin with a known signature, and a structurally genuine binary carrying an origin
+  in its metadata or trailing data, are both skipped. That is deliberate obfuscation — the case
+  this lint already delegates to the CSP. Closing it would mean parsing container structure and
+  scanning printable strings inside binaries, which is a different and much larger tool.
 
 Candidate values are compared **whole and never truncated at a delimiter**. That is what makes
 `http://www.w3.org/2000/svg;payload` and `…/2000/svg?exfil=1` fail rather than reduce to an
