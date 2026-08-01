@@ -180,9 +180,9 @@ runtime CSP, and each has a test recording the current behaviour so a change goe
 - **HTML character references are not decoded.** An origin written as `&#x2F;&#x2F;evil…` is
   not detected.
 - **CSS escapes are not decoded.** An origin written as `\68 ttps://evil…` is not detected.
-- **An attribute value containing `>` desynchronizes the markup scanner.** The rest of that tag
-  is read as text, so an origin after it is reported as a **garbled fragment**, never as the
-  attribute value. Behaviour in that state is not modelled — do not rely on detection there.
+- **An attribute value containing `>` desynchronizes the markup scanner.** Detection after that
+  point is **unmodelled**: an origin there may be missed, or reported as a garbled fragment.
+  Do not rely on it.
 
 Candidate values are compared **whole and never truncated at a delimiter**. That is what makes
 `http://www.w3.org/2000/svg;payload` and `…/2000/svg?exfil=1` fail rather than reduce to an

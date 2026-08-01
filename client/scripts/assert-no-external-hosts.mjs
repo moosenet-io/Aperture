@@ -66,16 +66,19 @@
 //     `&#x2F;&#x2F;evil…` is not detected.
 //   * CSS escapes are NOT decoded. An origin written as `\68 ttp://evil…` is not detected.
 //   * The markup scanner is not a spec-compliant HTML tokenizer. It ends a tag at the next `>`,
-//     so an attribute VALUE CONTAINING `>` desynchronizes it: the rest of that tag is read as
-//     text, and an origin there is reported as a GARBLED FRAGMENT rather than as the attribute
-//     value. Behaviour in that state is not modelled — do not rely on detection there. Element
-//     nesting, implied end tags, CDATA sections, and namespace-prefixed raw-text elements are
-//     not modelled either.
+//     so an attribute VALUE CONTAINING `>` desynchronizes it. Detection after that point is
+//     UNMODELLED: an origin there may be missed, or reported as a garbled fragment. Do not rely
+//     on it. (Three earlier revisions of this comment each described the failure precisely —
+//     "not detected", "unreliable in both directions", "always garbled" — and a reviewer
+//     disproved each one. When behaviour is unmodelled, the precise-sounding description is the
+//     wrong instinct.) Element nesting, implied end tags, CDATA sections, and namespace-prefixed
+//     raw-text elements are not modelled either.
 //   * What the markup scanner DOES do, and all it claims: it skips `<!-- … -->` comments and
 //     `<!…>` / `<?…>` declarations; it reads quoted and unquoted attribute values and text
-//     between tags as complete values; and for `<script>` / `<style>` it extracts the body up
-//     to the matching close tag and routes it to the JavaScript, JSON, or CSS scanner — so a
-//     `<script>` body is never treated as comment-strippable text.
+//     between tags as complete values, splitting `srcset`/`imagesrcset` into their candidates
+//     and routing a `style` value through the CSS scanner; and for `<script>` / `<style>` it
+//     extracts the body up to the matching close tag and routes it to the JavaScript, JSON, or
+//     CSS scanner — so a `<script>` body is never treated as comment-strippable text.
 //   * Only the file extensions in SCANNED are parsed. An asset with no registered parser is
 //     skipped ONLY IF its magic bytes positively identify an approved binary format (see
 //     BINARY_FORMATS); everything else is reported as a failure rather than skipped. Note this
@@ -122,47 +125,97 @@ export const RECOGNISED_NAMESPACE_URIS = Object.freeze([
 ]);
 
 /**
- * Approved binary formats, identified by MAGIC BYTES rather than by extension or by the absence
- * of NUL bytes.
+ * Approved binary formats, identified by their COMPLETE signature — not by extension, not by
+ * the absence of NUL bytes, and not by an ASCII prefix.
  *
  * The direction matters. Inferring "binary" from the absence of NULs made UTF-16 text — which
  * is full of NULs — look binary, so an unknown UTF-16 asset carrying an origin was skipped and
  * counted as safe. That is absence of evidence treated as evidence, the same mistake as
- * "unparseable means fine". So the default is now inverted: an unrecognised asset is SKIPPED
+ * "unparseable means fine". The default is therefore inverted: an unrecognised asset is SKIPPED
  * ONLY IF it positively identifies as one of these formats. Anything else is reported.
  *
- * Brotli (.br) is deliberately absent: it has no magic number, so it cannot be positively
- * identified. A precompressed .br asset would be reported, which is the correct direction for a
- * format we cannot verify. Nothing in this build emits one.
+ * A signature that is merely a printable prefix is not positive identification either — a
+ * TEXTUAL file can start with those same bytes. `PK` alone let `PKhttps://evil.invalid` be
+ * skipped as a ZIP, which is precisely the hole this function exists to close. So every entry
+ * below requires either non-printable signature bytes or a STRUCTURAL invariant (a length field
+ * that matches the file, a header relation, a known brand), and formats whose signature cannot
+ * meet that bar are simply NOT LISTED:
+ *
+ *   * brotli — no magic number at all
+ *   * mp3 (`ID3`), ogg (`OggS`), flac (`fLaC`), pdf (`%PDF-`), font collections (`ttcf`), the
+ *     `true` sfnt variant, bmp (`BM`) — printable prefixes with nothing structural behind them
+ *   * gif (`GIF89a`) — its only structural field is the logical-screen size, and ANY two
+ *     non-zero bytes satisfy that, so `GIF89ahttps://evil.invalid` passed. A check a decoy can
+ *     satisfy is not identification; removed rather than kept as a weak heuristic
+ *   * eot — its only cheap marker is two bytes at offset 34
+ *
+ * None of those is emitted by this build. If one ever is, it will be REPORTED rather than
+ * skipped, which is the correct direction for a format we cannot verify.
  */
+
+/** sfnt (TrueType/OpenType) header: searchRange/entrySelector/rangeShift must agree with numTables. */
+function isSfntHeader(b) {
+  if (b.length < 12) return false;
+  const version = b.subarray(0, 4).toString('hex');
+  if (version !== '00010000' && b.subarray(0, 4).toString('latin1') !== 'OTTO') return false;
+  const numTables = b.readUInt16BE(4);
+  if (numTables === 0) return false;
+  const exponent = Math.floor(Math.log2(numTables));
+  return b.readUInt16BE(6) === 16 * (2 ** exponent)
+    && b.readUInt16BE(8) === exponent
+    && b.readUInt16BE(10) === numTables * 16 - 16 * (2 ** exponent);
+}
+
+/** WOFF/WOFF2 both carry the total file length at offset 8; it must match the file on disk. */
+function isWoff(b, signature) {
+  return b.length >= 12
+    && b.subarray(0, 4).toString('latin1') === signature
+    && b.readUInt32BE(8) === b.length;
+}
+
+/** RIFF container: `RIFF`, a size field consistent with the file, then the form type. */
+function isRiff(b, formType) {
+  return b.length >= 12
+    && b.subarray(0, 4).toString('latin1') === 'RIFF'
+    && b.readUInt32LE(4) === b.length - 8
+    && b.subarray(8, 12).toString('latin1') === formType;
+}
+
+/** ISO base media (mp4/m4a/avif/heif): a plausible box size, `ftyp`, and a known brand. */
+const ISOBMFF_BRANDS = new Set([
+  'isom', 'iso2', 'iso4', 'iso6', 'mp41', 'mp42', 'avc1', 'dash',
+  'M4A ', 'M4V ', 'qt  ', 'avif', 'avis', 'heic', 'heix', 'mif1', 'msf1',
+]);
+function isIsoBmff(b) {
+  if (b.length < 16) return false;
+  if (b.subarray(4, 8).toString('latin1') !== 'ftyp') return false;
+  const boxSize = b.readUInt32BE(0);
+  if (boxSize < 16 || boxSize % 4 !== 0 || boxSize > b.length) return false;
+  return ISOBMFF_BRANDS.has(b.subarray(8, 12).toString('latin1'));
+}
+
 const BINARY_FORMATS = [
-  // fonts (these are what @fontsource emits)
-  { name: 'woff', test: (b) => b.subarray(0, 4).toString('latin1') === 'wOFF' },
-  { name: 'woff2', test: (b) => b.subarray(0, 4).toString('latin1') === 'wOF2' },
-  { name: 'truetype', test: (b) => b.subarray(0, 4).toString('hex') === '00010000' || b.subarray(0, 4).toString('latin1') === 'true' },
-  { name: 'truetype-collection', test: (b) => b.subarray(0, 4).toString('latin1') === 'ttcf' },
-  { name: 'opentype', test: (b) => b.subarray(0, 4).toString('latin1') === 'OTTO' },
-  { name: 'embedded-opentype', test: (b) => b.length > 36 && b[34] === 0x4c && b[35] === 0x50 },
+  // fonts — what @fontsource emits, and the only binaries this build actually produces
+  { name: 'woff', test: (b) => isWoff(b, 'wOFF') },
+  { name: 'woff2', test: (b) => isWoff(b, 'wOF2') },
+  { name: 'truetype/opentype', test: isSfntHeader },
   // raster images
   { name: 'png', test: (b) => b.subarray(0, 8).toString('hex') === '89504e470d0a1a0a' },
-  { name: 'jpeg', test: (b) => b.subarray(0, 3).toString('hex') === 'ffd8ff' },
-  { name: 'gif', test: (b) => ['GIF87a', 'GIF89a'].includes(b.subarray(0, 6).toString('latin1')) },
-  { name: 'webp', test: (b) => b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP' },
-  { name: 'avif/heif', test: (b) => b.subarray(4, 8).toString('latin1') === 'ftyp' && /avif|avis|heic|mif1/.test(b.subarray(8, 12).toString('latin1')) },
-  { name: 'ico', test: (b) => b.subarray(0, 4).toString('hex') === '00000100' },
-  { name: 'bmp', test: (b) => b.subarray(0, 2).toString('latin1') === 'BM' },
-  // media
-  { name: 'mp4/m4a', test: (b) => b.subarray(4, 8).toString('latin1') === 'ftyp' },
+  { name: 'jpeg', test: (b) => b.length >= 4 && b.subarray(0, 3).toString('hex') === 'ffd8ff' && b[3] >= 0xc0 },
+  { name: 'webp', test: (b) => isRiff(b, 'WEBP') },
+  { name: 'ico', test: (b) => b.length >= 6 && b.subarray(0, 4).toString('hex') === '00000100' && b.readUInt16LE(4) > 0 },
+  { name: 'avif/heif/mp4/m4a', test: isIsoBmff },
+  // media containers
   { name: 'matroska/webm', test: (b) => b.subarray(0, 4).toString('hex') === '1a45dfa3' },
-  { name: 'ogg', test: (b) => b.subarray(0, 4).toString('latin1') === 'OggS' },
-  { name: 'wav', test: (b) => b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WAVE' },
-  { name: 'flac', test: (b) => b.subarray(0, 4).toString('latin1') === 'fLaC' },
-  { name: 'mp3', test: (b) => b.subarray(0, 3).toString('latin1') === 'ID3' || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0) },
+  { name: 'wav', test: (b) => isRiff(b, 'WAVE') },
   // archives and binaries
-  { name: 'pdf', test: (b) => b.subarray(0, 5).toString('latin1') === '%PDF-' },
-  { name: 'zip', test: (b) => b.subarray(0, 2).toString('latin1') === 'PK' },
-  { name: 'gzip', test: (b) => b[0] === 0x1f && b[1] === 0x8b },
-  { name: 'wasm', test: (b) => b.subarray(0, 4).toString('hex') === '0061736d' },
+  {
+    // Complete local-file / central-directory / spanning signatures — never bare `PK`.
+    name: 'zip',
+    test: (b) => ['504b0304', '504b0506', '504b0708'].includes(b.subarray(0, 4).toString('hex')),
+  },
+  { name: 'gzip', test: (b) => b.length >= 3 && b[0] === 0x1f && b[1] === 0x8b && b[2] === 0x08 },
+  { name: 'wasm', test: (b) => b.subarray(0, 8).toString('hex') === '0061736d01000000' },
 ];
 
 /** Extensions worth scanning, and how to parse each. */
@@ -753,8 +806,8 @@ function main(argv) {
   console.log(`${tag} OK: ${result.scanned} asset(s) parsed in ${distDir} (${result.skippedBinary} binary skipped), no static external origins.`);
   console.log(`${tag} lint only — not a security boundary. Runtime egress is enforced by the CSP (APTR-99).`);
   console.log(`${tag} known limitations: HTML character references and CSS escapes are not decoded;`);
-  console.log(`${tag} an attribute value containing '>' desynchronizes the markup scanner, so an origin after it`);
-  console.log(`${tag} is reported as a garbled fragment, not as the attribute value. The runtime CSP covers these.`);
+  console.log(`${tag} an attribute value containing '>' desynchronizes the markup scanner and detection after`);
+  console.log(`${tag} that point is unmodelled — it may miss or garble an origin. The runtime CSP covers these.`);
   console.log(`${tag} allowlisted namespace URIs (exact match): ${[...reasons.keys()].join(', ')}`);
   return 0;
 }

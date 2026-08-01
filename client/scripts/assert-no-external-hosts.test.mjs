@@ -272,7 +272,10 @@ describe('unknown extensions fail closed, matching the documented claim', () => 
   });
 
   it('skips a font that positively identifies by magic bytes', () => {
-    withDist({ 'f.woff2': Buffer.from('wOF2\u0000\u0000\u0000\u0000', 'latin1') }, (dir) => {
+    const header = Buffer.alloc(64);
+    header.write('wOF2', 0, 'latin1');
+    header.writeUInt32BE(64, 8); // WOFF2 carries its total length at offset 8
+    withDist({ 'f.woff2': header }, (dir) => {
       const result = scanDist(dir, allowed);
       expect(result.findings).toEqual([]);
       expect(result.skippedBinary).toBe(1);
@@ -305,18 +308,93 @@ describe('unknown extensions fail closed, matching the documented claim', () => 
     });
   });
 
-  it('identifies each approved binary format from its magic bytes', () => {
+  it('ADVERSARIAL: a textual asset starting with each format prefix is still reported', () => {
+    // A signature that is only a printable prefix is not identification: a text file can start
+    // with those same bytes. `PK` alone let `PKhttps://evil.invalid` be skipped as a ZIP.
+    const decoys = [
+      'PKhttps://evil.invalid',          // zip — needs the full \x03\x04 / \x05\x06 / \x07\x08
+      'PKhttps://evil.invalid',    // …and a truncated one is still not a zip
+      'wOFFhttps://evil.invalid',        // woff — needs a length field matching the file
+      'wOF2https://evil.invalid',        // woff2 — same
+      'OTTOhttps://evil.invalid',        // opentype — needs a coherent sfnt table header
+      'GIF89ahttps://evil.invalid',      // gif — removed: any two non-zero bytes passed as dimensions
+      'RIFFhttps://evil.invalidWEBP',    // webp — needs a size field consistent with the file
+      'RIFFhttps://evil.invalidWAVE',    // wav — same
+      '    ftyphttps://evil.invalid',    // isobmff — needs a plausible box size and known brand
+      'ID3https://evil.invalid',         // mp3 — removed from the table entirely
+      'OggShttps://evil.invalid',        // ogg — removed
+      'fLaChttps://evil.invalid',        // flac — removed
+      '%PDF-https://evil.invalid',       // pdf — removed
+      'ttcfhttps://evil.invalid',        // font collection — removed
+      'truehttps://evil.invalid',        // `true` sfnt variant — removed
+      'BMhttps://evil.invalid',          // bmp — removed
+    ];
+    for (const decoy of decoys) {
+      expect(identifyBinaryFormat(Buffer.from(decoy, 'latin1')), decoy).toBeNull();
+    }
+  });
+
+  it('ADVERSARIAL: a decoy reaches the build report rather than being counted as binary', () => {
+    withDist({ 'payload.unknown': 'PKhttps://evil.invalid/collect' }, (dir) => {
+      const result = scanDist(dir, allowed);
+      expect(result.skippedBinary).toBe(0);
+      expect(result.findings).toHaveLength(1);
+    });
+  });
+
+  it('identifies each approved binary format from its complete signature', () => {
+    /** A WOFF/WOFF2 header whose length field matches the buffer, as the spec requires. */
+    const woff = (signature, size = 64) => {
+      const b = Buffer.alloc(size);
+      b.write(signature, 0, 'latin1');
+      b.writeUInt32BE(size, 8);
+      return b;
+    };
+    /** An sfnt header whose search fields agree with numTables. */
+    const sfnt = (version) => {
+      const b = Buffer.alloc(32);
+      if (version === 'OTTO') b.write('OTTO', 0, 'latin1');
+      else b.writeUInt32BE(0x00010000, 0);
+      const numTables = 8;
+      const exponent = Math.floor(Math.log2(numTables));
+      b.writeUInt16BE(numTables, 4);
+      b.writeUInt16BE(16 * 2 ** exponent, 6);
+      b.writeUInt16BE(exponent, 8);
+      b.writeUInt16BE(numTables * 16 - 16 * 2 ** exponent, 10);
+      return b;
+    };
+    /** A RIFF container whose size field matches the buffer. */
+    const riff = (formType, size = 64) => {
+      const b = Buffer.alloc(size);
+      b.write('RIFF', 0, 'latin1');
+      b.writeUInt32LE(size - 8, 4);
+      b.write(formType, 8, 'latin1');
+      return b;
+    };
+    const isobmff = (brand) => {
+      const b = Buffer.alloc(32);
+      b.writeUInt32BE(32, 0);
+      b.write('ftyp', 4, 'latin1');
+      b.write(brand, 8, 'latin1');
+      return b;
+    };
+
     const samples = {
-      woff: Buffer.from('wOFF', 'latin1'),
-      woff2: Buffer.from('wOF2', 'latin1'),
-      opentype: Buffer.from('OTTO', 'latin1'),
-      truetype: Buffer.from([0x00, 0x01, 0x00, 0x00]),
+      woff: woff('wOFF'),
+      woff2: woff('wOF2'),
+      opentype: sfnt('OTTO'),
+      truetype: sfnt('sfnt'),
       png: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
       jpeg: Buffer.from([0xff, 0xd8, 0xff, 0xe0]),
-      gif: Buffer.from('GIF89a', 'latin1'),
-      wasm: Buffer.from([0x00, 0x61, 0x73, 0x6d]),
-      pdf: Buffer.from('%PDF-1.7', 'latin1'),
+      webp: riff('WEBP'),
+      wav: riff('WAVE'),
+      avif: isobmff('avif'),
+      mp4: isobmff('isom'),
+      ico: Buffer.from([0x00, 0x00, 0x01, 0x00, 0x01, 0x00]),
+      matroska: Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x00]),
+      zip: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14]),
       gzip: Buffer.from([0x1f, 0x8b, 0x08, 0x00]),
+      wasm: Buffer.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]),
     };
     for (const [name, bytes] of Object.entries(samples)) {
       expect(identifyBinaryFormat(bytes), name).not.toBeNull();
@@ -380,20 +458,21 @@ describe('documented non-goals — recorded as accepted limitations, not silent 
     expect(scanText('@font-face{src:url(\\68 ttps://evil.invalid/i.woff2)}', 'css', allowed)).toEqual([]);
   });
 
-  it('MIS-ATTRIBUTES attributes after one whose VALUE contains ">" (accepted; CSP covers it)', () => {
-    // The scanner ends a tag at the next ">", so a ">" inside a quoted value desynchronizes it
-    // and the rest of the tag is read as text. Origins there are still reported — but as a
-    // garbled fragment, never as the attribute value — and the scanner's behaviour in that
-    // state is not modelled, so detection there must not be relied on.
-    for (const [html, origin] of [
-      ['<div data-a="a>b" data-b="https://evil.invalid"></div>', 'https://evil.invalid'],
-      ['<a href="a>b" title="//localhost/x"></a>', '//localhost/x'],
-    ]) {
-      const findings = scanText(html, 'markup', allowed);
-      expect(findings).toHaveLength(1);
-      expect(findings[0].value).toContain(origin);
-      expect(findings[0].value).not.toBe(origin); // garbled, not the attribute value
-    }
+  // Detection after a ">" inside an attribute value is UNMODELLED — it may miss or garble.
+  // These two tests pin the observed outcomes so the behaviour is recorded, NOT because either
+  // outcome is specified. Do not turn them back into a general claim: three attempts to
+  // characterise this precisely ("not detected", "unreliable in both directions", "always
+  // garbled") were each disproved by a reviewer. If one of these flips, update the recording,
+  // not the promise.
+  it('OBSERVED (unmodelled): an origin after the desynchronizing ">" can be MISSED', () => {
+    expect(scanText('<img alt="a>b" src=//localhost/x>', 'markup', allowed)).toEqual([]);
+  });
+
+  it('OBSERVED (unmodelled): or reported as a GARBLED fragment, not as the attribute value', () => {
+    const findings = scanText('<div data-a="a>b" data-b="https://evil.invalid"></div>', 'markup', allowed);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].value).toContain('https://evil.invalid');
+    expect(findings[0].value).not.toBe('https://evil.invalid');
   });
 });
 
@@ -565,7 +644,10 @@ describe('scanDist', () => {
       mkdirSync(join(dir, 'assets'));
       writeFileSync(join(dir, 'index.html'), '<!doctype html><div id="root"></div>');
       writeFileSync(join(dir, 'assets', 'clean.js'), `${LICENCE_BANNER}${INLINE_SVG_PROPS}`);
-      writeFileSync(join(dir, 'assets', 'font.woff2'), Buffer.from([0x77, 0x4f, 0x46, 0x32]));
+      const font = Buffer.alloc(64);
+      font.write('wOF2', 0, 'latin1');
+      font.writeUInt32BE(64, 8);
+      writeFileSync(join(dir, 'assets', 'font.woff2'), font);
       const clean = scanDist(dir, allowed);
       expect(clean.findings).toEqual([]);
       expect(clean.scanned).toBe(2);
