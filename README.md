@@ -102,16 +102,61 @@ guarded agent loop, so behaviour is identical regardless of where a message arri
 ## Quick start
 
 ```bash
-# client workspace
+# client workspace — Node >= 20
 npm --prefix client ci
-npm --prefix client run build      # tsc --noEmit && vite build
+npm --prefix client run build      # tsc --noEmit && vite build && egress gate
 npm --prefix client run test
-npm --prefix client run lint:adherence
 ```
 
 The backend feature ships with the agent core behind a cargo feature. Full setup — including
 secret provisioning, first-run onboarding, and per-target installation — is in
 **[docs/INSTALL.md](docs/INSTALL.md)**.
+
+## The client workspace
+
+`client/` is a Vite + React 18 + TypeScript single-page app. Dependency versions are pinned
+exactly — no ranges — so every machine and every CI run builds the same tree. There is no
+Tailwind: styling is the shared constellation token layer (see **Design system** below).
+
+| Script | What it does |
+|---|---|
+| `npm --prefix client run dev` | Vite dev server |
+| `npm --prefix client run typecheck` | `tsc --noEmit` under `strict` |
+| `npm --prefix client run build` | `tsc --noEmit` → `vite build` → the egress gate. A type error fails the build |
+| `npm --prefix client run test` | vitest |
+| `npm --prefix client run assert-no-external-hosts` | the egress gate, against an existing `client/dist` |
+
+Fonts are **bundled**, not fetched: the `@fontsource/*` packages emit the woff2 files into the
+build output, so no font host is contacted at runtime. Backend addressing is never compiled in
+— no absolute URL and no default endpoint anywhere in the client. The transport's base URL is
+injected per target.
+
+### The egress gate and its allowlist policy
+
+`client/scripts/assert-no-external-hosts.mjs` runs as the last step of every build, over the
+**built** output, and fails the build if an absolute `http(s)` origin survives in an emitted
+asset. Two properties keep it honest, and both are directly tested:
+
+1. **Comments are stripped before scanning.** Dependency licence banners legitimately carry
+   upstream project URLs; they are inert text and must not fail a correct build. The stripper
+   is string-aware, so the `//` inside a real URL is never mistaken for a comment — that
+   mistake would delete the very violation the gate exists to catch. Stripping affects the
+   scan only; the emitted bundle is never rewritten by it.
+2. **`client/scripts/external-host-allowlist.json` holds XML/HTML namespace URIs and nothing
+   else.** Bundled inline SVG legitimately carries `xmlns="…/2000/svg"`; a namespace URI is an
+   identifier, never an address. Matching is **exact string** — a URI that merely shares a
+   prefix with an entry still fails — and every entry carries a mandatory `reason`. An entry
+   without one fails the gate.
+
+**Adding a non-namespace entry (a CDN, a font host, an API endpoint) is a review rejection,
+not a configuration change.** If a build needs an external origin, the build is wrong. Where a
+dependency bakes an external URL into a *string* (react-dom's minified-error documentation
+link, for example), it is neutralized at build time by an exact, reason-annotated replacement
+declared in `client/vite.config.ts` — never by widening the allowlist. A stale replacement
+entry fails the build rather than rotting silently.
+
+The gate is static and therefore necessary but not sufficient: a URL can be assembled at
+runtime. The runtime CSP served by the BFF is the enforcing control.
 
 ## Documentation
 
@@ -132,7 +177,9 @@ secret provisioning, first-run onboarding, and per-target installation — is in
 Aperture uses the shared constellation design system: token-based CSS custom properties, a
 deep-space violet palette, glow as the elevation system, and the node-dot iconography
 language. **There is no Tailwind and no parallel palette.** An adherence lint fails the build
-on inline styles, hardcoded colour literals, and stray style blocks.
+on inline styles, hardcoded colour literals, and stray style blocks. The token layer, the
+primitives, and that lint (`lint:adherence`) arrive with the design-system import; the
+scaffold ships only a colour-free base layer so the two cannot collide.
 
 ## Contributing
 

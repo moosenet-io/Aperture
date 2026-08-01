@@ -1,0 +1,33 @@
+{
+  "$schema-note": "Read by scripts/assert-no-external-hosts.mjs. DATA ONLY — no code, no logic.",
+  "policy": [
+    "This file may contain XML/HTML NAMESPACE URIs and nothing else.",
+    "A namespace URI is an identifier, never an address: nothing is ever fetched from it.",
+    "Matching is exact-string. A URI that merely shares a prefix with an entry is NOT allowed.",
+    "Every entry MUST carry a non-empty 'reason'. An entry without one fails the gate.",
+    "Adding a non-namespace entry (a CDN, a font host, an API endpoint) is a review rejection,",
+    "not a configuration change. If a build needs an external origin, the build is wrong."
+  ],
+  "entries": [
+    {
+      "uri": "http://www.w3.org/2000/svg",
+      "reason": "SVG namespace. Bundled inline SVG (brand marks, icons) legitimately carries xmlns=\"…/2000/svg\"; it is an identifier, not fetched."
+    },
+    {
+      "uri": "http://www.w3.org/1999/xlink",
+      "reason": "XLink namespace. Emitted by SVG tooling for xlink:href on <use>/<image> in bundled inline SVG; never dereferenced."
+    },
+    {
+      "uri": "http://www.w3.org/1999/xhtml",
+      "reason": "XHTML namespace. Appears in SVG <foreignObject> content and in serialized DOM fixtures; never dereferenced."
+    },
+    {
+      "uri": "http://www.w3.org/1998/Math/MathML",
+      "reason": "MathML namespace. react-dom's namespace table maps <math> to it when creating elements; it is an identifier passed to createElementNS, never fetched."
+    },
+    {
+      "uri": "http://www.w3.org/XML/1998/namespace",
+      "reason": "Core XML namespace, bound to the reserved xml: prefix (xml:lang, xml:space) in bundled inline SVG; never dereferenced."
+    }
+  ]
+}
