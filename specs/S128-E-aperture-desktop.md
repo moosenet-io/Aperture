@@ -166,7 +166,7 @@ spec_id: S128-aperture-client
   - [ ] Multi-window shares one session and one stream; single-instance guard focuses, not duplicates
   - [ ] `tauri.conf.json` and the desktop crate contain no address, host, port, or identifier literal
   - [ ] Build fails closed when a required build-config key is absent
-  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
   - [ ] README updated to document the desktop target and the one-codebase rule
 
 ---
@@ -361,7 +361,7 @@ spec_id: S128-aperture-client
   - [ ] Backend unreachable renders the cached shell with an explicit stale marker — never a white window
   - [ ] Offline drafts are preserved as drafts and never appear sent; no fabricated replies
   - [ ] Continuity preserved across profile switches and re-runs of first run (negative test)
-  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
   - [ ] README and `docs/INSTALL.md` updated to document the connection model
 
 ---
@@ -460,7 +460,7 @@ spec_id: S128-aperture-client
   - [ ] Deletion on logout/forget verified by read-back, and keychain items are non-synchronizable
   - [ ] Continuity preserved across logout and re-auth (negative test)
   - [ ] Secrets accessed via the secret manager, not env vars
-  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
 
 ---
 
@@ -562,7 +562,7 @@ spec_id: S128-aperture-client
   - [ ] Devtools disabled in release; no runtime toggle reachable from page content
   - [ ] Every command validates arguments at the boundary; path traversal rejected (negative test)
   - [ ] Desktop dependency audit fails closed on a missing or malformed report
-  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
   - [ ] `docs/SECURITY.md` documents the threat model and every hardening decision
 
 ---
@@ -650,7 +650,7 @@ spec_id: S128-aperture-client
   - [ ] Tray assets bundled, theme-aware, multi-DPI, with zero external references
   - [ ] Close-to-tray, start-minimized, and launch-at-login default off and are user-configurable
   - [ ] Tray is a launcher/status surface only — it raises no notifications of its own
-  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
   - [ ] README updated to document tray and menu behaviour
 
 ---
@@ -740,7 +740,7 @@ spec_id: S128-aperture-client
   - [ ] Cold-start and warm second-instance links take the identical validation path
   - [ ] A deep link cannot authenticate, elevate, switch profiles, change security settings, or trigger an update
   - [ ] Open-external allows only `http(s)`, with no shell interpolation
-  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
   - [ ] `docs/SECURITY.md` and README updated to document the link grammar and rejections
 
 ---
@@ -834,7 +834,7 @@ spec_id: S128-aperture-client
   - [ ] Notification text carries the assistant's voice; templates are a render-failure fallback only
   - [ ] Activation routes through the deep-link validator; permission denial degrades to `unavailable` without nagging
   - [ ] Resumed-stream replay does not re-knock (dedupe by event id)
-  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
   - [ ] README updated to document notification behaviour and settings
 
 ---
@@ -944,7 +944,7 @@ spec_id: S128-aperture-client
   - [ ] Uninstall removes files, shortcuts, scheme registration, launch-at-login, and credentials on "remove my data"
   - [ ] No absolute build-host path or username embedded in any artifact
   - [ ] Secrets accessed via the secret manager, not env vars, and never echoed or written to the workspace
-  - [ ] No hardcoded infrastructure values in new/modified code; `docs/INSTALL.md` Windows section complete
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass; `docs/INSTALL.md` Windows section complete
 
 ---
 
@@ -1055,7 +1055,7 @@ spec_id: S128-aperture-client
   - [ ] Release build **fails closed** without signing or notarization material; dev-adhoc builds cannot publish
   - [ ] Same-commit rebuild produces identical pre-signature payload digests
   - [ ] Secrets accessed via the secret manager, not env vars, and never written to a persisted keychain or the workspace
-  - [ ] No hardcoded infrastructure values in new/modified code; `docs/INSTALL.md` macOS section complete
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass; `docs/INSTALL.md` macOS section complete
 
 ---
 
@@ -1179,7 +1179,7 @@ spec_id: S128-aperture-client
   - [ ] Update feed and artifacts are served by the user's configured endpoint; no external egress, no absolute URLs
   - [ ] Per-machine Windows installs disable auto-update and say so; apply is atomic and power-loss safe
   - [ ] Secrets accessed via the secret manager; the signing key is touched only by the publish job
-  - [ ] No hardcoded infrastructure values in new/modified code; `docs/SECURITY.md` states the fail-closed rule
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass; `docs/SECURITY.md` states the fail-closed rule
 
 ---
 

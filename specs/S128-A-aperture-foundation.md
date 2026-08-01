@@ -617,9 +617,8 @@ spec_id: S128-aperture-client
   - [ ] Secrets never written to logs, stdout, or error bodies
   - [ ] Missing secret ⇒ capability `unavailable`, never a default/stopgap value
   - [ ] Zero `std::env::var` reads of secret-shaped names
-  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
   - [ ] README updated to point at `docs/CONFIGURATION.md`
-  - [ ] All existing tests still pass
 
 ---
 

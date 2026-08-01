@@ -193,7 +193,7 @@ spec_id: S128-aperture-client
         party, user-inspectable, user-clearable
   - [ ] Opt-out is specified as enforced at publish, server-side — not as client-side suppression
   - [ ] No literal hosts, ports, addresses, org names, or personal identifiers in any contract file
-  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
   - [ ] README updated to point at the context-bus contract as the source of truth for Sprint D
 
 ---
@@ -465,7 +465,7 @@ spec_id: S128-aperture-client
   - [ ] Export is local-only with zero network requests, proven by a negative test
   - [ ] Opt-out reflects server state on read-back; optimistic-only state is a test failure
   - [ ] Clearing the bus provably does not touch memory, traits, lore, or thread history
-  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
   - [ ] README and `docs/PRIVACY.md` document the bus's contents, retention, and controls
 
 ---
@@ -588,7 +588,7 @@ spec_id: S128-aperture-client
   - [ ] Publishes `muse.browse`, consumes `shell.focus` and `muse.playback`, all declared
   - [ ] Both surfaces pass the inert-conformance harness, issuing zero requests when unavailable;
         the playback affordance is inert-with-reason when playback is gated
-  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
   - [ ] README updated to document the Muse surface and the deferred provenance display
 
 ---
@@ -829,7 +829,7 @@ spec_id: S128-aperture-client
   - [ ] A ticket expiring mid-playback re-mints once and resumes at the current offset; a stalled
         read surfaces a stated error and is never presented as end-of-stream
   - [ ] No third-party player source vendored
-  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
   - [ ] README and `docs/PLAYBACK.md` document playback support and its failure modes
 
 ---
@@ -986,7 +986,7 @@ spec_id: S128-aperture-client
   - [ ] No force-push or mirror-override affordance exists anywhere in the UI
   - [ ] Publishes `harmony.run`, consumes `harmony.spec` and `shell.focus`, all declared
   - [ ] Passes the inert-conformance harness with zero requests when unavailable
-  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
   - [ ] README updated to document the Harmony surface
 
 ---
@@ -1164,7 +1164,7 @@ spec_id: S128-aperture-client
         revision chain, and reviewer; construction fails if any is missing
   - [ ] Over-limit selections are refused with the limit named, never silently truncated
   - [ ] A draft with unresolved PII/secret findings cannot be marked reviewed
-  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
   - [ ] README updated to document spec-draft-from-chat
 
 ---
@@ -1265,7 +1265,7 @@ spec_id: S128-aperture-client
         draft revision, and reviewer identity
   - [ ] Retry with the same idempotency key creates no duplicates; partial failure is resumable
   - [ ] Plane tool unreachable ⇒ `capability-unavailable`, nothing created, no alternate route
-  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
   - [ ] README and `docs/SPEC-INGEST.md` document the flow and its explicit refusals
 
 ---
@@ -1365,7 +1365,7 @@ spec_id: S128-aperture-client
   - [ ] Leg 3 fails the build on a param shape the named tool cannot accept
   - [ ] The gate fails closed when the tool surface cannot be enumerated
   - [ ] Every declared action's capability resolves to a real module descriptor capability
-  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
   - [ ] README and `docs/ASSISTANT-PARITY.md` document how to add an action correctly
 
 ---
@@ -1466,5 +1466,5 @@ spec_id: S128-aperture-client
         specified — no scenario can pass by routing around a privacy or pipeline control
   - [ ] No notification, badge, or tray entry is produced by any scenario
   - [ ] Memory, traits, and lore are unchanged after all scenarios run
-  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
   - [ ] README and `docs/CROSS-MODULE.md` document what the shell can answer across modules

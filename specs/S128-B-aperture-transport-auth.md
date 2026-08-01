@@ -661,7 +661,7 @@ spec_id: S128-aperture-client
   - [ ] Credentials stored with a memory-hard hash and recorded parameters; never plaintext
   - [ ] Password policy enforced against a bundled list; no external breach-API call
   - [ ] Missing signing key ⇒ capability `unavailable`; no fallback key is ever generated
-  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
   - [ ] Secrets accessed via the secret manager, not env vars
 
 ---
@@ -747,7 +747,7 @@ spec_id: S128-aperture-client
   - [ ] Cookies are `HttpOnly` + `Secure` + `SameSite`; no token ever reaches web storage
   - [ ] Logout invalidates server-side and terminates that session's in-flight streams
   - [ ] Retired-key sessions fail closed to re-auth; session store unavailable fails closed
-  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
   - [ ] Secrets accessed via the secret manager, not env vars
 
 ---
@@ -1290,7 +1290,7 @@ spec_id: S128-aperture-client
   - [ ] Signal ships as an inert skeleton with a descriptor reporting `unavailable` and a reason
   - [ ] Signal performs no provisioning, registration, credential read, or network activity — tested
   - [ ] `docs/CHANNELS.md` documents the policy, the Telegram enablement steps, and the Signal boundary
-  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass
   - [ ] README updated to document the channel policy and Telegram's off-by-default status
 
 ---
