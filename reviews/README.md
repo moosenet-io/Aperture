@@ -137,11 +137,53 @@ Not corrections — things that would make Aperture better, ranked by leverage:
 10. **Linux desktop** — the archetypal user of a self-hosted Rust fleet runs Linux. If it is
     deliberately out of scope, the spec should say so rather than be silent.
 
+---
+
+## Sprint B: three defects caused by an over-absolute correction
+
+Worth separating out, because these are not authoring mistakes — they were **introduced by a
+mid-flight correction that was too absolute**, and they are a useful lesson about how a
+confident instruction can create a contradiction downstream.
+
+After verifying that `chat_completion_streaming` / `ChatSseState` / `on_delta` already existed,
+Sprint B was told: the hook exists, route it; do not add a new agent-loop hook; do not duplicate
+the parser; expect `chord.rs` unmodified. That was right about reuse and **wrong as an absolute**:
+
+1. **Four contracted event types have no permitted producer.** `on_delta` carries text only, but
+   the event taxonomy requires `tool.call`, `tool.result`, `thinking`, and lifecycle events. The
+   "no new hooks" prohibition and the taxonomy directly conflict. The prohibition must be
+   narrowed to "no second *token* path", explicitly permitting the additional producers the
+   taxonomy requires.
+2. **`chord.rs` cannot stay unmodified.** Cancellation must reach `chat_completion_streaming` and
+   stop the body read, which almost certainly needs a cancellation token parameter — in
+   `chord.rs`. The grep gate asserting that file is untouched will fail once cancellation merges,
+   or will force cancellation into a hack. The two items must be sequenced and scoped together.
+3. **Cancellation, resume, and multi-subscriber broadcast cannot all hold.** Cancel-on-disconnect
+   would kill generation for a *surviving* second device, and resume-after-drop would then always
+   resume a cancelled turn. Needs a refcount plus grace-window model written into all three items
+   before anyone implements them.
+
+Other Sprint B findings of note: `stream_id` lifecycle is never defined (connection? thread?
+turn?) and each item is readable under a different interpretation; per-source rate limiting is
+undefined behind a reverse proxy, so it is either one shared bucket or spoofable via
+`X-Forwarded-For`; an audit sink is cited by three items and defined by none; and first-visitor-
+wins bootstrap is guarded against concurrent attackers but not against whoever simply arrives
+first — which on a network-exposed instance is the actual threat.
+
+Fable also asks for a transport-layer prompt-injection invariant, which is the right level for
+it: a `tool.result` payload can never be emitted as, or coalesced into, an assistant token event
+regardless of what bytes the tool returns, with a negative test feeding a tool result containing
+SSE-frame-shaped JSON.
+
+---
+
 ## Status
 
 These findings are recorded, not yet folded into the specs. Folding them in is the next action
 before Plane ingest, so the ingested items carry the corrections rather than the originals.
 
-Sprints B and C failed their first review pass with `unavailable: daemon unreachable` — an
-infrastructure artifact from running seven reviewers concurrently, **not** a verdict. Per the
-gate rules an unavailable provider is not a pass; both are being re-run serially.
+Review coverage: Sprints A, B, D, E, F, G complete. Sprint C's first attempt hit
+`daemon unreachable` (seven concurrent reviewers) and its second hit `primary unreachable` —
+because it ran during a deliberate gateway restart to install mirror configuration. Both are
+infrastructure artifacts, **not** verdicts; per the gate rules an unavailable provider is never a
+pass, so C is being re-run rather than accepted.
