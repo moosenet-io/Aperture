@@ -117,9 +117,15 @@ is a property of Rust code that lives in the agent-core repository. Without this
 Aperture-side PR merges green while proving nothing, which is a defect that has already happened
 once on this item.
 
-**This PR is intended to prove exactly one criterion: the documentation one — and as of this
-commit it does not yet prove even that (see criterion 6).** Everything else is proven by the
-agent-core PR, which merges **first**.
+**This change proves exactly one criterion: the documentation one.** Everything else is proven by
+the agent-core PR, which merged **first** — `moosenet/Lumina` #247.
+
+That was not true for most of this document's life, and the history is worth keeping as history.
+Criterion 6 requires a **merged** agent-core PR id, so until #247 existed the criterion was held
+deliberately open with a blocking placeholder, and this change was marked not mergeable in its
+own text. A placeholder was the right call precisely because the alternative — describing
+behavioural criteria as proven before the code proving them had landed — is the failure this
+criterion exists to prevent. The placeholder has since been redeemed rather than removed.
 
 ### Evidence classes — read this before the table
 
@@ -200,7 +206,7 @@ because they are the honest frame for the whole criterion rather than footnotes 
    — inherits access to that private field with **no visibility change whatsoever**, so the
    widening leaves no diff a reviewer can grep for. What would detect that today is a
    **review of the `state` module**, which is why the access boundary
-   and its limits are documented in that file's own module doc rather than only here. A cheap
+   and its limits are documented in that module's own doc comment rather than only here. A cheap
    mechanical backstop is available and not yet written: a source-scan assertion that the door
    field's declaration is followed by no accessor returning it, in the same style as the existing
    scans — a tripwire, with a tripwire's limits, but one that fails the build on the most likely
@@ -232,8 +238,10 @@ Concretely, this repository's gate can check that this file exists, that it is w
 it contains no infrastructure identifier, and that it names an agent-core commit. That is the
 whole of it.
 
-And it does **not** stretch to criterion 6 either, until the link below is filled in: a document
-that promises a link and carries a placeholder proves the promise, not the link.
+Criterion 6 is the one criterion this repository's gate **can** reach, and it is now satisfied:
+the link below names merged PR `moosenet/Lumina` #247. While that link was a placeholder it was
+not satisfied, because a document that promises a link and carries a placeholder proves the
+promise, not the link — which is why it was held open rather than assumed.
 
 ### Merge order
 
