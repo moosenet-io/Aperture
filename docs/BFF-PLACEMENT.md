@@ -60,12 +60,13 @@ panic.
 ### The properties it holds, and how
 
 - **One door.** Every backend capability is reached through the agent core's in-process
-  `terminus-client` wrapper. The handle is a private field with **no accessor at all**, so
-  nothing outside the file that declares it can obtain it, and a later item needing a backend
-  call adds a method to the `Door` trait rather than receiving the client. That much the Rust
-  compiler enforces (D8), rather than a lint in another language. A source scan additionally
-  rejects a list of known client spellings; that scan is a regression tripwire, not the proof,
-  and criterion 2 below states exactly what the compiler does and does not cover.
+  `terminus-client` wrapper. The handle is a private field of the **`state` module**, so nothing
+  outside that module and its descendants can obtain it — that much the Rust compiler enforces
+  (D8), rather than a lint in another language. **Separately**, and as a fact about the code
+  rather than a compiler guarantee, no accessor exists today, so a later item needing a backend
+  call adds a method to the `Door` trait rather than receiving the client. A source scan
+  additionally rejects a list of known client spellings; that scan is a regression tripwire, not
+  the proof, and criterion 2 below states exactly what the compiler does and does not cover.
 - **Named proxies only.** No model id, engine name, backend tag or size suffix appears in the
   module.
 - **No secrets of its own.** The module performs no environment read of any kind; the door is
@@ -79,15 +80,31 @@ panic.
   cannot be wedged by a panicking probe. **The lag is real and deliberate:** a cached success can
   hold `/ready` at `200` for up to one TTL after the door dies, so this is a bounded-staleness
   signal and not a liveness check.
-- **Redaction, enforced by type rather than by filtering.** Every member of a problem-details body
-  is either a compile-time constant or a value this process generated: `detail` is constant per
-  error class, `instance` is a **closed route-identity enum** with no constructor that accepts a
-  string, and a capability's `reason` is a **closed enum** of vetted text. Nothing a client sent —
-  path, header — and nothing an upstream said can be serialized into a body at all; the only
-  free-form text is the operator log line, keyed by the `correlation_id` the response echoes and
-  sanitized to a bounded printable subset so a hostile path cannot forge or flood log entries.
-  The problem object is closed, and the serialization-failure fallback carries the true status and
-  the same correlation id rather than a hardcoded guess.
+- **Redaction of response bodies, enforced by type rather than by filtering.** Every member of a
+  problem-details body is either a compile-time constant or a value this process generated:
+  `detail` is constant per error class, `instance` is a **closed route-identity enum** with no
+  constructor that accepts a string, and a capability's `reason` is a **closed enum** of vetted
+  text. Nothing a client sent — path, header — and nothing an upstream said can be serialized
+  into a body at all. The problem object is closed, and the serialization-failure fallback
+  carries the true status and the same correlation id rather than a hardcoded guess.
+- **Operator logs are a weaker boundary than the response bodies, and the difference is real.**
+  An earlier revision of this document claimed every free-form log line is correlation-keyed and
+  sanitized. That is **not** what merged `8aec7ca` does, and the accurate position is worth
+  stating precisely, because "the sanitizer exists" is not the same as "every logging site uses
+  it". Of the module's five logging sites:
+  - two — both in the error path — are keyed by the `correlation_id` the response echoes, and the
+    client-derived text reaching them (request path, method) is sanitized at the call site to a
+    bounded printable subset before it is passed;
+  - two are fixed strings with no interpolated data;
+  - one, the tool-door probe-failure line, interpolates the **upstream error verbatim**: not
+    sanitized, not length-bounded, not correlation-keyed. It is upstream-controlled text, so it
+    can carry control characters — the log-forging and flooding shape the sanitizer exists to
+    prevent — and it can carry infrastructure identifiers into the log.
+
+  **No part of this reaches a client**: response bodies are unaffected, and the body-redaction
+  guarantee above still holds without exception. It is a log-hygiene defect, not a disclosure one.
+  It is **filed as its own work item against the merged code** rather than fixed here, because
+  this is a documentation change and the code has already landed and been gated.
 - **No CORS header, ever**, on any response under the prefix.
 
 ---
@@ -118,6 +135,17 @@ what it claims:
 | **TRIPWIRE** | A lexical scan over a named token list. It catches the mistake it enumerates and **nothing else**. It is not proof of a general property; it is a regression alarm for a specific known-bad spelling. |
 | **REVIEW** | Proved, if at all, by a human reading it. |
 
+**How a claim in this table was checked, and how that method failed once.** Claims were verified
+against the merged tree rather than against the branch they were written alongside. For a
+"nothing does X" claim that is not enough on its own: an earlier revision asserted that all
+free-form log text is sanitized, and the check was a grep confirming the sanitizer **exists** and
+is called. It does and it is — but presence of the safe helper only shows the safe path exists,
+never that every site takes it, and one logging site did not. The reliable method for a negative
+claim is to **enumerate every site that could violate it and show each one does not**, which is
+what the log-boundary bullet above now reports. This is the same presence-is-not-reachability
+error that was this item's very first review finding, reappearing in the verification method
+rather than in the code.
+
 Two facts constrain what could be GATED at all, and both are recorded rather than papered over:
 
 - **The compiler tool has no cargo-feature argument** (`TERM #593`). Its inputs are module, ref,
@@ -146,7 +174,7 @@ expected result rather than a concerning one.
 | # | Acceptance criterion | Proving repo | Class | Evidence, and its exact limit |
 |---|---|---|---|---|
 | 1 | The BFF module compiles with and without the `aperture` feature | agent-core | Feature-off: **GATED** + **LOCAL**. Feature-on: **LOCAL only** | **GATED, on the merged commit:** the compiler tool built and ran the default-feature (feature-**off**) suite against `main` after the merge — 4753 passed, 4 failed, those four being the two pre-existing unrelated tests described above. That is the whole of what a gate has touched on this criterion. **LOCAL:** feature-on and feature-off builds both complete with no warning from the module; the feature-off binary contains **zero** occurrences of the route prefix and the feature-on binary contains it; the feature-on suite is 5304 passed, 0 failed, of which 52 are this module's own tests. **Not gated, and why:** the compiler tool cannot select a cargo feature at all (`TERM #593`), so no gate can observe the feature-on state — the 52 module tests have never run under a gate and cannot until that is fixed. |
-| 2 | All backend access routes through the tool-door client; zero direct service HTTP clients | agent-core | **STRUCTURAL** (primary, narrow) + **TRIPWIRE** (secondary) | **What the compiler strictly guarantees:** *nothing outside `state.rs` can obtain this state's door handle.* It is a private field with **no accessor at all** — not even a module-scoped one — and a later item needing a backend call adds a method to the `Door` trait rather than receiving the client. That holds for code nobody has written yet, and it is a **stronger** claim than the `pub(in crate::aperture)` accessor it replaces. **What it does not cover — see "The two limits" below.** **Secondary tripwire:** a source scan rejects a named list of client spellings. **Its limit:** a name list is an enumeration. An alias, a re-export, a differently-named client, a raw socket, or a crate nobody thought of all pass it. It proves those specific spellings are absent — **not** that all backend access goes through the tool door. |
+| 2 | All backend access routes through the tool-door client; zero direct service HTTP clients | agent-core | **STRUCTURAL** (primary, narrow) + **TRIPWIRE** (secondary) | **What the compiler strictly guarantees:** *nothing outside the **`state` module** can obtain this state's door handle.* The boundary is the **module**, not the file. Rust privacy has no notion of files: a private item is visible to its module **and every descendant module**, which need not live in the same source file. Today that module is one file, so file and module coincide — but that is a convention, not the guarantee, and `state`'s own `#[cfg(test)] mod tests` is a live in-tree example of a descendant reading the private field directly, with no visibility change and no complaint from the compiler. **Separately, and as a verified fact about the code rather than a compiler guarantee:** no accessor exists today — checked against the merged tree, zero hits — so a later item needing a backend call adds a method to the `Door` trait rather than receiving the client. **These two are not the same guarantee and are deliberately not merged into one sentence:** "the compiler prevents this" and "nobody has written it yet" fail differently, and conflating them is the error this item spent five review cycles unlearning. **What neither covers — see "The two limits" below.** **Secondary tripwire:** a source scan rejects a named list of client spellings. **Its limit:** a name list is an enumeration. An alias, a re-export, a differently-named client, a raw socket, or a crate nobody thought of all pass it. It proves those specific spellings are absent — **not** that all backend access goes through the tool door. |
 | 3 | Secrets accessed via the secret manager, not environment reads | agent-core | **TRIPWIRE** + **REVIEW** | A source scan finds zero occurrences of the direct environment-read spellings anywhere in the module's shipping half, which subsumes the token-, key-, password- and secret-shaped names the rule is about. **Its limit:** the scan proves those spellings are absent; that the module reads no secret **at all** is a claim about its 4 files, established by reading them, not by the scan. |
 | 4 | Inference addressed by named proxy only; no model, engine or backend name in code | agent-core | **TRIPWIRE** | A source scan rejects a list of model ids, engine names, backend tags and size suffixes. **Its limit:** it catches the names on the list. A model name nobody enumerated would pass. The module currently issues no inference call at all, which is the substantive reason this holds. |
 | 5 | An unreachable door degrades to `unavailable`, never a crash | agent-core | **LOCAL** (behavioural tests) | Readiness reflects a **probed** door, not a configured one: a door that is present but does not answer a bounded probe reports `unavailable`, distinguishably from one that was never activated, and `/ready` answers `503` problem details naming the capability. The reported state moves in both directions, so a door that dies degrades and one provisioned later recovers without a restart. The probe is single-flight and survives its waiters: a burst produces one probe, dropped requests do not each start another, and a **panicking** probe cannot wedge the flight slot — an RAII guard clears it on unwind, and a test asserts the capability recovers afterwards rather than merely re-probing. **Its limit, and it is deliberate:** a cached success can keep `/ready` at `200` for up to one probe-TTL after the door dies. That is inherent in bounded staleness, is documented in the module, and is not a defect to be closed by probing per request. **Not gated:** these tests live behind the `aperture` feature, which no gate can select (`TERM #593`). |
@@ -165,9 +193,13 @@ because they are the honest frame for the whole criterion rather than footnotes 
    and bypassing this state entirely. Such a handler would still reach **the same single door**,
    so "all backend access goes through the tool door" is not violated by it — but "this state is
    the one chokepoint" is, and only the tripwire scan covers that.
-2. **Visibility is enforced as declared, not as a rule.** Anyone editing `state.rs` can widen the
-   field or add an accessor, and the compiler will happily enforce the new, weaker declaration.
-   What would detect that today is a **review of `state.rs`**, which is why the access boundary
+2. **Visibility is enforced as declared, not as a rule — and a descendant needs no declaration
+   at all.** Anyone editing the `state` module can widen the field or add an accessor, and the
+   compiler will happily enforce the new, weaker declaration. Worse, and more easily missed: a
+   future **child module** of `state` — `mod inner;` in `state.rs`, its body in `state/inner.rs`
+   — inherits access to that private field with **no visibility change whatsoever**, so the
+   widening leaves no diff a reviewer can grep for. What would detect that today is a
+   **review of the `state` module**, which is why the access boundary
    and its limits are documented in that file's own module doc rather than only here. A cheap
    mechanical backstop is available and not yet written: a source-scan assertion that the door
    field's declaration is followed by no accessor returning it, in the same style as the existing
