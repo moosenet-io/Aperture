@@ -67,13 +67,14 @@
 //     caveat: `.x { @@@ display: flex; ... }` shipped on this branch and passed a green build.
 //     postcss accepted `@@` as an at-rule NAME with `display: flex` as its PARAMS — so the file
 //     parsed, no error was raised, AND the swallowed declaration was never walked AS A
-//     DECLARATION. What that costs, probed rather than guessed: the font-literal,
-//     dimension-literal and forced-color-none rules all walk declarations, so all three go
-//     blind on swallowed content; the colour rule survives only because at-rule PARAMS happen
-//     to be scanned for colours as well. A lenient parse does not merely tolerate garbage; it
-//     can HIDE most of what this lint exists to read. The `malformed-css` rule above closes the
-//     observed case (unknown at-rule name, block-requiring at-rule with no block, non-ident
-//     property name). It does NOT make
+//     DECLARATION. What that costs, re-measured after at-rule params gained a px scan: the
+//     colour and dimension rules survive a swallow, because at-rule PARAMS are scanned for
+//     both; the font-literal and forced-color-none rules walk declarations only and still go
+//     blind. A lenient parse does not merely tolerate garbage; it can HIDE what this lint
+//     exists to read, which is why `malformed-css` reports the SHAPE regardless of what the
+//     swallowed text happens to contain. That rule covers an unknown at-rule name, an at-rule
+//     sitting where a declaration belongs, an at-rule with no block outside the small blockless
+//     allowlist, and a non-ident property name. It does NOT make
 //     this a CSS validator: a WELL-FORMED but wrong declaration — `color: notacolour`,
 //     `padding: 3 4 5 6 7`, `@media (nonsense) {}` — still passes, and a well-formed at-rule
 //     with garbage params could still swallow content. Use a browser or a real validator for
@@ -265,20 +266,51 @@ const KNOWN_AT_RULES = new Set([
   'property', 'layer', 'container', 'scope', 'starting-style', 'position-try',
 ]);
 
-/** At-rules that are meaningless without a block — the shape that swallows declarations. */
-const AT_RULES_REQUIRING_A_BLOCK = new Set([
-  'media', 'supports', 'document', 'page', 'font-face', 'keyframes', 'counter-style',
-  'font-feature-values', 'font-palette-values', 'container', 'scope', 'starting-style',
-  'position-try',
+/**
+ * ── THE SWALLOW CHECKS ARE ALLOWLISTS, DELIBERATELY ────────────────────────────────────────
+ *
+ * An earlier revision listed the at-rules that REQUIRE a block, and a reviewer walked straight
+ * through it with `@property` and `@viewport` — both absent from the list, both blockless, both
+ * swallowing the declaration after them exactly as `@@@` did. Extending that list would have
+ * fixed those two and left the next at-rule CSS gains to re-open the hole silently.
+ *
+ * So both checks are inverted. Each names the small set that is legitimate; everything else
+ * fails. A future at-rule is then a false POSITIVE — a build failure a reviewer sees and a
+ * source change resolves — rather than a silent bypass. For a rule whose entire purpose is
+ * catching what nobody anticipated, that is the only defensible default.
+ */
+
+/**
+ * At-rules that are legitimately BLOCKLESS statements. Anything else without a block has
+ * swallowed whatever followed it into its params.
+ */
+const AT_RULES_VALID_WITHOUT_A_BLOCK = new Set([
+  'charset', // `@charset "utf-8";` — a statement by definition
+  'import', // `@import url(…);`
+  'namespace', // `@namespace svg url(…);`
+  'layer', // the list form, `@layer base, components;` — the block form has a block
 ]);
+
+/**
+ * At-rules that may legitimately appear INSIDE a style rule, where a declaration is otherwise
+ * what belongs. Kept to the three conditional groups this design system actually uses; a
+ * nesting construct that is genuinely needed later is a reviewed source change, not a config
+ * edit. Everything else nested — `@property`, `@viewport`, a typo, an at-rule that does not yet
+ * exist — is an anomaly where a declaration was expected, and is reported as one.
+ */
+const AT_RULES_ALLOWED_INSIDE_A_STYLE_RULE = new Set(['media', 'supports', 'container']);
 
 const VENDOR_KEYFRAMES = /^-(webkit|moz|ms|o)-keyframes$/;
 
 /** A valid CSS property name: a custom property, or an ident with an optional vendor prefix. */
 const VALID_PROPERTY_NAME = /^(--[A-Za-z0-9_-]+|-{0,2}[A-Za-z_][A-Za-z0-9_-]*)$/;
 
-/** A px length. Negative and decimal values included; `0px` too — it should just be `0`. */
-const PX_LENGTH = /(?<![\w.-])-?\d*\.?\d+px(?![\w-])/g;
+/**
+ * A px length. Negative and decimal values included; `0px` too — it should just be `0`. Matched
+ * CASE-INSENSITIVELY: CSS units are case-insensitive, so `7PX` is a px literal, and a
+ * case-sensitive pattern was a bypass a reviewer found rather than a limitation anyone chose.
+ */
+const PX_LENGTH = /(?<![\w.-])-?\d*\.?\d+px(?![\w-])/gi;
 
 /**
  * The inline escape for a genuinely optical dimension. Two accepted forms, and only two, so a
@@ -334,25 +366,25 @@ export function findColorLiterals(value, { named }) {
 }
 
 /**
- * Does this declaration carry an inline reason for its raw dimension?
+ * Does this node — a declaration or an at-rule — carry an inline reason for its raw dimension?
  *
  * Accepted: a Comment immediately BEFORE the declaration, or a Comment immediately after it on
  * the SAME source line. Anything looser — a comment anywhere in the rule, say — would let one
  * reason cover values it was never written about.
  */
-function hasDimensionReason(decl) {
-  const previous = decl.prev();
+function hasDimensionReason(node) {
+  const previous = node.prev();
   if (previous?.type === 'comment' && DIMENSION_REASON.test(previous.text)) return true;
 
-  const next = decl.next();
+  const next = node.next();
   if (
     next?.type === 'comment'
     && DIMENSION_REASON.test(next.text)
-    && next.source?.start?.line === decl.source?.start?.line
+    && next.source?.start?.line === node.source?.start?.line
   ) return true;
 
   // A comment between the value and the semicolon lands in the declaration's own raws.
-  const raw = decl.raws?.value?.raw;
+  const raw = node.raws?.value?.raw;
   return typeof raw === 'string' && DIMENSION_REASON.test(raw);
 }
 
@@ -521,16 +553,34 @@ function scanCss(relPath, text, findings, errors) {
   // checks close that hole; they do not make this a validator (see NON-GOALS).
   root.walkAtRules((atRule) => {
     const name = atRule.name.toLowerCase();
+
     if (!KNOWN_AT_RULES.has(name) && !VENDOR_KEYFRAMES.test(name)) {
       findings.push(finding(
         'malformed-css', relPath, lineOf(atRule),
         `\`@${atRule.name}\` is not a known at-rule. postcss accepts it, and anything after it on `
         + 'that line becomes its params rather than a declaration this lint can read.',
       ));
-    } else if (AT_RULES_REQUIRING_A_BLOCK.has(name) && !atRule.nodes) {
+      return;
+    }
+
+    // An at-rule sitting where a DECLARATION belongs. This is the inverted check: inside a
+    // style rule a declaration is expected and an at-rule is the anomaly, so the question is
+    // not "does this at-rule need a block" but "is this one of the few that belong here".
+    if (atRule.parent?.type === 'rule' && !AT_RULES_ALLOWED_INSIDE_A_STYLE_RULE.has(name)) {
       findings.push(finding(
         'malformed-css', relPath, lineOf(atRule),
-        `\`@${atRule.name}\` requires a block; without one it swallows what follows.`,
+        `\`@${atRule.name}\` appears inside a style rule, where a declaration belongs. If it is `
+        + 'blockless it has swallowed what follows into its params, where no declaration-scoped '
+        + `rule can see it. Nestable here: ${[...AT_RULES_ALLOWED_INSIDE_A_STYLE_RULE].map((n) => `@${n}`).join(', ')}.`,
+      ));
+      return;
+    }
+
+    if (!atRule.nodes && !AT_RULES_VALID_WITHOUT_A_BLOCK.has(name)) {
+      findings.push(finding(
+        'malformed-css', relPath, lineOf(atRule),
+        `\`@${atRule.name}\` has no block. Only ${[...AT_RULES_VALID_WITHOUT_A_BLOCK].map((n) => `@${n}`).join(', ')} `
+        + 'are legitimately blockless; anything else without one has swallowed what follows.',
       ));
     }
   });
@@ -571,8 +621,22 @@ function scanCss(relPath, text, findings, errors) {
 
   if (!isTokenLayer) {
     root.walkAtRules((atRule) => {
-      for (const literal of findColorLiterals(atRule.params ?? '', { named: true })) {
+      const params = atRule.params ?? '';
+      for (const literal of findColorLiterals(params, { named: true })) {
         findings.push(finding('color-literal', relPath, lineOf(atRule), `@${atRule.name} ${literal}`, literal));
+      }
+
+      // At-rule params are scanned for dimensions as well as colours. A breakpoint is the
+      // common case, and it legitimately CANNOT be a token: `var()` does not resolve inside a
+      // media condition. So a breakpoint takes the same inline reason as any other optical
+      // literal, which at least puts the number and its justification in the same place.
+      const lengths = [...params.matchAll(PX_LENGTH)].map((m) => m[0]);
+      if (lengths.length > 0 && !hasDimensionReason(atRule)) {
+        findings.push(finding(
+          'dimension-literal', relPath, lineOf(atRule),
+          `@${atRule.name} ${lengths.join(', ')} — a media condition cannot read a custom property, `
+          + 'so record why this breakpoint is what it is with a `/* dimension-literal: … */` comment',
+        ));
       }
     });
   }

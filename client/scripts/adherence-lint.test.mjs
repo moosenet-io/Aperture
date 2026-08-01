@@ -254,19 +254,24 @@ describe('malformed CSS — the leniency of postcss is not a clean bill of healt
     expect(rules(lint())).toContain('malformed-css');
   });
 
-  it('proves the hiding half: a swallowed declaration escapes every DECL-scoped rule', () => {
-    // Precisely what is lost, probed rather than assumed. Content swallowed into at-rule
-    // params is never walked as a DECLARATION, so the font, dimension and forced-colours
-    // rules — which all walk declarations — miss it entirely. The colour rule survives, and
-    // only by luck: at-rule params are separately scanned for colour literals. Three of four
-    // rules going blind is the reason `malformed-css` exists.
-    for (const swallowed of ["font-family: 'Comic Sans', sans-serif", 'padding: 7px', 'forced-color-adjust: none']) {
+  it('proves the hiding half: a swallowed declaration escapes the CONTENT rules', () => {
+    // Precisely what is lost, re-measured after at-rule params gained a px scan — not carried
+    // forward from the previous revision. At-rule params are now scanned for colours AND
+    // dimensions, so those two rules survive a swallow; the font and forced-colours rules walk
+    // declarations only, and still go blind. `malformed-css` is what makes a swallow visible
+    // at all, whatever it happens to be carrying.
+    for (const swallowed of ["font-family: 'Comic Sans', sans-serif", 'forced-color-adjust: none']) {
       rmSync(root, { recursive: true, force: true });
       root = mkdtempSync(join(tmpdir(), 'aperture-adherence-'));
       fixture({ 'src/styles/x.css': `.app { @@@ ${swallowed};\n}\n` });
       const found = [...new Set(lint().findings.map((f) => f.rule))];
       expect(found, swallowed).toEqual(['malformed-css']);
     }
+  });
+
+  it('a swallowed dimension IS caught, now that at-rule params are scanned for px', () => {
+    fixture({ 'src/styles/x.css': '.app { @@@ padding: 7px;\n}\n' });
+    expect(rules(lint())).toContain('dimension-literal');
   });
 
   it('the colour rule alone survives a swallow, because at-rule params are scanned too', () => {
@@ -279,9 +284,46 @@ describe('malformed CSS — the leniency of postcss is not a clean bill of healt
     expect(rules(lint())).toContain('malformed-css');
   });
 
-  it('rejects a block-requiring at-rule that has no block', () => {
+  it('rejects a known at-rule that has no block', () => {
     fixture({ 'src/styles/x.css': '@media (min-width: 40em);\n' });
     expect(rules(lint())).toContain('malformed-css');
+  });
+
+  it.each([
+    ['@property', '.x { @property --foo: padding: 7px; }'],
+    ['@viewport', '.x { @viewport padding: 7px; }'],
+    ['@page', '.x { @page margin: 7px; }'],
+  ])('rejects %s nested where a declaration belongs — the door around the old registry', (_n, css) => {
+    // These are REAL at-rules with real names, so a name check passes them, and an earlier
+    // revision listed the at-rules that require a block and simply did not include them. Both
+    // swallow the declaration that follows exactly as `@@@` did.
+    fixture({ 'src/styles/x.css': css });
+    expect(rules(lint())).toContain('malformed-css');
+  });
+
+  it('rejects an at-rule that does not exist yet — the check fails CLOSED on the unanticipated', () => {
+    // This is the property the inversion buys, and the reason the registry is an allowlist.
+    // A denylist of block-requiring at-rules would pass this silently forever.
+    fixture({ 'src/styles/x.css': '.x { @some-future-at-rule padding: 7px; }\n' });
+    expect(rules(lint())).toContain('malformed-css');
+  });
+
+  it('rejects even a real nesting construct that is not on the small allowlist', () => {
+    // `@starting-style` is legitimate CSS and legitimately nestable. It is still rejected,
+    // because the allowlist names what this design system uses, not everything that exists.
+    // Adding it is a reviewed source change — a false positive a human resolves, which is the
+    // correct trade for never passing an unknown one.
+    fixture({ 'src/styles/x.css': '.x { @starting-style { opacity: 0; } }\n' });
+    expect(rules(lint())).toContain('malformed-css');
+  });
+
+  it.each([
+    ['@media', '.x { @media (min-width: 40em) { color: var(--a); } }'],
+    ['@supports', '.x { @supports (display: grid) { display: grid; } }'],
+    ['@container', '.x { @container (min-width: 20em) { display: grid; } }'],
+  ])('permits %s nested inside a style rule', (_n, css) => {
+    fixture({ 'src/styles/x.css': css });
+    expectClean(lint());
   });
 
   it('permits the at-rules the design system actually uses', () => {
@@ -355,6 +397,29 @@ describe('dimension literals', () => {
   it('rejects a token-shaped excuse that is not a real reason', () => {
     fixture({ 'src/styles/x.css': '.x { /* dimension-literal: ok */\n  padding: 3px; }\n' });
     expect(rules(lint())).toContain('dimension-literal');
+  });
+
+  it.each(['7PX', '7Px', '7pX'])('matches %s — CSS units are case-insensitive', (value) => {
+    fixture({ 'src/styles/x.css': `.x { padding: ${value}; }\n` });
+    expect(rules(lint())).toContain('dimension-literal');
+  });
+
+  it('scans at-rule PARAMS, not only declarations', () => {
+    // A breakpoint is a px literal like any other, and it lived outside the rule's reach until
+    // a reviewer pointed at it.
+    fixture({ 'src/styles/x.css': '@media (min-width: 777px) { .x { display: none; } }\n' });
+    expect(rules(lint())).toContain('dimension-literal');
+  });
+
+  it('permits a breakpoint that carries a reason — it genuinely cannot be a token', () => {
+    // `var()` does not resolve inside a media condition, so this literal is unavoidable. The
+    // escape is the same one every optical value uses: say why, next to the value.
+    fixture({
+      'src/styles/x.css':
+        '/* dimension-literal: the width below which the rail becomes a drawer */\n'
+        + '@media (min-width: 777px) { .x { display: none; } }\n',
+    });
+    expectClean(lint());
   });
 
   it('checks px only — rem, %, and unitless values are a documented non-goal', () => {

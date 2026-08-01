@@ -293,11 +293,14 @@ rejected outright by the lint, in every file including the token layer.
 - a hex, `rgb()`, `hsl()`, `hwb()`, `lab()`, `oklch()` or `color()` literal — and, in CSS and
   markup, a CSS **named** colour — anywhere outside the token layer;
 - a font-family literal outside the token layer, **including one hidden in a custom property**;
-- a raw `px` dimension outside the token layer, unless the declaration carries an inline
-  `/* dimension-literal: … */` reason — control geometry lives in the token layer with the rest
-  of the design system's constants, and a genuinely optical value has to say so where it sits;
-- **malformed CSS** — an unknown at-rule, a block-requiring at-rule with no block, or a property
-  name that is not a valid ident;
+- a raw `px` dimension outside the token layer — in a declaration **or in an at-rule's params**,
+  matched case-insensitively — unless it carries an inline `/* dimension-literal: … */` reason.
+  Control geometry lives in the token layer with the rest of the design system's constants, and
+  a genuinely optical value (or a breakpoint, which cannot be a token because `var()` does not
+  resolve inside a media condition) has to say so where it sits;
+- **malformed CSS** — an unknown at-rule, an at-rule sitting where a declaration belongs, an
+  at-rule with no block outside the small blockless allowlist, or a property name that is not a
+  valid ident;
 - `el.style.x = …`, `style.setProperty(…)`, `cssText = …`, `setAttribute('style', …)` and
   `dangerouslySetInnerHTML` — the JavaScript routes to the same holes;
 - `forced-color-adjust: none`.
@@ -313,9 +316,23 @@ are all errors. An unparseable file is not evidence of compliance.
 `@@` as an at-rule *name* with `display: flex` as its *params*, so there was no parse error and
 the fail-closed path was never engaged — and the swallowed declaration was never walked as a
 declaration. Measured cost of a swallow: the font, dimension and forced-colours rules all walk
-declarations, so all three go blind; the colour rule survives only because at-rule params are
-separately scanned. The `malformed-css` rule closes that hole. It does **not** make this a CSS
-validator — a well-formed but wrong declaration (`color: notacolour`) still passes.
+declarations. Measured after at-rule params gained a px scan: the colour and dimension rules
+survive a swallow, because params are scanned for both; the font and forced-colours rules still
+go blind. `malformed-css` reports the *shape* regardless of what was swallowed, which is why it
+is the rule that matters here. It does **not** make this a CSS validator — a well-formed but
+wrong declaration (`color: notacolour`) still passes.
+
+**Its registries are allowlists, on purpose.** An earlier revision listed the at-rules that
+*require* a block; `@property` and `@viewport` were not on it and walked straight through,
+swallowing declarations exactly as `@@@` did. Extending that list would have fixed two cases and
+left the next at-rule CSS gains to re-open the hole silently. So the check is inverted: inside a
+style rule a declaration is expected and an at-rule is the anomaly, so only `@media`, `@supports`
+and `@container` may nest, and only `@charset`, `@import`, `@namespace` and `@layer` may be
+blockless. Anything else — including an at-rule that does not exist yet, and including real CSS
+like a nested `@starting-style` — fails. That is a false positive a reviewer resolves with a
+source change, which is the right trade for a rule whose whole purpose is catching what nobody
+anticipated. **Enumeration was the failure mode three times in this item; where a check can be
+inverted so the unanticipated case fails rather than passes, it is.**
 
 **What it cannot do**, stated plainly so a green run is not mistaken for a proof:
 
