@@ -1,0 +1,38 @@
+# Aperture — build pipeline configuration
+#
+# This file is read by the constellation build pipeline. It contains NO credentials:
+# mirror authentication is a runtime credential resolved through the secret manager,
+# never embedded here.
+
+# --- git-public mirror engine (Stage 7d) ---
+# mirror_ready gates WHICH repos mirror. For a flagged repo the mirror is MANDATORY
+# and runs after EVERY merge, immediately following the post-merge gate.
+# The public mirror receives a PII-swept derivative with its own lineage — never
+# internal main. A non-fast-forward result is surfaced as needs_operator_rebaseline
+# and left for the operator. It is NEVER force-resolved.
+mirror_ready: true
+github_remote: https://github.com/moosenet-io/aperture.git
+
+# --- documentation engine ---
+# Capstone-gated. docgen_run fires ONCE, at the end of the Epic Review capstone, and
+# only on an APPROVE verdict. It is NOT wired to any per-merge step.
+# Stage 7c's per-merge actions remain the in-repo README check and the Atlas KG refresh.
+docgen:
+  capstone_only: true
+  targets:
+    - readme
+    - wiki
+
+# --- Atlas knowledge graph (Stage 7c, per merge) ---
+# Refreshed incrementally on every merge so the graph the next task grounds against
+# is never stale. Non-blocking: a failure is logged, never reverts a merge.
+knowledge_graph:
+  project_id: APTR
+  incremental: true
+
+# --- Plane tracking ---
+# Every work item for this repo lives in the APTR project and is created, transitioned,
+# and closed exclusively through the sanctioned Plane tool.
+plane:
+  project: APTR
+  prefix: APTR
