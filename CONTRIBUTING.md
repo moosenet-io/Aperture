@@ -144,6 +144,28 @@ their view. A finding disproven in the tree is not a gate — say so, and show w
 Equally: an infrastructure artifact such as a reviewer timeout is not a verdict. It is re-run,
 never recorded as a pass and never allowed to deadlock a merge.
 
+### If you edit CODEOWNERS, verify the owner is real
+
+[CODEOWNERS](CODEOWNERS) fails **silently**. An owner that does not resolve produces no
+error, no warning, and no failed check — the rule assigns nobody, and the file goes on
+looking like governance while enforcing nothing. Two ways to write a file that is inert
+without appearing to be:
+
+- A **bare organisation handle** (`@org`). Not a valid owner on GitHub; never assigned. It
+  reads as the cautious, impersonal choice and is in fact the broken one.
+- A **guessed team name** (`@org/some-team`) that has not been created. Fails identically.
+
+An owner must be an individual account (`@name`) or a team that exists (`@org/team-name`).
+**Verify it rather than assuming it.** On the forge where reviews actually happen, the check
+is: put the account on a branch-protection push whitelist through the sanctioned forge tool.
+The forge validates the username and refuses an unknown one outright, so acceptance is
+positive proof the account resolves. Run it against a name you know is fake first, and
+confirm you get the refusal — a verification you have not seen fail proves nothing.
+
+Checking that the *patterns* match real paths is necessary but not sufficient; it cannot
+catch an invalid owner. Check both. The CODEOWNERS header records what has been verified,
+for which host, and what is still outstanding on the public mirror.
+
 ### Commits and branches
 
 One branch per work item, branched from a fresh `main`, named for the item. Commit messages

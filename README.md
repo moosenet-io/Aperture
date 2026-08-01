@@ -140,8 +140,10 @@ on inline styles, hardcoded colour literals, and stray style blocks.
 ## Contributing
 
 Every change — including a one-line fix — goes through the full pipeline: tracked work item,
-isolated worktree, implementation, test gate, independent review gate, merge, post-merge
-verification, documentation check, and public mirror. There is no informal path. `main` is
+isolated worktree, implementation, test gate, independent review gate, merge, and then the
+post-merge gate — one indivisible phase that verifies `main`, confirms the docs are current,
+publishes the public mirror, and refreshes the knowledge graph, in that order. There is no
+informal path. `main` is
 protected: force-push and deletion are blocked, and direct push is restricted to the
 merge-queue identity. Read **[CONTRIBUTING.md](CONTRIBUTING.md)** first, then
 [docs/PIPELINE.md](docs/PIPELINE.md); review ownership is in [CODEOWNERS](CODEOWNERS).
