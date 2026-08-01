@@ -130,6 +130,78 @@ describe('the SDK static gate', () => {
     expect(green.code, green.stderr).toBe(0);
   }, 60_000);
 
+  // The call-shaped check that shipped first missed every one of these, which is why the rule
+  // is now a REFERENCE rule. Each is a request constructed outside the transport, statically
+  // visible in source the gate reads.
+  // Each case asserts the DETAIL the gate prints, not merely that it printed the rule id: a
+  // test that checks only the id would still pass if the message it reports were nonsense.
+  const EVASIONS = {
+    alias: {
+      body: 'const request = fetch;\nexport const go = () => request("/v1/aperture/health");',
+      detail: 'may be named only in src/api/transport.ts',
+    },
+    'bracket access': {
+      body: 'export const go = () => globalThis["fetch"]("/v1/aperture/health");',
+      detail: 'by bracket access',
+    },
+    'computed access': {
+      body: 'const k = ["fe", "tch"].join("");\nexport const go = () => (globalThis as never)[k];',
+      detail: 'index a global by a literal name or not at all',
+    },
+    'property read': {
+      body: 'export const impl = globalThis.fetch;',
+      detail: 'may be named only in src/api/transport.ts',
+    },
+    'passed as a value': {
+      body: 'export const wrap = (f: unknown) => f;\nexport const go = wrap(fetch);',
+      detail: 'an alias constructs a request just as directly as a call does',
+    },
+    'event source': {
+      body: 'export const go = () => new EventSource("/v1/aperture/stream");',
+      detail: '`EventSource` is referenced here',
+    },
+  };
+
+  for (const [label, { body, detail }] of Object.entries(EVASIONS)) {
+    it(`goes RED on a request constructed by ${label}`, async () => {
+      let red;
+      try {
+        await mkdir(PROBE_DIR, { recursive: true });
+        await writeFile(path.join(PROBE_DIR, 'probe.ts'), `${body}\n`, 'utf8');
+        red = await runScript('assert-sdk-clean.mjs');
+      } finally {
+        await rm(PROBE_DIR, { recursive: true, force: true });
+      }
+      expect(red.code, red.stdout).toBe(1);
+      expect(red.stderr).toContain('request-site');
+      expect(red.stderr).toContain(detail);
+    }, 60_000);
+  }
+
+  it('does not flag a property KEY that merely shares the name', async () => {
+    // `{ fetch: impl }` and `readonly fetch?: FetchLike` are declarations, not references —
+    // and the transport's own injection point is exactly that shape, so a rule that flagged
+    // them would be unusable.
+    let result;
+    try {
+      await mkdir(PROBE_DIR, { recursive: true });
+      await writeFile(
+        path.join(PROBE_DIR, 'probe.ts'),
+        [
+          'interface Options { readonly fetch?: (u: string) => Promise<unknown>; }',
+          'export const make = (impl: (u: string) => Promise<unknown>): Options =>',
+          '  ({ fetch: impl });',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+      result = await runScript('assert-sdk-clean.mjs');
+    } finally {
+      await rm(PROBE_DIR, { recursive: true, force: true });
+    }
+    expect(result.code, result.stderr).toBe(0);
+  }, 60_000);
+
   it('goes RED on a model-id-shaped literal and on a literal bound to a credential name', async () => {
     let red;
     try {

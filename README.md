@@ -143,7 +143,12 @@ injected per target.
   `contracts/aperture-api-v1.yaml` by `openapi-typescript` at an exactly pinned version and
   **checked in**, so a build never needs the network or the generator to have run.
 - **`transport.ts`** — the injectable transport. It is the **only** file in the client that
-  constructs a request, and a gate over the parsed syntax tree proves it.
+  constructs a request. A gate over the parsed syntax tree enforces this as a **reference**
+  rule, not a call rule: `fetch`, `XMLHttpRequest`, `EventSource`, `WebSocket` and `sendBeacon`
+  may not be *named* elsewhere at all, so an alias or a bracket access fails just as a call
+  does. A computed access on a global object is reported as unresolvable rather than passed
+  over; a name assembled at runtime is the one case no static rule reaches, and it is flagged
+  rather than silently allowed.
 - **`client.ts`** — `call(transport, operationId, …)`. The compiler derives the method, path,
   parameters, request body, and success body from the generated types, so there is no
   hand-written second copy of the contract to drift.
@@ -169,11 +174,19 @@ Error and retry behaviour, stated exactly:
   response that is **not** conforming problem details becomes `ApertureMalformedResponseError`
   — no `Problem` is synthesized, because inventing a contract error URN for a body that never
   carried one would put a fabricated error identity in front of a caller switching on identity.
-- Retries happen on **idempotent verbs only** (`GET`, `HEAD`, `OPTIONS`, `PUT`, `DELETE`,
-  `TRACE`), with full-jitter exponential backoff and a capped attempt count. A `POST` is not
-  retried even when it carries an `Idempotency-Key`; a caller that knows the route implements
-  the dedupe store opts in per request. `Retry-After` is honoured and never shortened — if it
-  exceeds the delay cap the transport gives up rather than retrying early.
+- **Which verbs.** Automatically, idempotent ones only (`GET`, `HEAD`, `OPTIONS`, `PUT`,
+  `DELETE`, `TRACE`); a `POST` is never retried automatically, even carrying an
+  `Idempotency-Key`. That restriction governs the **default** decision: an explicit
+  `retry: true` on a request overrides it, which is how a caller that knows the route
+  implements the dedupe store opts in. `retry: false` opts out.
+- **Which statuses.** 408, 502 and 504 are retried on the transport's own full-jitter
+  exponential backoff. **429 and 503 are retried only when the server supplies a usable
+  `Retry-After`** — a server that declined to name an interval has not asked to be retried at a
+  time of the client's choosing, and guessing one is how a thundering herd starts. Nothing else
+  is ever retried, including 500 and including under an explicit `retry: true`. `Retry-After` is
+  honoured and never shortened; if it exceeds the delay cap the transport gives up rather than
+  retrying early. A table-driven test asserts the attempt count for every status in the policy,
+  with and without the header, so the stated policy and the code cannot drift apart.
 - A 401 on the event stream is normalized like any other response, so it surfaces as a typed
   auth error at connect and at every reconnect. **The SDK does not parse SSE frames**, so an
   authorization failure delivered as an event *inside* an already-200 stream body is not

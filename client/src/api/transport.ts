@@ -145,9 +145,17 @@ export interface RequestOptions {
   readonly ifMatch?: string | undefined;
   readonly signal?: AbortSignal | undefined;
   /**
-   * Override the retry decision. Omitted, the transport retries idempotent methods only.
-   * Setting it `true` on a non-idempotent method is the caller asserting that the route's
-   * idempotency key makes the replay safe; the transport does not assume that on its own.
+   * Override the retry decision for this request.
+   *
+   * The idempotent-verbs restriction governs the transport's AUTOMATIC decision — what it does
+   * when the caller says nothing. Setting this `true` is an explicit per-request opt-in that
+   * OVERRIDES that restriction, including on `POST` and `PATCH`: the caller is asserting that
+   * the route's `Idempotency-Key` dedupe makes a replay safe. The transport cannot verify that
+   * assertion and does not make it on the caller's behalf. Setting it `false` disables retrying
+   * for a verb that would otherwise be retried.
+   *
+   * The status policy is NOT overridable: only the statuses named in the two retryable sets are
+   * ever retried, whatever this is set to.
    */
   readonly retry?: boolean | undefined;
   /** Expected response media type. Defaults to `application/json`. */
@@ -198,24 +206,41 @@ export interface Transport {
 }
 
 /**
- * Methods that may be retried on a transport failure.
+ * Methods the transport retries AUTOMATICALLY — that is, when the caller expresses no
+ * preference through `RequestOptions.retry`.
  *
- * POST and PATCH are absent and are NOT retried by default even when carrying an
+ * POST and PATCH are absent and are never retried automatically, even when carrying an
  * `Idempotency-Key`. The key makes a replay safe SERVER-side, but the transport cannot know
  * that the route it is calling implements the dedupe store, and a replayed create against a
- * route that does not is a duplicate message. A caller that knows the route does may opt in
- * per request with `retry: true`.
+ * route that does not is a duplicate message.
+ *
+ * An explicit `retry: true` overrides this set, deliberately and per request — see the field's
+ * documentation. So "idempotent verbs only" describes the DEFAULT, not an invariant the caller
+ * cannot lift, and it is stated that way everywhere rather than as an absolute.
  */
 const IDEMPOTENT_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE', 'TRACE']);
 
 /**
- * Statuses worth another attempt.
+ * Statuses retried on the transport's own initiative, with a jittered backoff it chooses.
  *
  * 500 (`internal`) is deliberately absent: it signals a fault the same request will hit again,
- * and retrying it is how a struggling backend gets a retry storm on top of its outage. 429 and
- * 503 are retried only in company with a `Retry-After` the transport actually honours.
+ * and retrying it is how a struggling backend gets a retry storm on top of its outage.
  */
-const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([408, 429, 502, 503, 504]);
+const RETRYABLE_WITH_OWN_BACKOFF: ReadonlySet<number> = new Set([408, 502, 504]);
+
+/**
+ * Statuses retried ONLY when the server supplies a usable `Retry-After`.
+ *
+ * 429 and 503 are the server saying "not now" — and, when it wants to be retried, saying when.
+ * A server that declines to name an interval has not asked to be retried at a time of the
+ * client's choosing, and guessing a backoff on its behalf is how a struggling backend acquires
+ * a thundering herd. So without a usable `Retry-After` these are NOT retried; the caller gets
+ * the typed `rate-limited` / `capability-unavailable` error and decides.
+ *
+ * This is the whole policy, not a narrowing of a broader one stated elsewhere: the two sets
+ * above are the complete list of statuses this transport will ever retry.
+ */
+const RETRYABLE_WITH_SERVER_INTERVAL: ReadonlySet<number> = new Set([429, 503]);
 
 const PROBLEM_MEDIA_TYPE = 'application/problem+json';
 
@@ -537,20 +562,21 @@ export function createTransport(options: TransportOptions): Transport {
         };
       }
 
-      const retryable = RETRYABLE_STATUSES.has(response.status);
-      if (retryable && attempt < maxAttempts) {
+      if (attempt < maxAttempts) {
         const retryAfter = parseRetryAfterSeconds(response.headers.get('Retry-After'));
-        if (retryAfter === null) {
-          // No usable Retry-After: 429 and 503 are the server asking for a specific pause, so
-          // without one they are not retried. The rest back off.
-          if (response.status !== 429 && response.status !== 503) {
-            await sleep(backoffMs(attempt), signal);
-            continue;
-          }
-        } else {
+
+        if (retryAfter !== null && RETRYABLE_WITH_SERVER_INTERVAL.has(response.status)) {
           const waitMs = retryAfter * 1_000;
           // Never wait less than the server asked. If it asked for longer than the cap, give up
           // and let the caller decide, rather than retrying early.
+          if (waitMs <= retryPolicy.maxDelayMs) {
+            await sleep(waitMs, signal);
+            continue;
+          }
+        } else if (RETRYABLE_WITH_OWN_BACKOFF.has(response.status)) {
+          // A usable Retry-After is honoured here too when the server sends one; otherwise the
+          // transport chooses a jittered backoff, which for these statuses it is entitled to do.
+          const waitMs = retryAfter === null ? backoffMs(attempt) : retryAfter * 1_000;
           if (waitMs <= retryPolicy.maxDelayMs) {
             await sleep(waitMs, signal);
             continue;

@@ -387,6 +387,39 @@ describe('retries — idempotent verbs only, capped, jittered', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('lets an explicit opt-in override the verb restriction, which governs only the default', async () => {
+    // The restriction is on the AUTOMATIC decision. `retry: true` is the caller asserting that
+    // the route's idempotency-key dedupe makes a replay safe — an assertion the transport does
+    // not make on its own and cannot verify.
+    for (const method of ['POST', 'PATCH'] as const) {
+      const { transport, calls } = webTransport([
+        problemResponse('urn:aperture:error:upstream-error', 502),
+        jsonResponse({}),
+      ]);
+      await transport.request({ method, path: '/threads/t1', body: {}, retry: true });
+      expect(calls, method).toHaveLength(2);
+    }
+  });
+
+  it('lets an explicit opt-out disable retrying for a verb that would otherwise retry', async () => {
+    const { transport, calls } = webTransport([
+      problemResponse('urn:aperture:error:upstream-error', 502),
+      jsonResponse({}),
+    ]);
+    await expect(transport.request({ method: 'GET', path: '/threads', retry: false })).rejects.toThrow();
+    expect(calls).toHaveLength(1);
+  });
+
+  it('never retries a status outside the policy, even with an explicit opt-in', async () => {
+    const { transport, calls } = webTransport([
+      problemResponse('urn:aperture:error:internal', 500),
+      jsonResponse({}),
+    ]);
+    await expect(transport.request({ method: 'POST', path: '/threads', body: {}, retry: true }))
+      .rejects.toThrow();
+    expect(calls).toHaveLength(1);
+  });
+
   it('retries a POST when the caller explicitly opts in, replaying the same key', async () => {
     const { transport, calls } = webTransport([
       problemResponse('urn:aperture:error:upstream-error', 502),
@@ -469,15 +502,54 @@ describe('retries — idempotent verbs only, capped, jittered', () => {
     expect(calls).toHaveLength(1);
   });
 
-  it('does not retry a 429 or 503 that carries no usable Retry-After', async () => {
-    for (const status of [429, 503]) {
-      const { transport, calls } = webTransport([
-        problemResponse('urn:aperture:error:rate-limited', status),
+  // The whole status policy in one table, so the stated policy and the implementation cannot
+  // drift apart again: a status is either retried on the transport's own backoff, retried only
+  // when the server names an interval, or never retried.
+  const STATUS_POLICY: Array<{ status: number; withoutRetryAfter: number; withRetryAfter: number }> = [
+    { status: 408, withoutRetryAfter: 2, withRetryAfter: 2 },
+    { status: 502, withoutRetryAfter: 2, withRetryAfter: 2 },
+    { status: 504, withoutRetryAfter: 2, withRetryAfter: 2 },
+    // 429 and 503 are retried ONLY on a server-supplied interval — guessing a backoff against a
+    // server that declined to name one is how a thundering herd starts.
+    { status: 429, withoutRetryAfter: 1, withRetryAfter: 2 },
+    { status: 503, withoutRetryAfter: 1, withRetryAfter: 2 },
+    // Never retried, with or without a Retry-After.
+    { status: 400, withoutRetryAfter: 1, withRetryAfter: 1 },
+    { status: 401, withoutRetryAfter: 1, withRetryAfter: 1 },
+    { status: 409, withoutRetryAfter: 1, withRetryAfter: 1 },
+    { status: 500, withoutRetryAfter: 1, withRetryAfter: 1 },
+  ];
+
+  it.each(STATUS_POLICY)(
+    'attempts a $status $withoutRetryAfter time(s) without Retry-After and $withRetryAfter with it',
+    async ({ status, withoutRetryAfter, withRetryAfter }) => {
+      const bare = webTransport([
+        problemResponse('urn:aperture:error:upstream-error', status),
         jsonResponse({}),
       ]);
-      await expect(transport.request({ method: 'GET', path: '/threads' })).rejects.toThrow();
-      expect(calls).toHaveLength(1);
-    }
+      await bare.transport.request({ method: 'GET', path: '/threads' }).catch(() => undefined);
+      expect(bare.calls, `status ${status} without Retry-After`).toHaveLength(withoutRetryAfter);
+
+      const withHeader = webTransport([
+        problemResponse('urn:aperture:error:upstream-error', status, {}, { 'Retry-After': '1' }),
+        jsonResponse({}),
+      ]);
+      await withHeader.transport.request({ method: 'GET', path: '/threads' }).catch(() => undefined);
+      expect(withHeader.calls, `status ${status} with Retry-After`).toHaveLength(withRetryAfter);
+    },
+  );
+
+  it('honours a Retry-After on a status it would otherwise back off itself', async () => {
+    const waits: number[] = [];
+    const { transport } = webTransport(
+      [
+        problemResponse('urn:aperture:error:upstream-error', 502, {}, { 'Retry-After': '3' }),
+        jsonResponse({}),
+      ],
+      { sleep: async (ms: number) => { waits.push(ms); } },
+    );
+    await transport.request({ method: 'GET', path: '/threads' });
+    expect(waits).toEqual([3000]);
   });
 
   it('retries a network failure on an idempotent verb and reports it typed when it persists', async () => {

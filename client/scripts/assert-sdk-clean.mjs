@@ -20,7 +20,12 @@
 //      first of those three and only the first: it is not an endpoint, it is the web target's
 //      same-origin-relative mode.
 //   4. EXACTLY ONE REQUEST CONSTRUCTION SITE: `fetch`, `XMLHttpRequest`, `EventSource`,
-//      `WebSocket`, and `navigator.sendBeacon` may be CALLED only from `src/api/transport.ts`.
+//      `WebSocket`, and `sendBeacon` may be NAMED — not merely called — only in
+//      `src/api/transport.ts`. A reference rule rather than a call rule, because an alias
+//      (`const request = fetch`) and a bracket access (`globalThis['fetch']`) construct a
+//      request just as directly as a call does, and a call-shaped check misses both. A computed
+//      access on a global object is reported as unresolvable rather than passed over, so the one
+//      genuinely unreachable case — a name assembled at runtime — is never silently allowed.
 //
 // ── WHAT THIS GATE IS NOT ───────────────────────────────────────────────────────────────────
 //
@@ -247,29 +252,101 @@ function checkBaseUrlRequired(file, source, failures) {
   return { sawInterface, sawMember };
 }
 
-/** Request constructors may be CALLED only from the transport. */
+/**
+ * Request constructors may not be REFERENCED at all outside the transport.
+ *
+ * An earlier revision matched only direct calls — `fetch(...)`, `globalThis.fetch(...)`. That
+ * is not enough to support a claim of "exactly one request-construction site": an alias
+ * (`const request = fetch; request(url)`), a bracketed access (`globalThis['fetch'](url)`), or
+ * a computed access all construct a request outside this file while evading a call-shaped
+ * check, and all of them are plainly visible in source the gate already reads.
+ *
+ * So the rule is a REFERENCE rule, not a call rule, and it is transitively closed by
+ * construction: an alias cannot be created without naming the constructor once, and naming it
+ * once is the failure. What is deliberately NOT flagged is the declaration of a member that
+ * merely shares the name — `{ fetch: injectedImpl }` and `readonly fetch?: FetchLike` are
+ * property keys, not references to a global, and the transport's own injection point is exactly
+ * that shape.
+ *
+ * The one case that stays out of reach of any static rule is a name assembled at runtime
+ * (`globalThis[['fe','tch'].join('')]`). A computed access on a global object is therefore
+ * flagged as UNRESOLVABLE rather than passed over, so the gate never stays silent about an
+ * access it cannot evaluate.
+ */
+const GLOBAL_OBJECTS = new Set(['globalThis', 'window', 'self', 'navigator']);
+
+/**
+ * Look through the wrappers a cast or a parenthesis puts in the way — `(globalThis as never)[k]`
+ * is the same access as `globalThis[k]`, and a check that only recognised the bare identifier
+ * would be evaded by a type assertion, which is not a meaningful difference.
+ */
+function isGlobalObjectReference(node) {
+  let current = node;
+  while (
+    ts.isParenthesizedExpression(current) || ts.isAsExpression(current)
+    || ts.isNonNullExpression(current) || ts.isTypeAssertionExpression(current)
+    || ts.isSatisfiesExpression(current)
+  ) {
+    current = current.expression;
+  }
+  return ts.isIdentifier(current) && GLOBAL_OBJECTS.has(current.text);
+}
+
 function checkSingleRequestSite(file, source, failures) {
-  const permitted = path.resolve(file) === TRANSPORT_FILE;
-  const nameOf = (expression) => {
-    if (ts.isIdentifier(expression)) return expression.text;
-    if (ts.isPropertyAccessExpression(expression)) return expression.name.text;
-    return null;
+  if (path.resolve(file) === TRANSPORT_FILE) return;
+
+  const record = (node, detail) => failures.push({
+    file, line: lineOf(source, node), rule: 'request-site', detail,
+  });
+
+  /** A property key being DECLARED, rather than a reference to something named that. */
+  const isDeclaredKey = (id) => {
+    const parent = id.parent;
+    if (parent === undefined) return false;
+    if (ts.isPropertyAssignment(parent) && parent.name === id) return true;
+    if (
+      (ts.isPropertySignature(parent) || ts.isPropertyDeclaration(parent)
+        || ts.isMethodSignature(parent) || ts.isMethodDeclaration(parent)
+        || ts.isGetAccessorDeclaration(parent) || ts.isSetAccessorDeclaration(parent)
+        || ts.isEnumMember(parent) || ts.isParameter(parent))
+      && parent.name === id
+    ) return true;
+    return false;
   };
-  const visit = (node) => {
-    if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
-      const name = nameOf(node.expression);
-      if (name !== null && REQUEST_CONSTRUCTORS.has(name) && !permitted) {
-        failures.push({
-          file,
-          line: lineOf(source, node),
-          rule: 'request-site',
-          detail: `\`${name}\` is invoked here; the transport is the only permitted request site`,
-        });
+
+  const visit = (node, inType) => {
+    const nowInType = inType || ts.isTypeNode(node);
+
+    if (!nowInType && ts.isIdentifier(node) && REQUEST_CONSTRUCTORS.has(node.text)
+      && !isDeclaredKey(node)) {
+      record(
+        node,
+        `\`${node.text}\` is referenced here; it may be named only in src/api/transport.ts, `
+        + 'because an alias constructs a request just as directly as a call does',
+      );
+    }
+
+    if (!nowInType && ts.isElementAccessExpression(node)) {
+      const argument = node.argumentExpression;
+      if ((ts.isStringLiteral(argument) || ts.isNoSubstitutionTemplateLiteral(argument))
+        && REQUEST_CONSTRUCTORS.has(argument.text)) {
+        record(node, `\`["${argument.text}"]\` reaches a request constructor by bracket access`);
+      } else if (
+        !ts.isStringLiteral(argument) && !ts.isNoSubstitutionTemplateLiteral(argument)
+        && !ts.isNumericLiteral(argument)
+        && isGlobalObjectReference(node.expression)
+      ) {
+        record(
+          node,
+          'a computed property access on a global object cannot be shown not to be a '
+          + 'request constructor; index a global by a literal name or not at all',
+        );
       }
     }
-    ts.forEachChild(node, visit);
+
+    ts.forEachChild(node, (child) => visit(child, nowInType));
   };
-  ts.forEachChild(source, visit);
+  ts.forEachChild(source, (child) => visit(child, false));
 }
 
 export async function runGate() {
