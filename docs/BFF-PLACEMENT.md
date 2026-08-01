@@ -58,9 +58,11 @@ problem-details form. The `auth`, `threads`, `stream`, `attachments`, `modules`,
 ### The properties it holds, and how
 
 - **One door.** Every backend capability is reached through the agent core's in-process
-  `terminus-client` wrapper. The BFF constructs no HTTP client against any service URL. The handle
-  is a private field with an accessor visible only inside the module, so the "exactly one
-  transport" property is enforced by the Rust compiler (D8), not by a lint in another language.
+  `terminus-client` wrapper. The handle is a private field with an accessor visible only inside
+  the module, so the "exactly one transport" property is enforced by the Rust compiler (D8), not
+  by a lint in another language — and the feature adds no runtime dependency, so no new
+  HTTP-client crate enters the binary with it. A source scan additionally rejects a list of known
+  client spellings; that scan is a regression tripwire, not the proof (see "Evidence classes").
 - **Named proxies only.** No model id, engine name, backend tag or size suffix appears in the
   module.
 - **No secrets of its own.** The module performs no environment read of any kind; the door is
@@ -83,19 +85,54 @@ is a property of Rust code that lives in the agent-core repository. Without this
 Aperture-side PR merges green while proving nothing, which is a defect that has already happened
 once on this item.
 
-**This PR proves exactly one criterion: the documentation one.** Everything else is proven by the
+**This PR is intended to prove exactly one criterion: the documentation one — and as of this
+commit it does not yet prove even that (see criterion 6).** Everything else is proven by the
 agent-core PR, which merges **first**.
 
-| # | Acceptance criterion | Repo whose gate proves it | Gate | Evidence |
+### Evidence classes — read this before the table
+
+A table that says "gated" where it means "ran on a laptop" is the same drift this whole item
+exists to prevent, so every row below is labelled with **how** its evidence was obtained, not just
+what it claims:
+
+| Class | Meaning |
+|---|---|
+| **GATED** | Proved by the fleet compiler tool — pinned toolchain, capped scope, single build door. This is the only class that is evidence in the process's own sense. |
+| **LOCAL** | Proved by a run on the developer host. Real output, real pass/fail, but not the sanctioned gate: not the pinned toolchain, not reproducible on demand by a reviewer, and not recorded by the build system. |
+| **STRUCTURAL** | Proved by the language or the manifest rather than by a run — a visibility rule the compiler enforces, or a dependency the manifest does not contain. Strongest where available, because it holds for code nobody has written yet. |
+| **TRIPWIRE** | A lexical scan over a named token list. It catches the mistake it enumerates and **nothing else**. It is not proof of a general property; it is a regression alarm for a specific known-bad spelling. |
+| **REVIEW** | Proved, if at all, by a human reading it. |
+
+Two facts constrain what could be GATED at all, and both are recorded rather than papered over:
+
+- **The compiler tool has no cargo-feature argument** (`TERM #593`). Its inputs are module, ref,
+  mode, profile, target, bin, host, source_dir, request_id — nothing selects a feature. It is
+  therefore **structurally incapable** of exercising the `aperture` feature, and every
+  feature-on result below is LOCAL by necessity, not by shortcut. This blocks every
+  feature-gated item in the fleet the same way.
+- **The compiler gate is currently red for an infrastructure reason** unrelated to this change:
+  runs die in dependency compilation with `sccache: Failed to create temp dir` (exit 254), one
+  build's scratch directory being removed while another uses it as `TMPDIR`. Reproduced on
+  `main` as well as on this branch, so it is an infrastructure artifact, not a verdict.
+
+The two compiler runs that **did** complete, on branch head `455bc7b`, ran the **default-feature**
+suite: 4753 passed, 4 failed. The four are two pre-existing tests counted across two test binaries
+— `engram::resurfacing::tests::ledger_save_failure_suppresses_callbacks` and
+`presence::tests::tick_budget_persist_failure_skips_send_no_consume` — both unrelated to Aperture,
+both passing locally, and with the feature off this change compiles no new code at all.
+
+### The table
+
+| # | Acceptance criterion | Proving repo | Class | Evidence, and its exact limit |
 |---|---|---|---|---|
-| 1 | The BFF module compiles with and without the `aperture` feature | agent-core | Rust build, both feature states | Feature-on and feature-off builds of `lumina-core` complete with no warning from the module. The feature-off binary contains **zero** occurrences of the route prefix; the feature-on binary contains it. |
-| 2 | All backend access routes through the tool-door client; zero direct service HTTP clients | agent-core | Rust test + compiler-enforced visibility | The door is a private field with a module-scoped accessor, so a caller outside the module cannot reach it at all; a source-scan Rust test fails the build if any HTTP client type is constructed in the module. |
-| 3 | Secrets accessed via the secret manager, not environment reads | agent-core | Rust test + grep | A source-scan test asserts zero direct environment reads of any kind in the module — which subsumes the token-, key-, password- and secret-shaped names the rule is about. The module reads no secret at all. |
-| 4 | Inference addressed by named proxy only; no model, engine or backend name in code | agent-core | Rust test + grep | A source-scan test fails on any model id, engine name, backend tag or size suffix in the module. |
-| 5 | An unreachable door degrades to `unavailable`, never a crash | agent-core | Rust unit + router tests | State construction with no door is infallible and reports the capability `unavailable` with a reason; the readiness route answers `503` problem details naming the capability; the router builds with no door present. |
-| 6 | **`docs/BFF-PLACEMENT.md` carries the gate-attribution table and links the merged agent-core PR id** | **Aperture (this repo)** | **Documentation review** | **This file.** The link is in the section below and in the PR body. |
-| 7 | No hardcoded infrastructure value in new/modified code; all existing tests still pass | agent-core | Rust test + grep + full test-gate run | A source-scan test rejects a literal address, scheme, or filesystem path in the shipping half of every module file; a router test asserts no response body carries one. The full agent-core suite passes. |
-| 8 | README documents the BFF and its feature flag | agent-core | Documentation review of the agent-core PR | The agent-core `README.md` gains an "Aperture BFF" section in the same change set. |
+| 1 | The BFF module compiles with and without the `aperture` feature | agent-core | Feature-off: **GATED** (partially) + **LOCAL**. Feature-on: **LOCAL only** | **GATED:** the compiler tool built and ran the default-feature (feature-**off**) suite on branch head `455bc7b`, with the four pre-existing failures noted above — this is the only part of criterion 1 a gate has touched. **LOCAL:** feature-on and feature-off builds both complete with no warning from the module; the feature-off binary contains **zero** occurrences of the route prefix and the feature-on binary contains it. **Not gated, and why:** the compiler tool cannot select a cargo feature at all (`TERM #593`), so no gate can currently observe the feature-on state; the gate is additionally red for the `sccache` reason above. |
+| 2 | All backend access routes through the tool-door client; zero direct service HTTP clients | agent-core | **STRUCTURAL** (primary) + **TRIPWIRE** (secondary) | **Primary, compiler-enforced:** the egress handle is a **private field** on the module's state with an accessor visible only inside the module (`pub(in crate::aperture)`). No caller outside the module can reach it, and that holds for code not yet written. **Also structural:** the `aperture` feature adds **no runtime dependency** — the manifest change is the feature declaration plus one *dev*-dependency, so the module introduces no new HTTP-client crate to the shipped binary. **Secondary tripwire:** a source scan rejects a named list of client spellings. **Its limit, stated:** a name list is an enumeration. An alias, a re-export, a differently-named client, a raw socket, or a crate nobody thought of all pass it. It proves those specific spellings are absent — **not** that all backend access goes through the tool door. The structural evidence is what carries this criterion; the scan is a regression alarm. |
+| 3 | Secrets accessed via the secret manager, not environment reads | agent-core | **TRIPWIRE** + **REVIEW** | A source scan finds zero occurrences of the direct environment-read spellings anywhere in the module's shipping half, which subsumes the token-, key-, password- and secret-shaped names the rule is about. **Its limit:** the scan proves those spellings are absent; that the module reads no secret **at all** is a claim about its 4 files, established by reading them, not by the scan. |
+| 4 | Inference addressed by named proxy only; no model, engine or backend name in code | agent-core | **TRIPWIRE** | A source scan rejects a list of model ids, engine names, backend tags and size suffixes. **Its limit:** it catches the names on the list. A model name nobody enumerated would pass. The module currently issues no inference call at all, which is the substantive reason this holds. |
+| 5 | An unreachable door degrades to `unavailable`, never a crash | agent-core | **LOCAL** (behavioural tests) | State construction with no door is infallible and reports the capability `unavailable` with a reason; the readiness route answers `503` problem details naming the capability; the router builds with no door present. Exercised through the real router. **Not gated:** these tests live behind the `aperture` feature, which no gate can select (`TERM #593`). |
+| 6 | **`docs/BFF-PLACEMENT.md` carries the gate-attribution table and links the merged agent-core PR id** | **Aperture (this repo)** | **REVIEW** | **UNSATISFIED as of this commit.** The table is present; the **merged agent-core PR link is not** — see "The agent-core change this document describes" below, which carries a branch and a commit SHA and an explicit placeholder. A branch name and a commit SHA are **not** a merged-PR link. **This PR is not mergeable in this state**, by the rule in "Merge order" below. |
+| 7 | No hardcoded infrastructure value in new/modified code; all existing tests still pass | agent-core | **TRIPWIRE** + **LOCAL** | A source scan rejects a literal address, scheme, or filesystem path in the shipping half of every module file, and a behavioural test asserts no response body carries one. **The scan's limit:** it is a pattern list — a dotted quad, two URL schemes, two path prefixes. An internal hostname without a scheme, or a port on its own line, would pass it. The response-body assertion is the stronger half, because it tests what actually reaches a client. **"All existing tests still pass":** LOCAL for the feature-on suite; GATED for the default-feature suite modulo the four pre-existing failures. |
+| 8 | README documents the BFF and its feature flag | agent-core | **REVIEW** | The agent-core `README.md` gains an "Aperture BFF" section in the same change set. Nothing mechanical checks that prose is accurate; a reviewer does. |
 
 ### What this PR cannot prove — stated plainly
 
@@ -108,6 +145,9 @@ that nobody has to infer that from the table.
 Concretely, this repository's gate can check that this file exists, that it is well-formed, that
 it contains no infrastructure identifier, and that it names an agent-core commit. That is the
 whole of it.
+
+And it does **not** stretch to criterion 6 either, until the link below is filled in: a document
+that promises a link and carries a placeholder proves the promise, not the link.
 
 ### Merge order
 
@@ -122,8 +162,17 @@ whole of it.
 - Repository: the agent core (`lumina-constellation`), crate `lumina-core`
 - Branch: `APTR-05-aperture-bff`
 - Head commit: `8670bd1cbd6376bd34f7503e6ecff34451228ca6`
-- PR: *to be filled in with the merged PR id before this PR is merged — an unlinked PR is not
-  mergeable, per the rule above.*
+- Merged PR: **NOT YET LINKED — criterion 6 is UNSATISFIED and this PR is NOT MERGEABLE.**
+
+> **Blocking placeholder, deliberately left in.** The agent-core PR does not exist yet: that
+> branch has not been gated. The link is filled in **after** the agent-core PR merges, and only
+> then does criterion 6 become satisfied and this PR become mergeable. Replacing this block with
+> a branch name, a commit SHA, or an unmerged PR number does **not** satisfy it — the criterion
+> names a *merged* PR id, because the whole point of the merge order is that the behavioural
+> criteria are already proven when this document claims they are.
+>
+> A reviewer who finds this paragraph still present is looking at an unmergeable PR, and that is
+> the intended reading, not an oversight.
 
 ---
 
