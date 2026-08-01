@@ -404,6 +404,39 @@ describe('dimension literals', () => {
     expect(rules(lint())).toContain('dimension-literal');
   });
 
+  it.each(['1e3px', '1E3px', '1e+3px', '1e-3px', '1.5e3px', '.5e-3px', '+1e3px', '-1e3px'])(
+    'matches %s — CSS numbers take an exponent, and the matcher follows the grammar',
+    (value) => {
+      // Written against the CSS Syntax L3 <number-token> production rather than the examples
+      // to hand. `1e+3px` is the one worth naming: the previous matcher did not miss it
+      // cleanly, it matched the tail as `3px` and reported a garbled literal.
+      fixture({ 'src/styles/x.css': `.x { width: ${value}; }\n` });
+      expect(rules(lint()), value).toContain('dimension-literal');
+    },
+  );
+
+  it('matches an exponent px in an at-rule parameter too', () => {
+    fixture({ 'src/styles/x.css': '@media (min-width: 1e3px) { .x { display: none; } }\n' });
+    expect(rules(lint())).toContain('dimension-literal');
+  });
+
+  it('reports the WHOLE literal, not a fragment of it', () => {
+    // A garbled finding is worse than none: it sends a reader looking for a value that is not
+    // in the file. This pins the exact text reported.
+    fixture({ 'src/styles/x.css': '.x { width: 1e+3px; }\n' });
+    const found = lint().findings.filter((f) => f.rule === 'dimension-literal');
+    expect(found).toHaveLength(1);
+    expect(found[0].detail).toContain('1e+3px');
+  });
+
+  it.each(['0.5rem', '100%', '1fr', 'var(--pad-2px)', '12', 'calc(var(--a) * 2)'])(
+    'still ignores %s — the wider match must not have cost precision',
+    (value) => {
+      fixture({ 'src/styles/x.css': `.x { width: ${value}; }\n` });
+      expectClean(lint());
+    },
+  );
+
   it('scans at-rule PARAMS, not only declarations', () => {
     // A breakpoint is a px literal like any other, and it lived outside the rule's reach until
     // a reviewer pointed at it.

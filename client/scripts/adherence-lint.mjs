@@ -84,6 +84,13 @@
 //     and a rule over every unit would fire on `100%`, `1fr` and `line-height: 1.3` — noise
 //     that would get the rule switched off. A dimension smuggled in as `0.5rem` is therefore
 //     not detected.
+//   * CSS ESCAPES IN THE UNIT are not decoded. `7p\78` is a valid px dimension to a browser and
+//     is not matched here. Decoding CSS escapes is a lexer's job, and postcss hands us the raw
+//     value; this is the same frontier the colour rules stop at, and it is deliberate
+//     obfuscation rather than the accidental drift this lint exists to catch.
+//   * A px value PRODUCED by `calc()` from non-px operands — `calc(var(--x) * 2)` — is not a
+//     literal and is not detected. A literal INSIDE a calc() is (`calc(100% - 7px)` is caught),
+//     which is the case that actually occurs.
 //   * Other CSSOM routes to a stylesheet are NOT detected: `CSSStyleSheet.insertRule`,
 //     `document.adoptedStyleSheets`, and a `<style>` element obtained by any means other than a
 //     literal `createElement('style')` — an aliased tag name, for instance. `createElement` is
@@ -306,11 +313,22 @@ const VENDOR_KEYFRAMES = /^-(webkit|moz|ms|o)-keyframes$/;
 const VALID_PROPERTY_NAME = /^(--[A-Za-z0-9_-]+|-{0,2}[A-Za-z_][A-Za-z0-9_-]*)$/;
 
 /**
- * A px length. Negative and decimal values included; `0px` too — it should just be `0`. Matched
- * CASE-INSENSITIVELY: CSS units are case-insensitive, so `7PX` is a px literal, and a
- * case-sensitive pattern was a bypass a reviewer found rather than a limitation anyone chose.
+ * A px length, matched against the number syntax CSS actually defines rather than the one that
+ * comes to mind. This is the `<number-token>` production from CSS Syntax Level 3:
+ *
+ *     [+-]? ( digits | digits '.' digits | '.' digits ) ( [eE] [+-]? digits )?
+ *
+ * Matched CASE-INSENSITIVELY, because CSS units and the exponent marker both are.
+ *
+ * Two earlier revisions were written against examples instead of the grammar and each left a
+ * hole a reviewer found: a case-sensitive `px` let `7PX` through, and an exponent-less number
+ * let `1e3px` through — and worse, matched `1e+3px` as `3px`, reporting a garbled literal
+ * rather than missing cleanly. When a rule matches a SYNTAX, the grammar is the reference.
+ *
+ * Where the grammar is still larger than this handles, that is a documented non-goal, not an
+ * unnoticed gap — see the CSS-escapes and calc() entries under NON-GOALS.
  */
-const PX_LENGTH = /(?<![\w.-])-?\d*\.?\d+px(?![\w-])/gi;
+const PX_LENGTH = /(?<![\w.-])[+-]?(?:\d+\.\d+|\.\d+|\d+)(?:[eE][+-]?\d+)?px(?![\w-])/gi;
 
 /**
  * The inline escape for a genuinely optical dimension. Two accepted forms, and only two, so a

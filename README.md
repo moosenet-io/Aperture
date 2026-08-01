@@ -342,6 +342,9 @@ inverted so the unanticipated case fails rather than passes, it is.**
 - the dimension rule covers **`px` only**. `rem`, `em`, `%`, `ch`, `vh`, `fr` and unitless
   numbers are not checked: the design system's scale is expressed in px, and a rule over every
   unit would fire on `100%`, `1fr` and `line-height: 1.3` — noise that gets a rule switched off.
+  It matches the CSS Syntax L3 `<number-token>` grammar, so exponent forms (`1e3px`) and case
+  variants (`7PX`) are caught; a **CSS escape in the unit** (`7p\78`) and a px value *computed*
+  by `calc()` from non-px operands are not, and are documented as non-goals in the script.
 - a colour reaching the DOM through a **CSS custom property set at runtime** is not detected as
   a colour. The routes by which this app's own code could set one are closed by the
   programmatic-style rule, but a value handed to a third-party component's colour prop is not
