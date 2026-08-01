@@ -353,17 +353,41 @@ inverted so the unanticipated case fails rather than passes, it is.**
   a colour. The routes by which this app's own code could set one are closed by the
   programmatic-style rule, but a value handed to a third-party component's colour prop is not
   seen. (There is no such dependency today.)
-- CSS **named** colours are checked in CSS and markup, not in TypeScript strings — the
-  false-positive cost on ordinary prose is not worth it, and a bare name in TypeScript has no
-  route to the DOM the other rules do not already close.
+- CSS **named** colours are checked in CSS, in markup presentation attributes and in JSX
+  presentation attributes — not in ordinary TypeScript strings, where the false-positive cost on
+  prose is not worth it. An earlier revision claimed a named colour in TypeScript had "no route
+  to the DOM that another rule does not already close"; **that was false** — a JSX presentation
+  attribute was exactly such a route, and it is now covered. What remains uncovered is a value
+  passed to a third-party component's colour prop, and any value that is not a static string
+  literal (`fill={colour}`).
 - other CSSOM routes to a stylesheet (`insertRule`, `adoptedStyleSheets`, an aliased tag name)
   are not detected.
 - the HTML/SVG scanner is **partial** — a hand-written scanner, not a spec tokenizer. An
   attribute value containing `>` desynchronizes it and behaviour after that point is
   **unmodelled**. It deliberately does not skip comments: it errs toward the false alarm.
-- only a **presentation attribute** (`style`, `fill`, `stroke`, `stop-color`, …) is treated as a
-  CSS value. A colour-shaped string in an ordinary attribute — `class`, `title`, `data-*`, `id`
+- only a **presentation attribute** is treated as a CSS value — in markup *and* in JSX, from one
+  shared registry, so a `<circle fill="red" />` gets the same verdict in a `.tsx` file as in an
+  `.svg` one. A colour-shaped string in an ordinary attribute — `class`, `title`, `data-*`, `id`
   — is data and is not reported; lexing every attribute reported `class="red"` as a colour.
+
+  **That registry is bounded, and its edges are declared rather than chased.** It covers
+  `style`, `color`, `fill`, `stroke`, `stop-color`, `flood-color`, `lighting-color`,
+  `solid-color`, `background-color`, `border-color`, `outline-color`, `caret-color`,
+  `text-decoration`, `text-decoration-color`, `text-emphasis-color`, `column-rule-color` and
+  `bgcolor`. It is **not** the full SVG 2 presentation-attribute set, and three things follow
+  that are recorded, not hidden:
+  - **SVG animation attributes are not handled.** In `<animate attributeName="fill" from="red">`
+    the colour lives in `from`/`to`/`values`/`by`, and whether those hold a colour at all depends
+    on `attributeName` — target-aware resolution across elements, which is out of scope for a
+    source lint.
+  - **The registry is name-based, not element-aware**, so a listed attribute on an element where
+    it is not presentational (`<div fill="red">`) is reported anyway. That is a false positive;
+    the allowlist is the remedy. (`background`, the legacy HTML image-URL attribute, *was* in the
+    registry and has been removed — that one was removable without opening the element question.)
+  - The enforcing control for anything this misses is, as ever, the **runtime CSP**.
+
+  Each of those cases is pinned by a test that records the current behaviour and fails with an
+  instruction to widen the claim if it ever changes.
 - it scans **source**, so a dependency's stylesheet is out of scope; and it checks that a raw
   value is not used, not that the *right* token was chosen. Contrast and motion gating is a
   separate item.

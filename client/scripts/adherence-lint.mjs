@@ -127,10 +127,16 @@
 //     `programmatic-style` rule, but a value handed to a third-party component's colour prop
 //     — a charting library, say — is not seen. This client has no such dependency today; the
 //     honest statement is that the rule is not a general guarantee about custom properties.
-//   * CSS NAMED colours are checked in CSS and markup, NOT in TypeScript strings. `'salmon'`
-//     in a TS string is far more likely to be prose than a colour, and the false-positive tax
-//     would be paid on every string in the app. A named colour in TS has no route to the DOM
-//     that another rule does not already close — except the third-party-prop case above.
+//   * CSS NAMED colours are checked in CSS, in markup presentation attributes, and in JSX
+//     presentation attributes — NOT in ordinary TypeScript strings. `'salmon'` in a TS string is
+//     far more likely to be prose than a colour, and the false-positive tax would be paid on
+//     every string in the app.
+//     An earlier revision claimed a named colour in TS had "no route to the DOM that another
+//     rule does not already close". THAT WAS FALSE: a JSX presentation attribute
+//     (`<circle fill="red" />`) was exactly such a route, and a reviewer found it. It is now
+//     covered. The claim is narrowed to what is actually true: the remaining uncovered routes
+//     are a value passed to a third-party component's colour prop, and any value that is not a
+//     static string literal (`fill={colour}`) — neither of which a source lint can resolve.
 //   * The markup scanner is PARTIAL. It is a hand-written scanner, not a spec-compliant HTML
 //     tokenizer: it ends a tag at the next `>`, so an attribute value CONTAINING `>`
 //     desynchronizes it and behaviour after that point is UNMODELLED — a violation there may
@@ -338,22 +344,60 @@ const AT_RULES_ALLOWED_INSIDE_A_STYLE_RULE = new Set(['media', 'supports', 'cont
 const VENDOR_KEYFRAMES = /^-(webkit|moz|ms|o)-keyframes$/;
 
 /**
- * Attributes whose value IS a CSS value, and may therefore be lexed as one.
+ * ── A BOUNDED REGISTRY OF CSS-VALUED ATTRIBUTES ────────────────────────────────────────────
  *
- * Code-owned, because the alternative was lexing EVERY attribute — which reported
- * `class="red"`, `title="rgb(1,2,3)"`, `id="tan"` and `data-state="green"` as colour literals.
- * The comment already said only presentation attributes are CSS values; the code did not
- * enforce it. An ordinary attribute is DATA and is not scanned for colours at all: a colour in
- * `data-brand` styles nothing, and the false positives cost more than the hypothetical catch.
+ * Attributes whose value IS a CSS value, and may therefore be lexed as one. Applied identically
+ * by the markup scanner and the TSX scanner, so the two agree about what a colour is.
+ *
+ * It exists because the alternative was lexing EVERY attribute, which reported `class="red"`,
+ * `title="rgb(1,2,3)"` and `data-state="green"` as colour literals. But a registry is an
+ * enumeration, and an enumeration has been the defect in this lint more times than any other
+ * single cause — so this one is deliberately BOUNDED AND DECLARED rather than grown toward
+ * completeness. What it is, exactly:
+ *
+ *   * It covers the COMMON CSS-valued attributes listed below. It is not, and does not claim to
+ *     be, the full SVG 2 presentation-attribute set.
+ *   * SVG ANIMATION attributes are NOT handled. In `<animate attributeName="fill" from="red"/>`
+ *     the colour lives in `from`/`to`/`values`/`by`, and whether those are colours at all
+ *     depends on `attributeName` — which needs target-aware resolution across elements. That is
+ *     out of scope for a source lint.
+ *   * It is name-based, not ELEMENT-aware. An attribute from this list on an element where it
+ *     is not a presentation attribute (`<div fill="red">`) is reported anyway. Answering that
+ *     properly is the same target-aware problem.
+ *   * A legacy presentational attribute whose value is not a CSS value can therefore produce a
+ *     FALSE POSITIVE. `background` — the legacy HTML body/table image URL — was in this list and
+ *     has been removed for exactly that reason. The allowlist is the remedy for any that remain.
+ *
+ * The enforcing control for everything this misses is the runtime CSP (APTR-99), as it is for
+ * every other frontier in this file. Growing this list toward SVG 2 completeness inside a build
+ * lint is unbounded work at a layer that is not the security boundary.
+ *
+ * Each uncovered case above is pinned by a test that RECORDS current behaviour. If one starts
+ * being detected, that test fails and says so — widen the claim here and delete the recording.
  */
 const CSS_VALUED_ATTRIBUTES = new Set([
   'style', // a declaration list — also an inline-style violation in its own right
-  // SVG/CSS presentation attributes that take a <color>
+  // SVG/CSS presentation attributes that take, or can carry, a <color>
   'color', 'fill', 'stroke', 'stop-color', 'flood-color', 'lighting-color', 'solid-color',
-  'background', 'background-color', 'border-color', 'outline-color', 'caret-color',
-  'text-decoration-color', 'column-rule-color',
-  'bgcolor', // legacy HTML presentation attribute
+  'background-color', 'border-color', 'outline-color', 'caret-color',
+  'text-decoration', 'text-decoration-color', 'text-emphasis-color', 'column-rule-color',
+  'bgcolor', // legacy HTML presentation attribute whose value IS a colour
 ]);
+
+/**
+ * Normalise an attribute name for registry lookup.
+ *
+ * JSX spells several of these in camelCase (`stopColor`, `textDecoration`) while markup uses
+ * the hyphenated CSS name. Both must reach the same registry entry, or the two scanners would
+ * disagree about the same attribute depending only on which file it appeared in.
+ */
+function normalizeAttributeName(name) {
+  return name.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+}
+
+function isCssValuedAttribute(name) {
+  return CSS_VALUED_ATTRIBUTES.has(normalizeAttributeName(name));
+}
 
 /** A valid CSS property name: a custom property, or an ident with an optional vendor prefix. */
 const VALID_PROPERTY_NAME = /^(--[A-Za-z0-9_-]+|-{0,2}[A-Za-z_][A-Za-z0-9_-]*)$/;
@@ -658,6 +702,21 @@ function scanTypeScript(relPath, text, ext, findings, errors) {
       findings.push(finding('inline-style', relPath, lineOf(node), 'JSX `style` attribute'));
     }
 
+    /* A JSX PRESENTATION ATTRIBUTE is a CSS value, exactly as it is in markup. Routed through
+       the same lexer so the two scanners agree — `<circle fill="red" />` in a .tsx file and the
+       same element in an .svg file must reach the same verdict. Before this, JSX attribute
+       values fell through to the free-text scanner, which deliberately skips named colours, so
+       a named colour in a presentation attribute was a real uncovered route to the DOM. */
+    if (ts.isJsxAttribute(node) && isCssValuedAttribute(identifierName(node.name) ?? '')) {
+      const value = node.initializer;
+      if (value && ts.isStringLiteral(value)) {
+        const attribute = identifierName(node.name) ?? '';
+        for (const literal of findValueLiterals(value.text, { named: true }).colors) {
+          findings.push(finding('color-literal', relPath, lineOf(node), `${attribute}="${literal}"`, literal));
+        }
+      }
+    }
+
     /* dangerouslySetInnerHTML — the markup back door for a style attribute or a <style> body. */
     if (ts.isJsxAttribute(node) && identifierName(node.name) === 'dangerouslySetInnerHTML') {
       findings.push(
@@ -737,7 +796,14 @@ function scanTypeScript(relPath, text, ext, findings, errors) {
     else if (ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) literalText = node.text;
     else if (ts.isJsxText(node)) literalText = node.text;
 
-    if (literalText !== undefined) {
+    // A presentation attribute's value was already lexed above as the CSS value it is; running
+    // the free-text scanner over it as well would report the same hex twice.
+    const isPresentationAttributeValue = node.parent
+      && ts.isJsxAttribute(node.parent)
+      && node.parent.initializer === node
+      && isCssValuedAttribute(identifierName(node.parent.name) ?? '');
+
+    if (literalText !== undefined && !isPresentationAttributeValue) {
       // Free text, not a CSS value — pattern matching, and the header says so. Named colours
       // are deliberately not checked here; see NON-GOALS.
       for (const literal of findColorLiteralsInText(literalText)) {
@@ -938,7 +1004,7 @@ function scanMarkup(relPath, text, findings) {
       // ONLY a presentation attribute is a CSS value, so only one is lexed as such. A named
       // colour is in scope here exactly as it is in a stylesheet — but `class="red"` is a class
       // name, not a hue.
-      if (CSS_VALUED_ATTRIBUTES.has(name)) {
+      if (isCssValuedAttribute(name)) {
         for (const literal of findValueLiterals(value, { named: true }).colors) {
           findings.push(finding('color-literal', relPath, line, `${name}="${literal}"`, literal));
         }

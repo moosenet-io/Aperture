@@ -211,6 +211,94 @@ describe('markup attributes — only a presentation attribute is a CSS value', (
   });
 });
 
+describe('JSX presentation attributes are CSS values too', () => {
+  it.each([
+    ['a named colour', 'export const I = () => <svg><circle fill="red" /></svg>;\n', 'red'],
+    ['a hex', 'export const I = () => <svg><circle fill="#7C3AED" /></svg>;\n', '#7C3AED'],
+    ['a camelCase attribute', 'export const I = () => <svg><stop stopColor="red" /></svg>;\n', 'red'],
+    ['text-decoration', 'export const I = () => <p textDecoration="underline red" />;\n', 'red'],
+  ])('reports %s in a JSX presentation attribute', (_name, source, literal) => {
+    // JSX attribute values used to fall through to the free-text scanner, which deliberately
+    // skips named colours — so `fill="red"` produced nothing. That was a real uncovered route
+    // to the DOM, and it disproved a documented claim that no such route existed.
+    fixture({ 'src/Icon.tsx': source });
+    const found = lint().findings;
+    expect(found.map((f) => f.literal)).toContain(literal);
+  });
+
+  it('reports a hex ONCE, not once per scanner', () => {
+    // The value is lexed as a CSS value AND is a string literal; only one path may claim it.
+    fixture({ 'src/Icon.tsx': 'export const I = () => <svg><circle fill="#7C3AED" /></svg>;\n' });
+    expect(lint().findings.filter((f) => f.rule === 'color-literal')).toHaveLength(1);
+  });
+
+  it.each([
+    ['currentColor', 'export const I = () => <svg><circle fill="currentColor" /></svg>;\n'],
+    ['className', 'export const I = () => <div className="red" />;\n'],
+    ['title', 'export const I = () => <div title="a tan dog" />;\n'],
+  ])('leaves %s alone', (_name, source) => {
+    fixture({ 'src/Icon.tsx': source });
+    expectClean(lint());
+  });
+
+  it('agrees with the markup scanner on the same element', () => {
+    // The point of sharing the registry: a verdict must not depend on which file an element
+    // happens to live in.
+    fixture({ 'src/Icon.tsx': 'export const I = () => <svg><circle fill="red" /></svg>;\n' });
+    const fromJsx = lint().findings.map((f) => f.literal);
+
+    rmSync(root, { recursive: true, force: true });
+    root = mkdtempSync(join(tmpdir(), 'aperture-adherence-'));
+    fixture({ 'src/icon.svg': '<svg><circle fill="red"/></svg>' });
+    const fromMarkup = lint().findings.map((f) => f.literal);
+
+    expect(fromJsx).toEqual(fromMarkup);
+  });
+});
+
+describe('the presentation-attribute registry is BOUNDED — recorded, not silently missing', () => {
+  // Each of these RECORDS current behaviour. If one changes, the test fails and says so: widen
+  // the claim at the registry and in the README, then delete the recording. The registry is an
+  // enumeration, and an enumeration has been the defect in this lint more often than anything
+  // else — so its edges are written down rather than chased.
+  const RECORDED = 'RECORDED BEHAVIOUR CHANGED: this case is now handled differently. Widen the '
+    + 'claim at CSS_VALUED_ATTRIBUTES and in the README, then delete this recording.';
+
+  it.each([
+    ['<animate from/to>', '<svg><animate attributeName="fill" from="red" to="blue"/></svg>'],
+    ['<animate values>', '<svg><animate attributeName="fill" values="red;blue"/></svg>'],
+    ['<set to>', '<svg><set attributeName="fill" to="red"/></svg>'],
+  ])('does NOT detect a colour in an SVG animation attribute — %s', (_name, svg) => {
+    // Whether `from`/`to`/`values`/`by` hold a colour depends on `attributeName`, which needs
+    // target-aware resolution across elements. Out of scope for a source lint; the runtime CSP
+    // is the enforcing control.
+    fixture({ 'src/icon.svg': svg });
+    expect(lint().findings, RECORDED).toEqual([]);
+  });
+
+  it('DOES report a registry attribute on an element where it is not presentational', () => {
+    // The registry is name-based, not element-aware, so this is a false positive. Answering it
+    // properly is the same target-aware problem as the animation case. The allowlist is the
+    // remedy if one ever appears in this codebase.
+    fixture({});
+    writeFileSync(join(root, 'index.html'), '<div fill="red"></div>');
+    expect(rules(lint()), RECORDED).toContain('color-literal');
+  });
+
+  it('no longer reports the legacy <body background> attribute as a colour', () => {
+    // `background` in HTML is a legacy image URL, not a CSS value. It was in the registry and
+    // is not an SVG presentation attribute either, so removing it costs nothing.
+    //
+    // The value here is a relative URL that happens to be SPELLED like a colour. That matters:
+    // an earlier version of this test used `bg.png`, which lexes to no colour whether or not
+    // the registry entry exists — so it passed either way and proved nothing. Mutation testing
+    // caught it. A value that discriminates is the whole point of the test.
+    fixture({});
+    writeFileSync(join(root, 'index.html'), '<body background="red"></body>');
+    expectClean(lint());
+  });
+});
+
 describe('style blocks', () => {
   it('rejects a <style> element in TSX', () => {
     fixture({ 'src/Bad.tsx': 'export const Bad = () => <style>{".x{}"}</style>;\n' });
