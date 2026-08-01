@@ -14,8 +14,10 @@ import {
   over,
   parseColor,
   readStylesheet,
+  gradientStops,
   readTokenBlocks,
   resolveToken,
+  styleRules,
 } from './token-layer.mjs';
 
 const css = readStylesheet('constellation.css');
@@ -89,46 +91,178 @@ describe('theme structure', () => {
   });
 });
 
-/* ── Contrast ────────────────────────────────────────────────────────────────────────────── */
+/* ── Contrast ────────────────────────────────────────────────────────────────────────────────
+ *
+ * THE SURFACE SET IS DERIVED, NOT ENUMERATED.
+ *
+ * An earlier revision listed four surface tokens and composited every tinted component onto
+ * `--bg-panel`. That measured the favourable case: badges are unrestricted and are explicitly
+ * rendered inside `.card`, whose fill is a GRADIENT, so the surface actually behind a badge
+ * ranges down to the gradient's darker endpoint — where a light success badge measured 3.89:1
+ * and passed the suite anyway. The value was wrong because the method was wrong.
+ *
+ * So the surfaces come from the token layer itself: every semantic surface token, plus every
+ * stop of every gradient token, with translucent stops composited onto each opaque surface.
+ * A new surface token or a new gradient endpoint enters the suite by existing, which is the
+ * property that matters — a suite that has to be extended by hand will drift the moment
+ * someone adds a surface.
+ */
 
-const SURFACES = ['--bg-page', '--bg-panel', '--bg-elevated', '--surface-chip'];
+/** Semantic surfaces a component may be painted on. */
+const SURFACE_TOKENS = [
+  '--bg-page', '--bg-panel', '--bg-elevated', '--bg-hover',
+  '--surface-card', '--surface-chip', '--surface-inset',
+];
+
+/** Gradient fills that are painted BEHIND components — both endpoints are real surfaces. */
+const SURFACE_GRADIENTS = ['--grad-card', '--grad-space'];
+
+function surfacesFor(chain) {
+  const surfaces = new Map();
+  for (const token of SURFACE_TOKENS) surfaces.set(token, parseColor(resolveToken(token, chain)));
+
+  for (const token of SURFACE_GRADIENTS) {
+    const stops = gradientStops(resolveToken(token, chain), chain);
+    stops.forEach((stop, index) => {
+      const colour = parseColor(stop);
+      if (colour.a >= 1) {
+        surfaces.set(`${token}[${index}]`, colour);
+        return;
+      }
+      // A translucent stop shows whatever is beneath it, so it is a surface PER underlying
+      // surface rather than one colour.
+      for (const base of SURFACE_TOKENS) {
+        surfaces.set(`${token}[${index}] over ${base}`, over(colour, parseColor(resolveToken(base, chain))));
+      }
+    });
+  }
+  return surfaces;
+}
+
+const CHAINS = { dark: darkChain, light: lightChain };
 
 /**
- * The tokens that carry TEXT. `--text-faint` and `--text-disabled` are deliberately absent:
- * faint is de-emphasised metadata that always sits beside a labelled value, and a disabled
- * control is exempt from WCAG 1.4.3 by definition. Neither may ever be the only carrier of a
- * meaning, and the token layer says so where they are declared.
+ * Text tokens that carry MEANING. `--text-faint` and `--text-disabled` are excluded by RULE,
+ * not by convenience: faint is de-emphasised metadata beside an already-labelled value and
+ * never the sole carrier of a meaning, and a disabled control is exempt from WCAG 1.4.3. Both
+ * say so where they are declared. Any USE of them outside that scope is a bug in the use — the
+ * placeholder that used to take `--text-faint` was fixed rather than excused.
  */
 const TEXT_TOKENS = ['--text-heading', '--text-body', '--text-muted', '--text-accent'];
 
-describe.each([
-  ['dark', darkChain],
-  ['light', lightChain],
-])('%s theme contrast', (_theme, chain) => {
-  it.each(TEXT_TOKENS.flatMap((text) => SURFACES.map((surface) => [text, surface])))(
-    '%s on %s clears 4.5:1',
-    (text, surface) => {
-      expect(contrastRatio(color(text, chain), color(surface, chain))).toBeGreaterThanOrEqual(4.5);
-    },
-  );
+/** Foreground/tint pairs, taken from where primitives.css actually applies them. */
+const TINTED_PAIRS = [
+  ['--on-success', '--tint-success', 'badge-success'],
+  ['--on-warning', '--tint-warning', 'badge-warning'],
+  ['--on-error', '--tint-error', 'badge-error and .btn-danger'],
+  ['--on-info', '--tint-info', 'badge-info'],
+  ['--on-accent-tint', '--tint-accent', 'badge-accent'],
+  ['--text-muted', '--tint-neutral', 'badge-neutral'],
+];
 
-  it('white-on-accent clears 4.5:1 for the primary button', () => {
-    expect(contrastRatio(color('--text-on-accent', chain), color('--accent', chain)))
-      .toBeGreaterThanOrEqual(4.5);
+describe.each(Object.entries(CHAINS))('%s theme contrast', (_theme, chain) => {
+  const surfaces = surfacesFor(chain);
+  const colour = (token) => parseColor(resolveToken(token, chain));
+
+  it('derives more surfaces than the semantic tokens alone — gradients included', () => {
+    // Guards the METHOD. If gradient derivation broke, every assertion below would silently
+    // narrow to the favourable set again and keep passing.
+    expect(surfaces.size).toBeGreaterThan(SURFACE_TOKENS.length);
   });
 
-  it.each([
-    ['--on-success', '--tint-success'],
-    ['--on-warning', '--tint-warning'],
-    ['--on-error', '--tint-error'],
-    ['--on-info', '--tint-info'],
-    ['--on-accent-tint', '--tint-accent'],
-    ['--text-muted', '--tint-neutral'],
-  ])('badge foreground %s clears 4.5:1 over %s composited on the panel', (fg, tint) => {
-    // A badge's background is a TRANSLUCENT tint over the panel, so the ratio has to be
-    // measured against the composited result, not against the tint's nominal colour.
-    const background = over(color(tint, chain), color('--bg-panel', chain));
-    expect(contrastRatio(color(fg, chain), background)).toBeGreaterThanOrEqual(4.5);
+  it.each(TEXT_TOKENS)('%s clears 4.5:1 on every surface', (token) => {
+    for (const [name, surface] of surfaces) {
+      expect(contrastRatio(colour(token), surface), `${token} on ${name}`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  it.each(TINTED_PAIRS)('%s over %s clears 4.5:1 on every surface (%s)', (fg, tint, _where) => {
+    // The tint is TRANSLUCENT, so the ratio has to be measured against the composite with
+    // whatever is actually behind the component — every surface, not a chosen one.
+    for (const [name, surface] of surfaces) {
+      const background = over(colour(tint), surface);
+      expect(contrastRatio(colour(fg), background), `${fg} over ${tint} on ${name}`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  it('white-on-accent clears 4.5:1 at every stop of the primary button gradient', () => {
+    const onAccent = colour('--text-on-accent');
+    expect(contrastRatio(onAccent, colour('--accent'))).toBeGreaterThanOrEqual(4.5);
+
+    const stops = gradientStops(resolveToken('--grad-accent', chain), chain);
+    expect(stops.length).toBeGreaterThan(1);
+    for (const stop of stops) {
+      const parsed = parseColor(stop);
+      if (parsed.a >= 1) {
+        expect(contrastRatio(onAccent, parsed), `on-accent over ${stop}`).toBeGreaterThanOrEqual(4.5);
+        continue;
+      }
+      // The dark gradient's far stop is translucent — the card shows through it.
+      for (const [name, surface] of surfaces) {
+        expect(contrastRatio(onAccent, over(parsed, surface)), `on-accent over ${stop} on ${name}`)
+          .toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
+  it('input text and placeholder clear 4.5:1 on the input surface', () => {
+    for (const token of ['--text-heading', '--text-muted']) {
+      expect(contrastRatio(colour(token), colour('--surface-inset')), `${token} on --surface-inset`)
+        .toBeGreaterThanOrEqual(4.5);
+    }
+  });
+});
+
+describe('the primitives layer does not use an excluded text token as live text', () => {
+  it('never applies --text-faint or --text-disabled outside their documented scope', () => {
+    // The placeholder defect: an exclusion documented for de-emphasised metadata was being
+    // applied to live interface text in an active field. A contrast suite cannot catch that on
+    // its own, because the token is excluded FROM the suite — so the use is checked instead.
+    const offending = [];
+    for (const rule of styleRules(primitivesCss, 'primitives.css')) {
+      const usesExcluded = rule.declarations.some(
+        (decl) => decl.prop === 'color' && /^var\(--text-(faint|disabled)\)$/.test(decl.value),
+      );
+      if (!usesExcluded) continue;
+      // The only sanctioned use: a genuinely disabled control, which WCAG 1.4.3 exempts.
+      if (/:disabled|\[aria-disabled/.test(rule.selector)) continue;
+      offending.push(rule.selector.trim());
+    }
+    expect(offending).toEqual([]);
+  });
+});
+
+describe('focus is always visible, including under forced colours', () => {
+  const FORCED = '@media (forced-colors: active)';
+  const rules = styleRules(primitivesCss, 'primitives.css');
+
+  it('restores an outline for every selector that removes one on :focus-visible', () => {
+    // The defect: `.input:focus-visible { outline: none }` out-specifies the token layer's
+    // global `:focus-visible` ring, and the forced-colours block strips every box-shadow — so
+    // the glow that REPLACED the outline vanished too, leaving a focused field indistinguishable
+    // from a resting one. Checked structurally so the next component to use an inset focus
+    // treatment cannot reintroduce it.
+    const removesOutline = rules
+      .filter((r) => !r.atRules.includes(FORCED))
+      .filter((r) => r.selector.includes(':focus-visible'))
+      .filter((r) => r.declarations.some((d) => d.prop === 'outline' && d.value === 'none'))
+      .map((r) => r.selector.trim());
+
+    const restoresOutline = new Set(
+      rules
+        .filter((r) => r.atRules.includes(FORCED))
+        .filter((r) => r.declarations.some((d) => d.prop === 'outline' && d.value !== 'none'))
+        .map((r) => r.selector.trim()),
+    );
+
+    for (const selector of removesOutline) {
+      expect(restoresOutline, `${selector} removes its outline but never restores one`).toContain(selector);
+    }
+  });
+
+  it('never strips a focus indicator without providing another', () => {
+    // The global ring exists at all.
+    expect(css).toMatch(/:focus-visible\s*\{[^}]*outline:/);
   });
 });
 

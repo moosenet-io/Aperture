@@ -36,6 +36,24 @@
 //   forced-color-none  `forced-color-adjust: none`, the one property that can defeat a user's
 //                      forced-colours mode. There is no legitimate use of it in this client.
 //
+// ── WHAT IS PARSED, AND WHAT IS MERELY MATCHED ──────────────────────────────────────────────
+//
+// The strength of each claim differs by language, and the differences are the point:
+//
+//   TypeScript  — the TypeScript compiler's own AST. Comments do not exist in it, string and
+//                 template boundaries are the parser's problem, and regex literals are typed
+//                 nodes. Comment/string correctness here IS by construction.
+//   CSS         — structure from postcss, VALUES from postcss-value-parser. Both are real
+//                 lexers, so a `string` node is data and a dimension is read by the CSS number
+//                 grammar. An earlier revision parsed only the structure and ran regexes over
+//                 the values while claiming the same property for both; it did not hold, and
+//                 `content: "1e+3px"` reported a dimension that was a string.
+//   free text   — a TypeScript string literal, a JSON string. These are NOT CSS values, so
+//                 there is nothing to lex them with and colour detection there is honest
+//                 PATTERN MATCHING, labelled as such at `findColorLiteralsInText`.
+//   HTML/SVG    — a partial hand-written scanner, described under NON-GOALS. Presentation
+//                 attribute VALUES are CSS values by specification, so those are lexed.
+//
 // ── IT FAILS CLOSED ─────────────────────────────────────────────────────────────────────────
 //
 // Every one of these is an ERROR, not a skip. An unparseable file is not evidence of
@@ -84,6 +102,14 @@
 //     and a rule over every unit would fire on `100%`, `1fr` and `line-height: 1.3` — noise
 //     that would get the rule switched off. A dimension smuggled in as `0.5rem` is therefore
 //     not detected.
+//   * FONT detection is keyed on the property. `font-family` and a custom property are handled;
+//     the `font` SHORTHAND is partial — only a quoted family or a generic family keyword is
+//     treated as a signal, because "any non-var token" would fire on the size, weight and
+//     line-height the shorthand legitimately carries. `font: 600 15px/1.6 Inter` is therefore
+//     not detected. This design system does not use the shorthand.
+//   * A CUSTOM PROPERTY holding an unquoted family with no generic keyword and no "font" in its
+//     name — `--x: Inter` — is not detected. It is not decidable from the value: `Inter` is a
+//     bare word like any other. `--body-font: Inter` IS caught, by the name.
 //   * CSS ESCAPES IN THE UNIT are not decoded. `7p\78` is a valid px dimension to a browser and
 //     is not matched here. Decoding CSS escapes is a lexer's job, and postcss hands us the raw
 //     value; this is the same frontier the colour rules stop at, and it is deliberate
@@ -148,6 +174,7 @@ import { fileURLToPath } from 'node:url';
 
 import ts from 'typescript';
 import postcss from 'postcss';
+import valueParser from 'postcss-value-parser';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIR = resolve(SCRIPT_DIR, '..');
@@ -218,17 +245,18 @@ const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', 'coverage']);
 /* ── Colour recognition ──────────────────────────────────────────────────────────────────── */
 
 /**
- * A hex colour. The trailing boundary is `(?![0-9a-zA-Z])` rather than `\b` so `#deadbeefcafe`
- * is not read as an 8-digit hex plus trailing text.
+ * A hex colour, anchored to a COMPLETE lexed word. Anchoring is what stops `#deadbeefcafe`
+ * being read as an 8-digit hex plus trailing text — the word is either a hex colour or it is
+ * not, and there is no partial answer.
  */
-const HEX_COLOR = /#[0-9a-fA-F]{3,8}(?![0-9a-zA-Z])/g;
+const HEX_WORD = /^#[0-9a-fA-F]{3,8}$/;
 
 /**
- * Colour FUNCTIONS. `color-mix()` and `light-dark()` are deliberately absent: both take other
- * colours as arguments, so a legitimate `color-mix(in srgb, var(--a), var(--b))` contains no
- * literal, and any literal inside one is caught by the other patterns anyway.
+ * Colour FUNCTIONS, by lexed function name. `color-mix()` and `light-dark()` are deliberately
+ * absent: both take other colours as arguments, so a legitimate `color-mix(in srgb, var(--a),
+ * var(--b))` contains no literal, and any literal inside one is found by descending into it.
  */
-const COLOR_FUNCTION = /\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\s*\(/g;
+const COLOR_FUNCTIONS = new Set(['rgb', 'rgba', 'hsl', 'hsla', 'hwb', 'lab', 'lch', 'oklab', 'oklch', 'color']);
 
 /** CSS named colours. `transparent` is deliberately excluded — it is a keyword, not a hue. */
 const NAMED_COLORS = new Set(`aliceblue antiquewhite aqua aquamarine azure beige bisque black
@@ -313,22 +341,9 @@ const VENDOR_KEYFRAMES = /^-(webkit|moz|ms|o)-keyframes$/;
 const VALID_PROPERTY_NAME = /^(--[A-Za-z0-9_-]+|-{0,2}[A-Za-z_][A-Za-z0-9_-]*)$/;
 
 /**
- * A px length, matched against the number syntax CSS actually defines rather than the one that
- * comes to mind. This is the `<number-token>` production from CSS Syntax Level 3:
- *
- *     [+-]? ( digits | digits '.' digits | '.' digits ) ( [eE] [+-]? digits )?
- *
- * Matched CASE-INSENSITIVELY, because CSS units and the exponent marker both are.
- *
- * Two earlier revisions were written against examples instead of the grammar and each left a
- * hole a reviewer found: a case-sensitive `px` let `7PX` through, and an exponent-less number
- * let `1e3px` through — and worse, matched `1e+3px` as `3px`, reporting a garbled literal
- * rather than missing cleanly. When a rule matches a SYNTAX, the grammar is the reference.
- *
- * Where the grammar is still larger than this handles, that is a documented non-goal, not an
- * unnoticed gap — see the CSS-escapes and calc() entries under NON-GOALS.
+ * CSS-wide keywords. A value made only of these and `var()` references declares no literal.
  */
-const PX_LENGTH = /(?<![\w.-])[+-]?(?:\d+\.\d+|\.\d+|\d+)(?:[eE][+-]?\d+)?px(?![\w-])/gi;
+const CSS_WIDE_KEYWORDS = new Set(['inherit', 'initial', 'unset', 'revert', 'revert-layer']);
 
 /**
  * The inline escape for a genuinely optical dimension. Two accepted forms, and only two, so a
@@ -359,29 +374,107 @@ function finding(rule, file, line, detail, literal) {
 
 /* ── Colour scanning of a plain value ────────────────────────────────────────────────────── */
 
-/**
- * Extract colour literals from an arbitrary value string.
+/* ── VALUES ARE LEXED, NOT PATTERN-MATCHED ────────────────────────────────────────────────
  *
- * @param {string} value
- * @param {{ named: boolean }} options `named` enables the CSS-named-colour check. It is on for
- *   CSS and markup and off for TypeScript strings — see NON-GOALS.
- * @returns {string[]} the exact literals found, verbatim, so the allowlist can match on them.
+ * postcss parses a stylesheet into rules and declarations. It does NOT tokenize a declaration's
+ * VALUE — `decl.value` is a raw string. An earlier revision ran regexes over that string and
+ * claimed the same "correct by construction" property the TypeScript scanning genuinely has.
+ * It did not hold, and a reviewer produced the consequences: `content: "1e+3px"` reported a
+ * dimension that is a STRING, and any quoted text shaped like a colour or a font was misread.
+ *
+ * Values now go through `postcss-value-parser` — the conventional value lexer, MIT, zero
+ * dependencies, and a devDependency only, so it never reaches the shipped bundle. With a real
+ * token stream:
+ *   * a `string` node is DATA and is skipped, so `content: "…"` and quoted URLs are inert;
+ *   * a colour function is captured COMPLETE (`rgb(1, 2, 3)`), not normalised to `rgb()`;
+ *   * a dimension is read by `valueParser.unit()`, which implements the CSS number grammar —
+ *     so the exponent and case handling is the lexer's problem, not a regex's;
+ *   * `var(--violet-500)` yields the word `--violet-500`, which is not a named colour, so the
+ *     token layer's own vocabulary no longer needs stripping to avoid a false positive.
  */
-export function findColorLiterals(value, { named }) {
+
+/**
+ * Lex a CSS value and return the complete literals in it.
+ *
+ * @param {string} value a CSS declaration value or at-rule params
+ * @param {{ named: boolean }} options `named` enables the CSS-named-colour check
+ * @returns {{ colors: string[], dimensions: string[], failed: boolean }} `colors` entries are
+ *   COMPLETE literals — `rgb(1, 2, 3)`, not `rgb()` — because the allowlist matches on them by
+ *   strict equality, and a normalised literal would let one entry suppress every other value of
+ *   the same function in that file. `failed` is true if the value could not be lexed at all,
+ *   which the caller must treat as an error rather than a clean result.
+ */
+export function findValueLiterals(value, { named }) {
+  const colors = [];
+  const dimensions = [];
+
+  let parsed;
+  try {
+    parsed = valueParser(value);
+  } catch {
+    return { colors, dimensions, failed: true };
+  }
+
+  const visit = (nodes) => {
+    for (const node of nodes) {
+      // A string is DATA. `content: "#ff0000"` declares no colour, and treating it as one is
+      // the false positive that gets a rule switched off.
+      if (node.type === 'string' || node.type === 'comment') continue;
+
+      if (node.type === 'function') {
+        const name = node.value.toLowerCase();
+        if (COLOR_FUNCTIONS.has(name)) {
+          colors.push(valueParser.stringify(node));
+          continue; // the arguments ARE the literal; do not also report them separately
+        }
+        if (name === 'url') continue; // a URL is an address, not a style value
+        visit(node.nodes);
+        continue;
+      }
+
+      if (node.type !== 'word') continue;
+      const word = node.value;
+
+      if (HEX_WORD.test(word)) { colors.push(word); continue; }
+      if (named && NAMED_COLORS.has(word.toLowerCase())) { colors.push(word); continue; }
+
+      const unit = valueParser.unit(word);
+      if (unit && unit.unit.toLowerCase() === 'px') dimensions.push(word);
+    }
+  };
+
+  visit(parsed.nodes);
+  return { colors, dimensions, failed: false };
+}
+
+/**
+ * Colour literals in FREE TEXT — a TypeScript string, a JSON string, a markup attribute.
+ *
+ * These are NOT CSS values, so a CSS value lexer is the wrong tool and this is honest pattern
+ * matching, stated as such. Functional colours are captured with a balanced-paren scan so the
+ * reported literal is complete rather than truncated at the first `)`.
+ *
+ * The allowlist cannot interact with anything found here: its path registry admits only CSS
+ * files, so a text-mode finding can never be suppressed by configuration.
+ */
+export function findColorLiteralsInText(text) {
   const found = [];
-  for (const match of value.matchAll(HEX_COLOR)) found.push(match[0]);
-  for (const match of value.matchAll(COLOR_FUNCTION)) found.push(match[0].replace(/\s*\($/, '()'));
-  if (named) {
-    // Strip custom-property references first: `var(--violet-500)` must not yield "violet",
-    // and `--flux-green-deep` must not yield "green".
-    const withoutCustomProps = value.replace(/--[A-Za-z0-9_-]+/g, ' ');
-    // An identifier NOT adjacent to a hyphen. `sans-serif` yields nothing; `red` yields "red".
-    for (const match of withoutCustomProps.matchAll(/(?<![\w-])[A-Za-z]+(?![\w-])/g)) {
-      if (NAMED_COLORS.has(match[0].toLowerCase())) found.push(match[0]);
+  for (const match of text.matchAll(/#[0-9a-fA-F]{3,8}(?![0-9a-zA-Z])/g)) found.push(match[0]);
+
+  for (const match of text.matchAll(/\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\s*\(/gi)) {
+    const open = (match.index ?? 0) + match[0].length - 1;
+    let depth = 0;
+    for (let i = open; i < text.length; i += 1) {
+      if (text[i] === '(') depth += 1;
+      else if (text[i] === ')') {
+        depth -= 1;
+        if (depth === 0) { found.push(text.slice(match.index, i + 1)); break; }
+      }
     }
   }
   return found;
 }
+
 
 /**
  * Does this node — a declaration or an at-rule — carry an inline reason for its raw dimension?
@@ -406,14 +499,76 @@ function hasDimensionReason(node) {
   return typeof raw === 'string' && DIMENSION_REASON.test(raw);
 }
 
-function looksLikeFontStack(value) {
-  if (/['"]/.test(value)) return true;
-  const withoutCustomProps = value.replace(/--[A-Za-z0-9_-]+/g, ' ');
-  for (const match of withoutCustomProps.matchAll(/(?<![\w])[A-Za-z][A-Za-z-]*(?![\w])/g)) {
-    if (GENERIC_FONT_FAMILIES.has(match[0].toLowerCase())) return true;
-  }
-  return false;
+/* ── FONT DETECTION ───────────────────────────────────────────────────────────────────────
+ *
+ * The previous implementation was wrong in BOTH directions, which is the worst combination: it
+ * required a quote or a generic keyword, so `font-family: Inter` and `--body-font: Inter` were
+ * missed; and it treated ANY quoted value as a font stack, so `content: "hello"` and quoted
+ * URLs were reported. False positives are what get a rule switched off, so they cost more than
+ * the misses did.
+ *
+ * The rule is now keyed on the PROPERTY, and the value is lexed:
+ *   * `font-family` — a literal unless the value is made only of `var()` and CSS-wide keywords.
+ *     That catches an unquoted family, which is the case that was being missed.
+ *   * a CUSTOM PROPERTY — a literal if it names a generic family (`sans-serif`, `monospace`, …),
+ *     which is decidable from the value; or if its NAME says font and its value is not pure
+ *     indirection, which is how `--body-font: Inter` is caught.
+ *   * anything else — not a font declaration, so not this rule's business. `content`,
+ *     `background`, `grid-template-areas` and every other string-valued property are silent.
+ */
+
+/** Is every meaningful token a `var()` or a CSS-wide keyword — i.e. does it declare nothing? */
+function isPureIndirection(nodes) {
+  const meaningful = nodes.filter((n) => n.type !== 'space' && n.type !== 'div' && n.type !== 'comment');
+  if (meaningful.length === 0) return true;
+  return meaningful.every((n) => (
+    (n.type === 'function' && n.value.toLowerCase() === 'var')
+    || (n.type === 'word' && CSS_WIDE_KEYWORDS.has(n.value.toLowerCase()))
+  ));
 }
+
+function namesAGenericFamily(parsed) {
+  let found = false;
+  parsed.walk((node) => {
+    if (node.type === 'word' && GENERIC_FONT_FAMILIES.has(node.value.toLowerCase())) found = true;
+    return true;
+  });
+  return found;
+}
+
+/**
+ * @returns {string | null} a detail string when the declaration carries a font literal.
+ */
+function fontLiteralDetail(decl) {
+  const prop = decl.prop;
+  const lower = prop.toLowerCase();
+  if (lower !== 'font-family' && lower !== 'font' && !prop.startsWith('--')) return null;
+
+  let parsed;
+  try {
+    parsed = valueParser(decl.value);
+  } catch {
+    return null; // the caller reports an unlexable value in its own right
+  }
+
+  if (lower === 'font-family') {
+    return isPureIndirection(parsed.nodes) ? null : `${prop}: ${decl.value}`;
+  }
+
+  if (lower === 'font') {
+    // PARTIAL, and recorded as a non-goal: the shorthand also carries size, weight and
+    // line-height, so "any non-var token" would fire on every legitimate use. Only a quoted
+    // family or a generic family is treated as a signal here.
+    const hasQuotedFamily = parsed.nodes.some((n) => n.type === 'string');
+    return hasQuotedFamily || namesAGenericFamily(parsed) ? `${prop}: ${decl.value}` : null;
+  }
+
+  // A custom property.
+  if (namesAGenericFamily(parsed)) return `${prop}: ${decl.value}`;
+  if (/font/i.test(prop) && !isPureIndirection(parsed.nodes)) return `${prop}: ${decl.value}`;
+  return null;
+}
+
 
 /* ── TypeScript ──────────────────────────────────────────────────────────────────────────── */
 
@@ -498,6 +653,19 @@ function scanTypeScript(relPath, text, ext, findings, errors) {
       }
     }
 
+    /* style-block — `createElement('style')` called as a BARE IDENTIFIER, which the
+       property-access branch below cannot see. `import { createElement } from 'react'` and
+       `const { createElement } = document` both produce this shape. */
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      const callee = node.expression.text;
+      if (callee === 'createElement' || callee === 'createElementNS') {
+        const tagArg = node.arguments[callee === 'createElementNS' ? 1 : 0];
+        if (tagArg && ts.isStringLiteral(tagArg) && tagArg.text.toLowerCase() === 'style') {
+          findings.push(finding('style-block', relPath, lineOf(node), `\`${callee}('style')\``));
+        }
+      }
+    }
+
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
       const method = ts.isIdentifier(node.expression.name) ? node.expression.name.text : '';
       if (method === 'setProperty' && isStyleAccess(node.expression.expression)) {
@@ -534,8 +702,9 @@ function scanTypeScript(relPath, text, ext, findings, errors) {
     else if (ts.isJsxText(node)) literalText = node.text;
 
     if (literalText !== undefined) {
-      // `named: false` — see NON-GOALS.
-      for (const literal of findColorLiterals(literalText, { named: false })) {
+      // Free text, not a CSS value — pattern matching, and the header says so. Named colours
+      // are deliberately not checked here; see NON-GOALS.
+      for (const literal of findColorLiteralsInText(literalText)) {
         findings.push(finding('color-literal', relPath, lineOf(node), literal, literal));
       }
       if (/font-family/i.test(literalText)) {
@@ -566,9 +735,32 @@ function scanCss(relPath, text, findings, errors) {
   const isTokenLayer = relPath === TOKEN_LAYER;
   const lineOf = (node) => node.source?.start?.line ?? 0;
 
+  /**
+   * Is this node inside a style rule, however many at-rules sit between?
+   *
+   * The ANCESTOR chain, not the immediate parent. Checking only the parent let a disallowed
+   * at-rule hide one level down — `.x { @media (…) { @starting-style { … } } }` — and a
+   * blockless `@layer` in that position swallowed a declaration with no finding at all. An
+   * allowed conditional does not stop being inside a style rule just by being allowed.
+   */
+  const insideStyleRule = (node) => {
+    for (let parent = node.parent; parent; parent = parent.parent) {
+      if (parent.type === 'rule') return true;
+    }
+    return false;
+  };
+
+  /** Lex a value, reporting a failure as an ERROR rather than as a clean result. */
+  const literalsIn = (value, node, what) => {
+    const result = findValueLiterals(value, { named: true });
+    if (result.failed) {
+      errors.push(`${relPath}:${lineOf(node)}: ${what} could not be lexed as a CSS value.`);
+    }
+    return result;
+  };
+
   // ── Well-formedness. postcss ACCEPTS a great deal that is not CSS, and an accepted-but-wrong
-  // at-rule can swallow the declarations that follow it, so they are never walked below. These
-  // checks close that hole; they do not make this a validator (see NON-GOALS).
+  // at-rule can swallow the declarations that follow it, so they are never walked below.
   root.walkAtRules((atRule) => {
     const name = atRule.name.toLowerCase();
 
@@ -581,10 +773,7 @@ function scanCss(relPath, text, findings, errors) {
       return;
     }
 
-    // An at-rule sitting where a DECLARATION belongs. This is the inverted check: inside a
-    // style rule a declaration is expected and an at-rule is the anomaly, so the question is
-    // not "does this at-rule need a block" but "is this one of the few that belong here".
-    if (atRule.parent?.type === 'rule' && !AT_RULES_ALLOWED_INSIDE_A_STYLE_RULE.has(name)) {
+    if (insideStyleRule(atRule) && !AT_RULES_ALLOWED_INSIDE_A_STYLE_RULE.has(name)) {
       findings.push(finding(
         'malformed-css', relPath, lineOf(atRule),
         `\`@${atRule.name}\` appears inside a style rule, where a declaration belongs. If it is `
@@ -605,42 +794,43 @@ function scanCss(relPath, text, findings, errors) {
 
   root.walkDecls((decl) => {
     const prop = decl.prop.toLowerCase();
-    const value = decl.value;
 
     if (!VALID_PROPERTY_NAME.test(decl.prop)) {
       findings.push(finding('malformed-css', relPath, lineOf(decl), `\`${decl.prop}\` is not a valid property name`));
     }
 
-    if (prop === 'forced-color-adjust' && value.trim().toLowerCase() === 'none') {
-      findings.push(
-        finding('forced-color-none', relPath, lineOf(decl), 'forced-color-adjust: none defeats the user\'s own palette'),
-      );
+    if (prop === 'forced-color-adjust' && decl.value.trim().toLowerCase() === 'none') {
+      findings.push(finding(
+        'forced-color-none', relPath, lineOf(decl), "forced-color-adjust: none defeats the user's own palette",
+      ));
     }
 
-    if (!isTokenLayer) {
-      for (const literal of findColorLiterals(value, { named: true })) {
-        findings.push(finding('color-literal', relPath, lineOf(decl), `${decl.prop}: ${literal}`, literal));
-      }
-      // A font stack, whether declared as `font-family:` or smuggled into a custom property.
-      if (looksLikeFontStack(value)) {
-        findings.push(finding('font-literal', relPath, lineOf(decl), `${decl.prop}: ${value}`));
-      }
+    if (isTokenLayer) return;
 
-      const lengths = [...value.matchAll(PX_LENGTH)].map((m) => m[0]);
-      if (lengths.length > 0 && !hasDimensionReason(decl)) {
-        findings.push(finding(
-          'dimension-literal', relPath, lineOf(decl),
-          `${decl.prop}: ${lengths.join(', ')} — take it from the token layer, or record why it `
-          + 'is optical with a `/* dimension-literal: … */` comment on the declaration',
-        ));
-      }
+    const { colors, dimensions } = literalsIn(decl.value, decl, `\`${decl.prop}\``);
+
+    for (const literal of colors) {
+      findings.push(finding('color-literal', relPath, lineOf(decl), `${decl.prop}: ${literal}`, literal));
+    }
+
+    const font = fontLiteralDetail(decl);
+    if (font) findings.push(finding('font-literal', relPath, lineOf(decl), font));
+
+    if (dimensions.length > 0 && !hasDimensionReason(decl)) {
+      findings.push(finding(
+        'dimension-literal', relPath, lineOf(decl),
+        `${decl.prop}: ${dimensions.join(', ')} — take it from the token layer, or record why it `
+        + 'is optical with a `/* dimension-literal: … */` comment on the declaration',
+      ));
     }
   });
 
   if (!isTokenLayer) {
     root.walkAtRules((atRule) => {
       const params = atRule.params ?? '';
-      for (const literal of findColorLiterals(params, { named: true })) {
+      const { colors, dimensions } = literalsIn(params, atRule, `@${atRule.name} params`);
+
+      for (const literal of colors) {
         findings.push(finding('color-literal', relPath, lineOf(atRule), `@${atRule.name} ${literal}`, literal));
       }
 
@@ -648,11 +838,10 @@ function scanCss(relPath, text, findings, errors) {
       // common case, and it legitimately CANNOT be a token: `var()` does not resolve inside a
       // media condition. So a breakpoint takes the same inline reason as any other optical
       // literal, which at least puts the number and its justification in the same place.
-      const lengths = [...params.matchAll(PX_LENGTH)].map((m) => m[0]);
-      if (lengths.length > 0 && !hasDimensionReason(atRule)) {
+      if (dimensions.length > 0 && !hasDimensionReason(atRule)) {
         findings.push(finding(
           'dimension-literal', relPath, lineOf(atRule),
-          `@${atRule.name} ${lengths.join(', ')} — a media condition cannot read a custom property, `
+          `@${atRule.name} ${dimensions.join(', ')} — a media condition cannot read a custom property, `
           + 'so record why this breakpoint is what it is with a `/* dimension-literal: … */` comment',
         ));
       }
@@ -672,7 +861,7 @@ function scanJson(relPath, text, findings, errors) {
   }
   const walk = (value) => {
     if (typeof value === 'string') {
-      for (const literal of findColorLiterals(value, { named: false })) {
+      for (const literal of findColorLiteralsInText(value)) {
         findings.push(finding('color-literal', relPath, 0, literal, literal));
       }
     } else if (Array.isArray(value)) {
@@ -710,7 +899,10 @@ function scanMarkup(relPath, text, findings) {
       if (name === 'style') {
         findings.push(finding('inline-style', relPath, line, `style attribute on <${tag}>`));
       }
-      for (const literal of findColorLiterals(value, { named: true })) {
+      // A presentation attribute (`fill`, `stroke`, `stop-color`, `style`) takes a CSS value
+      // by specification, so it is lexed rather than pattern-matched, and a named colour is
+      // therefore in scope here as it is in a stylesheet.
+      for (const literal of findValueLiterals(value, { named: true }).colors) {
         findings.push(finding('color-literal', relPath, line, `${name}="${literal}"`, literal));
       }
       if (name === 'font-family') {

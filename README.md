@@ -282,7 +282,11 @@ a later OS change still reaches the user.
 
 `prefers-reduced-motion` and `forced-colors` behaviour are declared in the token layer.
 `forced-color-adjust: none` — the one property that can defeat a user's own palette — is
-rejected outright by the lint, in every file including the token layer.
+rejected outright by the lint, in every file including the token layer. Structural hairlines are
+**neutral in both themes**; violet is reserved for the active/accent edge, which is the live
+system's rule and applies to the authored light theme exactly as it does to the ported dark one.
+Where a component replaces the focus outline with a glow, a test asserts it restores a real
+outline under forced colours, since glow is stripped there.
 
 ### The adherence lint
 
@@ -371,11 +375,23 @@ exact file, an exact value and a reason, and a **stale entry fails the lint**. A
 component, or a primitive cannot be allowlisted by editing configuration at all. There is no
 pragma, flag, or environment variable that turns a rule off.
 
-**Contrast.** `client/scripts/token-layer.test.mjs` parses the token layer and asserts 4.5:1 on
-the text/surface pairs the system tells people to use — in both themes, with real alpha
-compositing for the tinted badge surfaces — and that the two light blocks have not drifted
-apart. `--text-faint` and `--text-disabled` are excluded by design and documented where they
-are declared: neither may ever be the only carrier of a meaning.
+**Contrast.** `client/scripts/token-layer.test.mjs` parses the token layer and asserts 4.5:1 in
+both themes, with real alpha compositing for tinted surfaces, and checks that the two light
+blocks have not drifted apart.
+
+The surface set is **derived, not enumerated**: every semantic surface token, plus every stop of
+every gradient token, with translucent stops composited onto each opaque surface. That matters
+because a component does not sit on "the panel" — a badge sits inside a `.card`, whose fill is a
+gradient, so the surface behind it is a range. An earlier revision listed four surfaces and
+composited onto the most favourable one, and passed a light success badge that measured 3.89:1
+against the darker end. A new surface token or gradient endpoint now enters the suite by
+existing.
+
+`--text-faint` and `--text-disabled` are excluded **by rule**, not by convenience: faint is
+de-emphasised metadata beside an already-labelled value, and a disabled control is exempt from
+WCAG 1.4.3. Both say so where they are declared, and a separate test asserts the primitives
+layer never applies either as live text outside that scope — a contrast suite cannot police a
+token it excludes.
 
 ## Contributing
 

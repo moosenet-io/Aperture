@@ -86,15 +86,15 @@
      free, amber = cloud/gated/cost, rose = alert/hot. Never pick one because it looks nice. */
   --flux-blue: #3b82f6;
   --flux-blue-soft: #60a5fa;
-  --flux-blue-deep: #1d4ed8; /* light-theme text weight */
+  --flux-blue-deep: #1e40af; /* light-theme text weight */
   --flux-green: #10b981;
   --flux-green-soft: #34d399;
-  --flux-green-deep: #047857; /* light-theme text weight */
+  --flux-green-deep: #065f46; /* light-theme text weight */
   --flux-amber: #f59e0b;
   --flux-amber-deep: #92400e; /* light-theme text weight */
   --flux-rose: #f43f5e;
   --flux-rose-soft: #fb7185;
-  --flux-rose-deep: #be123c; /* light-theme text weight */
+  --flux-rose-deep: #9f1239; /* light-theme text weight */
 
   /* ── Ink ramps ───────────────────────────────────────────────────────────────────── */
   --ink-dark-100: #f4f2fb;
@@ -215,8 +215,10 @@
   --text-heading: var(--ink-dark-100);
   --text-body: var(--ink-dark-200);
   --text-muted: var(--ink-dark-300);
-  /* NOT a body-text token: 4.09:1 on --bg-page. De-emphasised metadata beside a labelled
-     value, never the only carrier of a meaning. */
+  /* NOT a body-text token, in EITHER theme. It falls below 4.5:1 against at least one
+     surface it may sit on (4.09:1 on dark --bg-page), so it is de-emphasised metadata beside
+     an already-labelled value and never the only carrier of a meaning. It is excluded from the
+     contrast suite by that rule, not by convenience — see token-layer.test.mjs. */
   --text-faint: var(--ink-dark-400);
   /* Disabled affordances only, where WCAG 1.4.3 does not apply. */
   --text-disabled: var(--ink-dark-500);
@@ -319,9 +321,9 @@
     --text-accent: var(--violet-700);
     --text-on-accent: var(--accent-on);
 
-    --line-soft: rgba(91, 33, 182, 0.1);
-    --line-default: rgba(91, 33, 182, 0.16);
-    --line-strong: rgba(91, 33, 182, 0.28);
+    --line-soft: rgba(23, 19, 31, 0.08);
+    --line-default: rgba(23, 19, 31, 0.12);
+    --line-strong: rgba(23, 19, 31, 0.2);
     --line-accent: rgba(109, 40, 217, 0.55);
     --border: var(--line-default);
     --border-strong: var(--line-strong);
@@ -345,14 +347,14 @@
 
     --tint-accent: rgba(109, 40, 217, 0.1);
     --tint-accent-line: rgba(109, 40, 217, 0.28);
-    --tint-success: rgba(4, 120, 87, 0.1);
-    --tint-success-line: rgba(4, 120, 87, 0.28);
+    --tint-success: rgba(6, 95, 70, 0.1);
+    --tint-success-line: rgba(6, 95, 70, 0.28);
     --tint-warning: rgba(146, 64, 14, 0.1);
     --tint-warning-line: rgba(146, 64, 14, 0.28);
-    --tint-error: rgba(190, 18, 60, 0.1);
-    --tint-error-line: rgba(190, 18, 60, 0.28);
-    --tint-info: rgba(29, 78, 216, 0.1);
-    --tint-info-line: rgba(29, 78, 216, 0.28);
+    --tint-error: rgba(159, 18, 57, 0.1);
+    --tint-error-line: rgba(159, 18, 57, 0.28);
+    --tint-info: rgba(30, 64, 175, 0.1);
+    --tint-info-line: rgba(30, 64, 175, 0.28);
     --tint-neutral: rgba(23, 19, 31, 0.05);
 
     --shadow-sm: 0 1px 2px rgba(23, 19, 31, 0.08);
@@ -360,10 +362,10 @@
     --shadow-lg: 0 20px 60px rgba(23, 19, 31, 0.14);
     --glow-violet: 0 0 16px rgba(109, 40, 217, 0.22);
     --glow-violet-soft: 0 0 8px rgba(109, 40, 217, 0.16);
-    --glow-blue: 0 0 18px rgba(29, 78, 216, 0.28);
-    --glow-green: 0 0 18px rgba(4, 120, 87, 0.28);
+    --glow-blue: 0 0 18px rgba(30, 64, 175, 0.28);
+    --glow-green: 0 0 18px rgba(6, 95, 70, 0.28);
     --glow-amber: 0 0 18px rgba(146, 64, 14, 0.28);
-    --glow-rose: 0 0 18px rgba(190, 18, 60, 0.28);
+    --glow-rose: 0 0 18px rgba(159, 18, 57, 0.28);
     --inset-hi: inset 0 1px 0 rgba(255, 255, 255, 0.7);
 
     --focus-ring-color: var(--violet-600);
@@ -404,9 +406,9 @@
   --text-accent: var(--violet-700);
   --text-on-accent: var(--accent-on);
 
-  --line-soft: rgba(91, 33, 182, 0.1);
-  --line-default: rgba(91, 33, 182, 0.16);
-  --line-strong: rgba(91, 33, 182, 0.28);
+  --line-soft: rgba(23, 19, 31, 0.08);
+  --line-default: rgba(23, 19, 31, 0.12);
+  --line-strong: rgba(23, 19, 31, 0.2);
   --line-accent: rgba(109, 40, 217, 0.55);
   --border: var(--line-default);
   --border-strong: var(--line-strong);
@@ -430,14 +432,14 @@
 
   --tint-accent: rgba(109, 40, 217, 0.1);
   --tint-accent-line: rgba(109, 40, 217, 0.28);
-  --tint-success: rgba(4, 120, 87, 0.1);
-  --tint-success-line: rgba(4, 120, 87, 0.28);
+  --tint-success: rgba(6, 95, 70, 0.1);
+  --tint-success-line: rgba(6, 95, 70, 0.28);
   --tint-warning: rgba(146, 64, 14, 0.1);
   --tint-warning-line: rgba(146, 64, 14, 0.28);
-  --tint-error: rgba(190, 18, 60, 0.1);
-  --tint-error-line: rgba(190, 18, 60, 0.28);
-  --tint-info: rgba(29, 78, 216, 0.1);
-  --tint-info-line: rgba(29, 78, 216, 0.28);
+  --tint-error: rgba(159, 18, 57, 0.1);
+  --tint-error-line: rgba(159, 18, 57, 0.28);
+  --tint-info: rgba(30, 64, 175, 0.1);
+  --tint-info-line: rgba(30, 64, 175, 0.28);
   --tint-neutral: rgba(23, 19, 31, 0.05);
 
   --shadow-sm: 0 1px 2px rgba(23, 19, 31, 0.08);
@@ -445,10 +447,10 @@
   --shadow-lg: 0 20px 60px rgba(23, 19, 31, 0.14);
   --glow-violet: 0 0 16px rgba(109, 40, 217, 0.22);
   --glow-violet-soft: 0 0 8px rgba(109, 40, 217, 0.16);
-  --glow-blue: 0 0 18px rgba(29, 78, 216, 0.28);
-  --glow-green: 0 0 18px rgba(4, 120, 87, 0.28);
+  --glow-blue: 0 0 18px rgba(30, 64, 175, 0.28);
+  --glow-green: 0 0 18px rgba(6, 95, 70, 0.28);
   --glow-amber: 0 0 18px rgba(146, 64, 14, 0.28);
-  --glow-rose: 0 0 18px rgba(190, 18, 60, 0.28);
+  --glow-rose: 0 0 18px rgba(159, 18, 57, 0.28);
   --inset-hi: inset 0 1px 0 rgba(255, 255, 255, 0.7);
 
   --focus-ring-color: var(--violet-600);

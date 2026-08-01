@@ -88,6 +88,47 @@ export function declarations(css, from = 'stylesheet.css') {
   return out;
 }
 
+/**
+ * Every style rule with its declarations, PARSED.
+ *
+ * A regex over `selector { body }` cannot see nested rules and gets the destructuring of a
+ * match array wrong at the first opportunity — which it did, silently, so the check that used
+ * it passed against a file that violated it. postcss already knows what a rule is.
+ */
+export function styleRules(css, from = 'stylesheet.css') {
+  const rules = [];
+  postcss.parse(css, { from }).walkRules((rule) => {
+    const atRules = [];
+    for (let parent = rule.parent; parent; parent = parent.parent) {
+      if (parent.type === 'atrule') atRules.unshift(`@${parent.name} ${parent.params}`.trim());
+    }
+    rules.push({
+      atRules,
+      selector: rule.selector,
+      declarations: rule.nodes
+        .filter((node) => node.type === 'decl')
+        .map((decl) => ({ prop: decl.prop.toLowerCase(), value: decl.value.trim() })),
+    });
+  });
+  return rules;
+}
+
+/**
+ * The colour stops of a gradient token, resolved.
+ *
+ * A component does not sit on "the panel"; it sits on whatever is actually painted behind it,
+ * and a gradient paints a RANGE. Measuring contrast against one nominal surface token is how a
+ * badge inside a gradient card gets measured against the favourable end of it. Both endpoints
+ * are surfaces, so both are returned.
+ */
+export function gradientStops(value, chain) {
+  const stops = [];
+  for (const match of value.matchAll(/var\(\s*(--[A-Za-z0-9_-]+)\s*\)|rgba?\([^)]*\)|#[0-9a-fA-F]{3,8}/g)) {
+    stops.push(match[1] ? resolveToken(match[1], chain) : match[0]);
+  }
+  return stops;
+}
+
 /* ── Colour maths ────────────────────────────────────────────────────────────────────────── */
 
 export function parseColor(value) {

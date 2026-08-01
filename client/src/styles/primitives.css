@@ -292,8 +292,13 @@
     box-shadow var(--dur-fast) var(--ease-out);
 }
 
+/* --text-muted, NOT --text-faint. A placeholder in an ACTIVE field is live interface text: it
+   is what tells you what the field wants. --text-faint measures 3.95:1 on --surface-inset in
+   dark, and its own declaration restricts it to de-emphasised metadata beside an already-
+   labelled value — which a placeholder is not. The exclusion was being applied outside the
+   scope it documents. */
 .input::placeholder {
-  color: var(--text-faint);
+  color: var(--text-muted);
 }
 
 .input:hover:not(:disabled) {
@@ -358,5 +363,15 @@
   .card-interactive:hover,
   .card-interactive:focus-visible {
     border-color: Highlight;
+  }
+
+  /* The input's focus treatment is an inset glow, and the token layer strips every box-shadow
+     under forced colours — while `.input:focus-visible { outline: none }` out-specifies the
+     global `:focus-visible` ring. Between them the field ended up with NO focus indicator at
+     all here: its border is already ButtonBorder at rest, so focus was indistinguishable from
+     rest. A real outline is restored, in the user's own system colour. */
+  .input:focus-visible {
+    outline: var(--focus-ring-width) solid Highlight;
+    outline-offset: var(--focus-ring-offset);
   }
 }

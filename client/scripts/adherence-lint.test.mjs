@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { runAdherenceLint, findColorLiterals } from './adherence-lint.mjs';
+import { runAdherenceLint, findValueLiterals, findColorLiteralsInText } from './adherence-lint.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIR = resolve(SCRIPT_DIR, '..');
@@ -211,6 +211,51 @@ describe('font literals', () => {
   });
 });
 
+describe('font detection — wrong in both directions before, so both are pinned', () => {
+  it.each([
+    ['an unquoted family', '.x { font-family: Inter; }'],
+    ['a quoted family', ".x { font-family: 'Comic Sans', sans-serif; }"],
+    ['a custom property whose NAME says font', '.x { --body-font: Inter; }'],
+    ['a custom property naming a generic family', ".x { --sneaky: 'Comic Sans', sans-serif; }"],
+  ])('still catches %s', (_name, css) => {
+    fixture({ 'src/styles/x.css': css });
+    expect(rules(lint())).toContain('font-literal');
+  });
+
+  it.each([
+    ['content with a quoted string', '.x { content: "hello"; }'],
+    ['a quoted url', '.x { background: url("a.png"); }'],
+    ['a quoted grid template', '.x { grid-template-areas: "head head"; }'],
+    ['font-family via a token', '.x { font-family: var(--font-sans); }'],
+    ['font-family: inherit', '.x { font-family: inherit; }'],
+  ])('no longer INVENTS a font literal for %s', (_name, css) => {
+    // False positives are what get a rule switched off, so they cost more than the misses.
+    fixture({ 'src/styles/x.css': css });
+    expectClean(lint());
+  });
+});
+
+describe('values are lexed, so a string is data', () => {
+  it.each([
+    ['a dimension-shaped string', '.x { content: "1e+3px"; }'],
+    ['a colour-shaped string', '.x { content: "#ff0000"; }'],
+    ['a named-colour-shaped string', '.x { content: "rebeccapurple"; }'],
+    ['a function-shaped string', '.x { content: "rgb(1, 2, 3)"; }'],
+  ])('does not report %s', (_name, css) => {
+    fixture({ 'src/styles/x.css': css });
+    expectClean(lint());
+  });
+
+  it.each([
+    ['a real dimension', '.x { width: 1e+3px; }', 'dimension-literal'],
+    ['a real colour', '.x { color: #ff0000; }', 'color-literal'],
+    ['a real named colour', '.x { color: rebeccapurple; }', 'color-literal'],
+  ])('still reports %s — the fix did not blunt the rule', (_name, css, rule) => {
+    fixture({ 'src/styles/x.css': css });
+    expect(rules(lint())).toContain(rule);
+  });
+});
+
 describe('programmatic styling', () => {
   it.each([
     ['assignment', 'document.body.style.color = c;'],
@@ -220,6 +265,17 @@ describe('programmatic styling', () => {
   ])('rejects %s', (_name, statement) => {
     fixture({ 'src/bad.ts': `export function apply(c: string) { ${statement} }\n` });
     expect(rules(lint())).toContain('programmatic-style');
+  });
+
+  it.each([
+    ['a bare identifier call', "import { createElement } from 'react';\nexport const x = () => createElement('style');\n"],
+    ['a bare createElementNS call', "declare const createElementNS: (ns: string, t: string) => void;\nexport const x = () => createElementNS('http://www.w3.org/1999/xhtml', 'style');\n"],
+    ['a property-access call', "export const x = () => document.createElement('style');\n"],
+  ])('rejects createElement(\'style\') as %s', (_name, source) => {
+    // The identifier form was missed: only property-access callees were handled, so an
+    // imported or destructured `createElement` walked past.
+    fixture({ 'src/bad.ts': source });
+    expect(rules(lint())).toContain('style-block');
   });
 
   it('rejects dangerouslySetInnerHTML', () => {
@@ -314,6 +370,21 @@ describe('malformed CSS — the leniency of postcss is not a clean bill of healt
     // Adding it is a reviewed source change — a false positive a human resolves, which is the
     // correct trade for never passing an unknown one.
     fixture({ 'src/styles/x.css': '.x { @starting-style { opacity: 0; } }\n' });
+    expect(rules(lint())).toContain('malformed-css');
+  });
+
+  it('rejects a disallowed at-rule nested THROUGH an allowed conditional', () => {
+    // Checking only the immediate parent let this through: `@starting-style`'s parent is
+    // `@media`, which is allowed. An allowed conditional does not stop the context being a
+    // style rule, so the whole ancestor chain is walked.
+    fixture({ 'src/styles/x.css': '.x { @media (width > 1em) { @starting-style { opacity: 0; } } }\n' });
+    expect(rules(lint())).toContain('malformed-css');
+  });
+
+  it('rejects a blockless @layer swallowing a declaration two levels down', () => {
+    // The worst version of the same gap: this produced NO finding of either kind, so a
+    // `forced-color-adjust: none` could be hidden where nothing would ever look at it.
+    fixture({ 'src/styles/x.css': '.x { @media (width > 1em) { @layer forced-color-adjust: none; } }\n' });
     expect(rules(lint())).toContain('malformed-css');
   });
 
@@ -541,6 +612,28 @@ describe('the allowlist', () => {
     expect(result.findings[0].file).toBe('src/styles/other.css');
   });
 
+  it('does NOT suppress a second, distinct functional colour in the same file', () => {
+    // The defect this pins: literals were normalised to `rgb()` before matching, so ONE entry
+    // suppressed every rgb value in the file and stayed non-stale while any of them survived —
+    // which made the allowlist widenable by configuration, the one thing it must never be.
+    fixture({ 'src/styles/syntax/theme.css': '.a { color: rgb(1, 2, 3); }\n.b { color: rgb(9, 9, 9); }\n' });
+    const result = lint(entry({ value: 'rgb(1, 2, 3)' }));
+    expect(result.errors).toEqual([]);
+    expect(result.findings.map((f) => f.literal)).toEqual(['rgb(9, 9, 9)']);
+  });
+
+  it('rejects the old normalised form outright — it now matches nothing and is stale', () => {
+    fixture({ 'src/styles/syntax/theme.css': '.a { color: rgb(1, 2, 3); }\n.b { color: rgb(9, 9, 9); }\n' });
+    const result = lint(entry({ value: 'rgb()' }));
+    expect(result.errors.join('\n')).toMatch(/matched nothing in this run/);
+    expect(result.findings).toHaveLength(2);
+  });
+
+  it('distinguishes two functional colours of DIFFERENT functions too', () => {
+    fixture({ 'src/styles/syntax/theme.css': '.a { color: rgb(1, 2, 3); }\n.b { color: hsl(4, 5%, 6%); }\n' });
+    expect(lint(entry({ value: 'rgb(1, 2, 3)' })).findings.map((f) => f.literal)).toEqual(['hsl(4, 5%, 6%)']);
+  });
+
   it('never suppresses by substring — "#ff0000" does not cover "#ff00001"-style neighbours', () => {
     fixture({ 'src/styles/syntax/theme.css': '.a { color: #ff0000; }\n.b { color: #ff0000aa; }\n' });
     const result = lint(entry());
@@ -653,18 +746,66 @@ describe('documented non-goals — each is NOT detected, on purpose and on recor
 
 /* ── The literal extractor, directly ─────────────────────────────────────────────────────── */
 
-describe('findColorLiterals', () => {
+describe('findValueLiterals — the CSS value lexer', () => {
   it('does not truncate a long hex into a short one', () => {
-    // `#deadbeefcafe` is not a colour; reading the first 8 characters as one would be a
-    // false positive that teaches people to distrust the lint.
-    expect(findColorLiterals('#deadbeefcafe', { named: true })).toEqual([]);
+    // `#deadbeefcafe` is not a colour; reading the first 8 characters as one would be a false
+    // positive that teaches people to distrust the lint. Lexing makes this structural: the
+    // word is either a hex colour or it is not.
+    expect(findValueLiterals('#deadbeefcafe', { named: true }).colors).toEqual([]);
   });
 
   it('reads an 8-digit hex', () => {
-    expect(findColorLiterals('#ff0000aa', { named: false })).toEqual(['#ff0000aa']);
+    expect(findValueLiterals('#ff0000aa', { named: false }).colors).toEqual(['#ff0000aa']);
+  });
+
+  it('captures a functional colour COMPLETE, never normalised to rgb()', () => {
+    // The normalised form was the allowlist-widening defect: one entry for `rgb()` suppressed
+    // every rgb value in the file and stayed non-stale while any one of them survived.
+    expect(findValueLiterals('rgb(1, 2, 3)', { named: true }).colors).toEqual(['rgb(1, 2, 3)']);
+  });
+
+  it('captures each nested colour separately and completely', () => {
+    expect(findValueLiterals('linear-gradient(rgb(1, 2, 3), hsl(4, 5%, 6%))', { named: true }).colors)
+      .toEqual(['rgb(1, 2, 3)', 'hsl(4, 5%, 6%)']);
   });
 
   it('ignores color-mix over tokens, which contains no literal', () => {
-    expect(findColorLiterals('color-mix(in srgb, var(--a), var(--b))', { named: true })).toEqual([]);
+    expect(findValueLiterals('color-mix(in srgb, var(--a), var(--b))', { named: true }).colors).toEqual([]);
+  });
+
+  it('treats a STRING as data, not as a value', () => {
+    // The root of the whole class: postcss hands over a raw value string, and a regex over it
+    // cannot tell a declared colour from quoted text that looks like one.
+    expect(findValueLiterals('"#ff0000"', { named: true }).colors).toEqual([]);
+    expect(findValueLiterals('"1e+3px"', { named: true }).dimensions).toEqual([]);
+  });
+
+  it('does not mistake a token reference for a named colour', () => {
+    // `var(--violet-500)` lexes to the word `--violet-500`, which is not a colour name — no
+    // stripping pass required for the token layer's own vocabulary.
+    expect(findValueLiterals('var(--violet-500)', { named: true }).colors).toEqual([]);
+  });
+
+  it('reads dimensions by the CSS number grammar, exponents and case included', () => {
+    for (const value of ['1e3px', '1E3px', '1e+3px', '1e-3px', '1.5e3px', '.5e-3px', '7PX', '-2px']) {
+      expect(findValueLiterals(value, { named: false }).dimensions, value).toEqual([value]);
+    }
+    for (const value of ['0.5rem', '100%', '1fr', '12']) {
+      expect(findValueLiterals(value, { named: false }).dimensions, value).toEqual([]);
+    }
+  });
+
+  it('skips url() contents — an address is not a style value', () => {
+    expect(findValueLiterals('url("#ff0000.png")', { named: true }).colors).toEqual([]);
+  });
+});
+
+describe('findColorLiteralsInText — free text, honestly pattern-matched', () => {
+  it('captures a functional colour complete, with balanced parens', () => {
+    expect(findColorLiteralsInText('rgb(calc(1*2), 2, 3)')).toEqual(['rgb(calc(1*2), 2, 3)']);
+  });
+
+  it('finds a hex in surrounding prose', () => {
+    expect(findColorLiteralsInText('the brand is #ff0000 today')).toEqual(['#ff0000']);
   });
 });
