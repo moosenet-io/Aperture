@@ -148,6 +148,19 @@ describe('the SDK static gate', () => {
       body: 'const k = ["fe", "tch"].join("");\nexport const go = () => (globalThis as never)[k];',
       detail: 'index a global by a literal name or not at all',
     },
+    'a local alias of a global, bracket access': {
+      body: 'const g = globalThis;\nexport const go = () => (g as never)["fetch"];',
+      detail: 'by bracket access',
+    },
+    'a local alias of a global, computed access': {
+      // The bypass both reviewers found: no forbidden name appears anywhere in this source.
+      body: 'const g = globalThis;\nconst key = ["fe", "tch"].join("");\nexport const go = (g as never)[key];',
+      detail: 'index a global by a literal name or not at all',
+    },
+    'an alias of window rather than globalThis': {
+      body: 'const w = window;\nconst key = "x";\nexport const go = (w as never)[key];',
+      detail: 'index a global by a literal name or not at all',
+    },
     'property read': {
       body: 'export const impl = globalThis.fetch;',
       detail: 'may be named only in src/api/transport.ts',
@@ -177,6 +190,45 @@ describe('the SDK static gate', () => {
       expect(red.stderr).toContain(detail);
     }, 60_000);
   }
+
+  // ── RECORDED LIMITATION ────────────────────────────────────────────────────────────────────
+  //
+  // This test asserts that the gate does NOT catch something. It exists so the boundary of the
+  // claim is pinned by an executable test rather than by a comment, the way APTR-01's egress
+  // lint records its undecodable-escape cases. It is NOT an aspiration: if a future revision
+  // starts catching this, this test goes red, and the right response is to delete the test and
+  // widen the claim in the same change — deliberately, not by accident.
+  //
+  // The alias check is one level, one file, initializer only. Reaching a global through an
+  // arbitrary expression defeats it, and closing that would mean a dataflow analyser inside a
+  // build lint. The enforcing control for deliberate obfuscation is the runtime CSP.
+  it('does NOT detect a global reached through arbitrary indirection — recorded limitation', async () => {
+    let result;
+    try {
+      await mkdir(PROBE_DIR, { recursive: true });
+      await writeFile(
+        path.join(PROBE_DIR, 'probe.ts'),
+        [
+          'const hold = { ref: globalThis };',
+          'const viaCall = () => globalThis;',
+          'const key = ["fe", "tch"].join("");',
+          '// Both of these construct a request. Neither is reported, and that is documented.',
+          'export const a = (hold.ref as never)[key];',
+          'export const b = (viaCall() as never)[key];',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+      result = await runScript('assert-sdk-clean.mjs');
+    } finally {
+      await rm(PROBE_DIR, { recursive: true, force: true });
+    }
+    expect(
+      result.code,
+      'The gate now catches indirection it is documented not to catch. That is an improvement, '
+      + 'not a failure — widen the claim in assert-sdk-clean.mjs and delete this test.',
+    ).toBe(0);
+  }, 60_000);
 
   it('does not flag a property KEY that merely shares the name', async () => {
     // `{ fetch: impl }` and `readonly fetch?: FetchLike` are declarations, not references —

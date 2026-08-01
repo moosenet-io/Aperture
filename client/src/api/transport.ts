@@ -225,8 +225,13 @@ const IDEMPOTENT_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD', 'OPTIONS
  *
  * 500 (`internal`) is deliberately absent: it signals a fault the same request will hit again,
  * and retrying it is how a struggling backend gets a retry storm on top of its outage.
+ *
+ * Exported so the test suite DERIVES its cases from this set rather than restating its members.
+ * A restated list agrees with the code today and stops guarding it tomorrow; a derived one
+ * fails the moment a status is added here without a policy classification. Not re-exported from
+ * `index.ts` — this is the transport's own policy, not part of the SDK's public surface.
  */
-const RETRYABLE_WITH_OWN_BACKOFF: ReadonlySet<number> = new Set([408, 502, 504]);
+export const RETRYABLE_WITH_OWN_BACKOFF: ReadonlySet<number> = new Set([408, 502, 504]);
 
 /**
  * Statuses retried ONLY when the server supplies a usable `Retry-After`.
@@ -240,7 +245,7 @@ const RETRYABLE_WITH_OWN_BACKOFF: ReadonlySet<number> = new Set([408, 502, 504])
  * This is the whole policy, not a narrowing of a broader one stated elsewhere: the two sets
  * above are the complete list of statuses this transport will ever retry.
  */
-const RETRYABLE_WITH_SERVER_INTERVAL: ReadonlySet<number> = new Set([429, 503]);
+export const RETRYABLE_WITH_SERVER_INTERVAL: ReadonlySet<number> = new Set([429, 503]);
 
 const PROBLEM_MEDIA_TYPE = 'application/problem+json';
 

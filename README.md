@@ -145,10 +145,14 @@ injected per target.
 - **`transport.ts`** — the injectable transport. It is the **only** file in the client that
   constructs a request. A gate over the parsed syntax tree enforces this as a **reference**
   rule, not a call rule: `fetch`, `XMLHttpRequest`, `EventSource`, `WebSocket` and `sendBeacon`
-  may not be *named* elsewhere at all, so an alias or a bracket access fails just as a call
-  does. A computed access on a global object is reported as unresolvable rather than passed
-  over; a name assembled at runtime is the one case no static rule reaches, and it is flagged
-  rather than silently allowed.
+  may not be *named* elsewhere at all — including through a string-literal bracket access
+  (`globalThis['fetch']`) or a local alias of a global object (`const g = globalThis; g['fetch']`).
+  A computed access on a recognised global is reported as **unresolvable** rather than passed
+  over. **Deliberate indirection through arbitrary expressions is not detected** — a global
+  obtained from a function call, read off an object property, or threaded through a module
+  boundary defeats the rule, because closing that would mean a dataflow analyser inside a build
+  lint. The control for deliberate obfuscation is the runtime CSP, and a test **records** the
+  undetected case so the boundary is pinned rather than implied.
 - **`client.ts`** — `call(transport, operationId, …)`. The compiler derives the method, path,
   parameters, request body, and success body from the generated types, so there is no
   hand-written second copy of the contract to drift.
@@ -185,8 +189,10 @@ Error and retry behaviour, stated exactly:
   time of the client's choosing, and guessing one is how a thundering herd starts. Nothing else
   is ever retried, including 500 and including under an explicit `retry: true`. `Retry-After` is
   honoured and never shortened; if it exceeds the delay cap the transport gives up rather than
-  retrying early. A table-driven test asserts the attempt count for every status in the policy,
-  with and without the header, so the stated policy and the code cannot drift apart.
+  retrying early. The tests **derive** their cases by iterating the two sets rather than
+  restating their members, and assert set membership against a recorded classification in both
+  directions — so a status added to a set with no policy decision fails, and a status removed
+  from one fails too. A test that merely agrees with the code is not a guard.
 - A 401 on the event stream is normalized like any other response, so it surfaces as a typed
   auth error at connect and at every reconnect. **The SDK does not parse SSE frames**, so an
   authorization failure delivered as an event *inside* an already-200 stream body is not

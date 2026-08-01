@@ -19,13 +19,18 @@
 //      `TransportOptions.baseUrl` is a REQUIRED property. The empty string is exempt from the
 //      first of those three and only the first: it is not an endpoint, it is the web target's
 //      same-origin-relative mode.
-//   4. EXACTLY ONE REQUEST CONSTRUCTION SITE: `fetch`, `XMLHttpRequest`, `EventSource`,
-//      `WebSocket`, and `sendBeacon` may be NAMED — not merely called — only in
-//      `src/api/transport.ts`. A reference rule rather than a call rule, because an alias
-//      (`const request = fetch`) and a bracket access (`globalThis['fetch']`) construct a
-//      request just as directly as a call does, and a call-shaped check misses both. A computed
-//      access on a global object is reported as unresolvable rather than passed over, so the one
-//      genuinely unreachable case — a name assembled at runtime — is never silently allowed.
+//   4. NO PROHIBITED CONSTRUCTOR MAY BE NAMED OUTSIDE `src/api/transport.ts`. `fetch`,
+//      `XMLHttpRequest`, `EventSource`, `WebSocket` and `sendBeacon` may not be referenced —
+//      not merely called — anywhere else, INCLUDING via a string-literal bracket access
+//      (`globalThis['fetch']`) or via a local alias of a global object (`const g = globalThis;
+//      g['fetch']`). A computed access on a recognised global — the global itself or a local
+//      binding initialised directly from one — is reported as UNRESOLVABLE rather than passed
+//      over. **Deliberate indirection through arbitrary expressions is NOT detected**: a global
+//      obtained from a function call, read off an object property, threaded through a module
+//      boundary, or reconstructed from parts defeats this rule. That is not statically
+//      decidable in a build lint, it is not pretended to be, and the enforcing control for
+//      anything deliberately obfuscated is the runtime CSP. `gates.test.mjs` RECORDS an
+//      undetected case so the boundary is pinned in a test rather than left to this comment.
 //
 // ── WHAT THIS GATE IS NOT ───────────────────────────────────────────────────────────────────
 //
@@ -261,17 +266,30 @@ function checkBaseUrlRequired(file, source, failures) {
  * a computed access all construct a request outside this file while evading a call-shaped
  * check, and all of them are plainly visible in source the gate already reads.
  *
- * So the rule is a REFERENCE rule, not a call rule, and it is transitively closed by
- * construction: an alias cannot be created without naming the constructor once, and naming it
- * once is the failure. What is deliberately NOT flagged is the declaration of a member that
- * merely shares the name — `{ fetch: injectedImpl }` and `readonly fetch?: FetchLike` are
- * property keys, not references to a global, and the transport's own injection point is exactly
- * that shape.
+ * So the rule is a REFERENCE rule, not a call rule. What it covers, exactly:
  *
- * The one case that stays out of reach of any static rule is a name assembled at runtime
- * (`globalThis[['fe','tch'].join('')]`). A computed access on a global object is therefore
- * flagged as UNRESOLVABLE rather than passed over, so the gate never stays silent about an
- * access it cannot evaluate.
+ *   * naming a constructor anywhere, in any position — a call, an alias, an argument, an export;
+ *   * a string-literal bracket access, `globalThis['fetch']`;
+ *   * the same through a LOCAL ALIAS of a global object, `const g = globalThis; g['fetch']`;
+ *   * a computed access on either of those — `g[key]` — reported as UNRESOLVABLE, because the
+ *     gate cannot evaluate the key and refuses to pass silently over an access it cannot read.
+ *
+ * What it does NOT cover, stated plainly rather than left to be discovered:
+ *
+ *   * **arbitrary indirection to a global object.** The alias check is one level, one file,
+ *     initializer only. A global returned from a function, read off an object property, passed
+ *     as a parameter, or rebuilt from parts is not recognised, so a computed access through it
+ *     is not reported. Closing that would mean building a dataflow analyser inside a build lint,
+ *     which is the wrong tool at the wrong layer; the control for deliberate obfuscation is the
+ *     runtime CSP, exactly as it is for the egress lint's undecodable-escape cases.
+ *
+ * It is therefore NOT transitively closed, and an earlier revision of this comment which said
+ * it was is the reason that sentence is now spelled out in the negative. `gates.test.mjs`
+ * records the undetected case as an executable test, so the boundary moves only deliberately.
+ *
+ * What is deliberately not flagged is the declaration of a member that merely shares the name —
+ * `{ fetch: injectedImpl }` and `readonly fetch?: FetchLike` are property keys, not references
+ * to a global, and the transport's own injection point is exactly that shape.
  */
 const GLOBAL_OBJECTS = new Set(['globalThis', 'window', 'self', 'navigator']);
 
@@ -280,7 +298,7 @@ const GLOBAL_OBJECTS = new Set(['globalThis', 'window', 'self', 'navigator']);
  * is the same access as `globalThis[k]`, and a check that only recognised the bare identifier
  * would be evaded by a type assertion, which is not a meaningful difference.
  */
-function isGlobalObjectReference(node) {
+function unwrap(node) {
   let current = node;
   while (
     ts.isParenthesizedExpression(current) || ts.isAsExpression(current)
@@ -289,11 +307,47 @@ function isGlobalObjectReference(node) {
   ) {
     current = current.expression;
   }
-  return ts.isIdentifier(current) && GLOBAL_OBJECTS.has(current.text);
+  return current;
+}
+
+/**
+ * Names bound DIRECTLY to a global object in this file — `const g = globalThis;`.
+ *
+ * One level, one file, initializer only. That is the bounded half of the alias problem and it
+ * closes the demonstrated bypass (`const g = globalThis; g[key]`). It is deliberately NOT
+ * dataflow analysis: a global returned from a function, stored on an object property, threaded
+ * through a module boundary, or reconstructed from parts is not tracked, and the claim in the
+ * header says so rather than implying otherwise.
+ */
+function collectGlobalAliases(source) {
+  const aliases = new Set();
+  const visit = (node) => {
+    if (
+      ts.isVariableDeclaration(node)
+      && ts.isIdentifier(node.name)
+      && node.initializer !== undefined
+    ) {
+      const initializer = unwrap(node.initializer);
+      if (ts.isIdentifier(initializer) && GLOBAL_OBJECTS.has(initializer.text)) {
+        aliases.add(node.name.text);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(source, visit);
+  return aliases;
+}
+
+function isGlobalObjectReference(node, aliases) {
+  const current = unwrap(node);
+  return ts.isIdentifier(current)
+    && (GLOBAL_OBJECTS.has(current.text) || aliases.has(current.text));
 }
 
 function checkSingleRequestSite(file, source, failures) {
   if (path.resolve(file) === TRANSPORT_FILE) return;
+
+  const globalAliases = collectGlobalAliases(source);
 
   const record = (node, detail) => failures.push({
     file, line: lineOf(source, node), rule: 'request-site', detail,
@@ -334,7 +388,7 @@ function checkSingleRequestSite(file, source, failures) {
       } else if (
         !ts.isStringLiteral(argument) && !ts.isNoSubstitutionTemplateLiteral(argument)
         && !ts.isNumericLiteral(argument)
-        && isGlobalObjectReference(node.expression)
+        && isGlobalObjectReference(node.expression, globalAliases)
       ) {
         record(
           node,
