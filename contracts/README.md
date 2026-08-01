@@ -160,15 +160,44 @@ Response: `{ "items": [...], "page": { "next_cursor": "<opaque>|null", "has_more
 
 ### Optimistic concurrency
 
-Every mutable resource returns an **`ETag`**. Every mutating route on such a resource takes
-**`If-Match`**.
+The rule is stated narrowly and exactly, because a universal-sounding rule with silent exceptions
+is worse than a narrower true one — implementers code to the exceptions and stop trusting the
+rule.
 
-- On `PATCH /threads/{threadId}` and `PUT /settings`, `If-Match` is **required**. A missing header
-  is `validation-failed`; a stale one is `precondition-failed`.
+**Optimistic concurrency applies to resources with an in-place mutable representation.** In v1
+those are exactly two: **threads** and **settings**. Both return an `ETag`; both require
+`If-Match` on the routes that mutate them in place:
+
+| Route | `ETag` returned | `If-Match` |
+|---|---|---|
+| `PATCH /threads/{threadId}` | yes | **required** |
+| `PUT /settings` | yes | **required** |
+| `DELETE /threads/{threadId}` | — | **optional**, and enforced when supplied |
+| `GET /modules` | yes | n/a — cache validation only, not a mutation target |
+| everything else | no | not applicable |
+
+The two deliberate departures, and why:
+
+- **Thread deletion takes `If-Match` optionally.** Delete is not a read-modify-write: a caller
+  deleting a thread is not merging a change into a representation it may have misread. Requiring
+  a fresh `ETag` would force a GET before every delete for no safety gain. Supplying it is
+  supported and fully enforced for a client that wants "delete only if unchanged".
+- **Attachments have no `ETag` and take no `If-Match`.** Their bytes are immutable once stored —
+  there is no in-place mutation to race. The only mutation is releasing a reference
+  (`DELETE /attachments/{attachmentId}`), which is idempotent and reference-counted, and the
+  routes that create them carry `Idempotency-Key` instead, which is the correct primitive for a
+  create.
+
+Where the rule does apply:
+
+- A missing `If-Match` is `validation-failed`; a stale one is `precondition-failed`.
 - **`If-Match: *` is not accepted as a concurrency bypass** on any route.
 - On `precondition-failed` the client refetches, reapplies its change to the fresh
   representation, and retries. It never retries blind, and it never presents last-write-wins as
   success.
+
+A later sprint adding a resource with an in-place mutable representation adds it to the table
+above in the same change set. Adding one without an `ETag` is a contract defect, not a shortcut.
 
 ### Idempotency
 
@@ -200,12 +229,25 @@ The URN is part of the contract: clients switch on it, so it is never reworded, 
 repurposed. The full taxonomy — each URN's meaning, its user-facing message, and its recovery
 action — is owned by `aperture-errors-v1.md`.
 
-Two rules that apply to every error everywhere:
+The URN shape is **enforced by the schema**, not merely described: `Problem.type` carries a
+pattern requiring `urn:aperture:error:<lower-kebab-class>`, so an implementation cannot mint an
+ad-hoc error identity that no client switches on.
+
+There is **no exception** to the problem-details rule, including on the unauthenticated probes:
+`GET /ready` reports a not-ready state as `capability-unavailable` problem details with the
+unready capabilities in the `capabilities` member, not as a bare readiness body.
+
+Three rules that apply to every error everywhere:
 
 - **Redaction is mandatory.** A problem-details body must never contain an internal host, address,
   port, file path, token, stack frame, or verbatim upstream error string. The server maps to a
   class and a safe message; the detail goes to the server log keyed by `correlation_id`, which the
   response echoes so an operator can join the two.
+- **The problem object is closed.** RFC-9457 permits arbitrary extension members; this contract
+  does not, and `additionalProperties: false` is part of the redaction guarantee rather than
+  pedantry — an open problem object is how an upstream error string or a host name reaches a
+  client body, one well-intentioned `"debug"` key at a time. A new member is a reviewed additive
+  contract change, never something added at the point of failure.
 - **`not-found` over `forbidden` wherever existence is itself a secret.** A cross-principal fetch
   returns `not-found`. An error code must never become an existence oracle.
 
@@ -281,9 +323,19 @@ directory is mirrored publicly.
 validator. The CI `contract-validate` job asserts, at minimum:
 
 1. the document parses and validates as OpenAPI **3.1**;
-2. every operation declares at least one error response;
+2. every operation declares at least one explicit 4xx/5xx error response;
 3. every operation declares an `x-aperture-limits` block;
-4. the `EventType` enum equals the taxonomy table in `aperture-events-v1.md`;
-5. every event schema requires `origin`, and `origin` has no default;
-6. no route declares a CORS response header;
-7. no file in this directory contains a literal host, address, or port.
+4. the `EventType` enum equals the taxonomy table in `aperture-events-v1.md` (**T-ORIGIN-1**);
+5. every event schema requires `origin`, and `origin` has no default (**T-ORIGIN-2/3**);
+6. the fixed origins hold — `token`/`thinking` are `assistant`, the tool events are `tool`, the
+   lifecycle and platform events are `system`, and `context` is `user|system` (**T-ORIGIN-4**);
+7. every error response is `application/problem+json`, `Problem.type` matches the URN pattern, and
+   the problem object is closed (**T-PROBLEM-1**);
+8. no route declares a CORS response header (**T-CORS-1**);
+9. no file in this directory contains a literal host, address, or port.
+
+The **cross-event** invariants cannot be checked from the document alone and are not pretended to
+be: `aperture-events-v1.md` §9 names each one, says in those words that it is not expressible in
+the schema, and names the conformance test that enforces it instead. **T-ORIGIN-5** — the
+message-association invariant that stops a tool result being attributed to an assistant message —
+is the most important of these and is the one to run first when touching the stream.

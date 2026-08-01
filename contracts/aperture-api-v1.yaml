@@ -153,11 +153,18 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
         "503":
-          description: Not ready. The body names the unready capabilities and why.
+          description: |
+            Not ready. **RFC-9457 problem details**, `urn:aperture:error:capability-unavailable`,
+            with the unready capabilities in the `capabilities` member — never a bare `Readiness`
+            body. "Every error is problem details" holds without exception, including here, and
+            including on the unauthenticated probes.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
           content:
-            application/json:
+            application/problem+json:
               schema:
-                $ref: "#/components/schemas/Readiness"
+                $ref: "#/components/schemas/Problem"
         default:
           $ref: "#/components/responses/Problem"
 
@@ -861,8 +868,15 @@ paths:
             `stream_id` half is what lets the server tell "resume connection X from 412" from
             "connection X is gone, so this position means nothing".
 
-            Absent on a first connection. An unparseable value is treated as absent, never
-            parse-guessed.
+            Absent on a first connection, which is the only case that legitimately starts at live
+            with no `resync`.
+
+            **A malformed value is never treated as absent.** It is never parse-guessed either.
+            The client asked to resume from *somewhere*, so silently starting it at live would
+            lose continuity without telling it — exactly the silent loss this contract forbids.
+            The server issues a fresh `stream_id` and immediately emits a `resync` with
+            `reason: unparseable_position` and no `lost_range`, and the client refetches. Enforced
+            by conformance test **T-RESYNC-2**.
           schema:
             type: string
             pattern: '^[A-Za-z0-9_-]+:[0-9]+$'
@@ -1106,6 +1120,18 @@ paths:
         "416":
           description: The requested range is not satisfiable. The isolation header set is
             unchanged on this response.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+            Content-Security-Policy:
+              description: MUST be `sandbox; default-src 'none'`, exactly as on the success
+                response. An error path is not an isolation exemption.
+              schema:
+                type: string
+            X-Content-Type-Options:
+              description: MUST be `nosniff`.
+              schema:
+                type: string
           content:
             application/problem+json:
               schema:
@@ -1805,23 +1831,39 @@ components:
 
     Problem:
       type: object
+      additionalProperties: false
       description: |
-        RFC-9457 problem details.
+        RFC-9457 problem details. **Every** error response in this API uses this schema and is
+        served as `application/problem+json`. There is no route that reports a failure in any
+        other shape.
 
         **Redaction is mandatory.** A problem-details body must never contain an internal host,
         address, port, file path, token, stack frame, or verbatim upstream error string. The
         server maps the failure to a stable class and a safe message; the detail goes to the
         server log keyed by `correlation_id`, which the response echoes so an operator can join
         the two.
+
+        **This object is closed.** RFC-9457 permits arbitrary extension members; this contract
+        does not. `additionalProperties: false` is deliberate and is part of the redaction
+        guarantee: an open problem object is exactly how an upstream error string, a stack frame,
+        or a host name reaches a client body, one well-intentioned `"debug"` key at a time. A new
+        member is an additive contract change, reviewed like any other — not something an
+        implementation adds at the point of failure. Enforced by conformance test **T-PROBLEM-1**.
       required: [type, title, status]
       properties:
         type:
           type: string
           format: uri
+          pattern: '^urn:aperture:error:[a-z][a-z0-9]*(-[a-z0-9]+)*$'
+          maxLength: 128
           description: |
-            A stable URN of the form `urn:aperture:error:<class>`. It is part of the contract:
-            clients switch on it, so it is never reworded, re-cased, or repurposed. Full taxonomy
-            in `contracts/aperture-errors-v1.md`.
+            A stable URN of the form `urn:aperture:error:<class>`, where `<class>` is
+            lower-kebab-case. The pattern is enforced by the schema, not merely described: an
+            arbitrary URI here would let an implementation mint an ad-hoc error identity that no
+            client switches on, which is how a stable taxonomy quietly stops being stable.
+
+            It is part of the contract: clients switch on it, so it is never reworded, re-cased,
+            or repurposed. Full taxonomy in `contracts/aperture-errors-v1.md`.
           examples:
             - urn:aperture:error:validation-failed
             - urn:aperture:error:auth-required
@@ -1864,6 +1906,16 @@ components:
           description: Present on `capability-unavailable` — the capability's stable identifier,
             never a host or an address.
           maxLength: 128
+        capabilities:
+          type: array
+          description: |
+            Present where more than one capability is implicated — notably the `503` from
+            `GET /ready`, which reports every unready capability. It exists as a member of this
+            closed object precisely so that readiness can fail in problem-details form like
+            everything else, rather than inventing a second error shape.
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/CapabilityStatus"
         errors:
           type: array
           description: Present on `validation-failed`. Field paths are escaped, never echoed raw.
@@ -1883,6 +1935,8 @@ components:
     Readiness:
       type: object
       additionalProperties: false
+      description: The **success** shape for `GET /ready`. The not-ready case is an error and is
+        reported as problem details like every other error in this API.
       required: [ready, capabilities]
       properties:
         ready:
@@ -1891,19 +1945,24 @@ components:
           type: array
           maxItems: 64
           items:
-            type: object
-            additionalProperties: false
-            required: [id, state]
-            properties:
-              id:
-                type: string
-                maxLength: 128
-              state:
-                $ref: "#/components/schemas/CapabilityState"
-              reason:
-                type: string
-                description: Human-readable and free of infrastructure identifiers.
-                maxLength: 300
+            $ref: "#/components/schemas/CapabilityStatus"
+
+    CapabilityStatus:
+      type: object
+      additionalProperties: false
+      required: [id, state]
+      properties:
+        id:
+          type: string
+          description: The capability's stable identifier. Never a host, an address, or an
+            upstream product name.
+          maxLength: 128
+        state:
+          $ref: "#/components/schemas/CapabilityState"
+        reason:
+          type: string
+          description: Human-readable and free of infrastructure identifiers.
+          maxLength: 300
 
     CapabilityState:
       type: string
@@ -2402,6 +2461,12 @@ components:
             **A `token` event always has `origin: assistant`.** Nothing that did not come from the
             assistant's own generation is ever emitted as a `token`, and a `tool.result` is never
             coalesced into one regardless of what bytes the tool returned.
+
+            **Binding invariant (cross-event, not expressible in OpenAPI).** A `token` may only
+            reference a `message_id` whose `message.start` declared `message_origin: assistant`.
+            The server MUST NOT emit one otherwise, and a client that receives one MUST discard
+            it rather than render it. Enforced by conformance test **T-ORIGIN-5**. See
+            `contracts/aperture-events-v1.md` §2.6.
           properties:
             type:
               const: token
@@ -2414,30 +2479,66 @@ components:
       allOf:
         - $ref: "#/components/schemas/EventEnvelope"
         - type: object
-          required: [type, message_id, thread_id]
-          description: Opens a message. Exactly one `message.start` precedes any `token` for that
+          required: [type, message_id, thread_id, message_origin]
+          description: |
+            Opens a message. Exactly one `message.start` precedes any `token` for that
             `message_id`.
+
+            **`origin` is `system`, always.** A lifecycle event is produced by the platform, not
+            by whatever the message will contain — consistent with the rule that `origin`
+            describes *who produced this event*. The provenance of the **message** is a separate,
+            mandatory field: `message_origin`.
+
+            **`message_origin` is the binding every client attribution decision hangs off.** A
+            client records `message_id → message_origin` here and renders every subsequent event
+            for that message according to it. It is required, has no default, and cannot be
+            inferred, revised, or overridden later — including by `role_hint`, by the message's
+            content, or by a subsequent event claiming otherwise.
           properties:
             type:
               const: message.start
+            origin:
+              const: system
+            message_origin:
+              allOf:
+                - $ref: "#/components/schemas/Origin"
+              description: |
+                The provenance of the message being opened. Immutable for the life of the
+                message. A message opened `assistant` can never later carry tool content, and a
+                message opened `tool` can never later carry assistant tokens — see
+                **T-ORIGIN-5**.
             role_hint:
               type: string
-              description: A display hint only. It never overrides `origin`, and a client that
-                disagrees with `origin` follows `origin`.
+              description: |
+                A display hint only. It never overrides `message_origin`. Where the two disagree,
+                `message_origin` wins and the hint is ignored — it is a nicety, not an authority.
               maxLength: 64
 
     MessageEndEvent:
       allOf:
         - $ref: "#/components/schemas/EventEnvelope"
         - type: object
-          required: [type, message_id, thread_id, reason]
+          required: [type, message_id, thread_id, reason, message_origin]
           description: |
             Closes a message. **Every opened message is closed exactly once** — on success, on
             cancellation, and on failure. A stream never simply stops mid-message without a
             terminal event, unless the connection itself dies, which is what resume is for.
+
+            **`origin` is `system`, always**, for the same reason as `message.start`.
+            `message_origin` is repeated here and **MUST equal** the value declared by the
+            corresponding `message.start`. A mismatch is a protocol violation: the client keeps
+            the value it recorded at `message.start` and does not re-attribute the message.
+            Enforced by conformance test **T-ORIGIN-7**.
           properties:
             type:
               const: message.end
+            origin:
+              const: system
+            message_origin:
+              allOf:
+                - $ref: "#/components/schemas/Origin"
+              description: Must equal the `message_origin` declared at `message.start`. Never a
+                re-attribution.
             reason:
               type: string
               description: |
@@ -2450,8 +2551,16 @@ components:
       allOf:
         - $ref: "#/components/schemas/EventEnvelope"
         - type: object
-          required: [type, tool_call_id, tool_name]
-          description: A tool invocation has begun. `origin` is `tool`.
+          required: [type, tool_call_id, tool_name, message_id, thread_id]
+          description: |
+            A tool invocation has begun. `origin` is `tool`.
+
+            `message_id` is **required**, so the association between a tool invocation and the
+            message it belongs to is explicit rather than inferred from adjacency in the stream.
+
+            **Binding invariant (cross-event, not expressible in OpenAPI).** The referenced
+            message MUST have been opened with `message_origin: tool`. Enforced by conformance
+            test **T-ORIGIN-5**.
           properties:
             type:
               const: tool.call
@@ -2472,16 +2581,38 @@ components:
       allOf:
         - $ref: "#/components/schemas/EventEnvelope"
         - type: object
-          required: [type, tool_call_id, status]
+          required: [type, tool_call_id, status, message_id, thread_id]
           description: |
             A tool invocation has returned.
 
-            **Normative invariant.** A `tool.result` may **never** be emitted as, or coalesced
-            into, an assistant token event, regardless of what bytes the tool returned. Its
-            `result` field is inert data: if it contains something shaped like an SSE frame, an
-            assistant message, or another event envelope, that content is still rendered as a
-            tool result, because attribution comes from `origin` and the event variant and never
-            from content. This is the transport half of prompt-injection containment.
+            **Normative invariant 1 — no re-emission.** A `tool.result` may **never** be emitted
+            as, or coalesced into, an assistant token event, regardless of what bytes the tool
+            returned. Its `result` field is inert data: if it contains something shaped like an
+            SSE frame, an assistant message, or another event envelope, that content is still
+            rendered as a tool result, because attribution comes from `origin` and the event
+            variant and never from content. Enforced by conformance test **T-ORIGIN-6**.
+
+            **Normative invariant 2 — no indirect attribution.** Pinning `origin` to `tool` closes
+            the direct laundering path but not the indirect one, which runs through the message a
+            result is associated with: if a `tool.result` could be attached to a message opened as
+            `message_origin: assistant`, a client faithfully following this contract would render
+            tool output inside an assistant message. It would be laundered by association while
+            every individual event validated.
+
+            That path is closed here:
+
+            1. `message_id` is **required**, so the association is explicit and never inferred
+               from adjacency in the stream.
+            2. The referenced message MUST have been opened with `message_origin: tool`. **This
+               constraint spans two events and is therefore not expressible in OpenAPI** — no
+               `$ref`, `allOf`, or `discriminator` can reach back to a previously emitted event.
+               It is stated here as a normative server invariant and enforced by conformance test
+               **T-ORIGIN-5**, on both sides: the server MUST NOT emit such an event, and a
+               client that receives one MUST render it as a tool result under its own tool
+               framing — never inside the assistant message — or discard it. Failing closed is
+               required; "render it where it landed" is not an option.
+
+            See `contracts/aperture-events-v1.md` §2.6 for the full statement and §9 for the tests.
           properties:
             type:
               const: tool.result
@@ -2535,11 +2666,22 @@ components:
         - $ref: "#/components/schemas/EventEnvelope"
         - type: object
           required: [type, topic]
-          description: A context-bus event. It shares the per-connection sequence space with
-            every other event type; there is no second stream and no second sequence counter.
+          description: |
+            A context-bus event. It shares the per-connection sequence space with every other
+            event type; there is no second stream and no second sequence counter.
+
+            **`origin` is restricted to `user` or `system`** — enforced by the schema, not merely
+            described in the taxonomy. A context event is produced either by a human action or by
+            the platform. It can never be `assistant` or `tool`, because a client publishing to
+            `POST /v1/aperture/events` must never be able to mint an event that renders with
+            assistant or tool authority. Leaving the full four-value domain here would have made
+            the API the laundering path that the stream itself forbids.
           properties:
             type:
               const: context
+            origin:
+              type: string
+              enum: [user, system]
             topic:
               type: string
               maxLength: 128
@@ -2572,22 +2714,64 @@ components:
       allOf:
         - $ref: "#/components/schemas/EventEnvelope"
         - type: object
-          required: [type, from_seq, to_seq]
+          required: [type, reason]
           description: |
-            The client's resume position has aged out of the bounded replay window, so some
-            events can no longer be delivered. The event names the lost `seq` range and the
-            affected ids and instructs the client to refetch that state over REST — see
-            `GET /threads/{threadId}/turns/{turnId}`. Replay is bounded and this is what the
-            bound looks like from the client's side.
+            Events could not be delivered, and the client is told so explicitly rather than being
+            silently switched to live delivery. It instructs the client to refetch the affected
+            state over REST — see `GET /threads/{threadId}/turns/{turnId}`.
+
+            **The lost range lives in `lost_range`, which names its own sequence domain.** This
+            matters and is the part two implementers would otherwise read two ways: after a
+            reconnect the `resync` event itself belongs to the **new** connection, so its envelope
+            `stream_id` and `seq` are in the new domain, while the events that were lost belong to
+            the **previous** connection and are numbered in *its* domain. `lost_range.stream_id`
+            states which connection the `from_seq`/`to_seq` numbers refer to; it is frequently
+            **not** the same as the envelope's `stream_id`.
+
+            **`from_seq` and `to_seq` are INCLUSIVE on both ends** — the closed interval
+            `[from_seq, to_seq]` is exactly the set of `seq` values that were not delivered.
+            `from_seq == to_seq` means precisely one lost event. The `resync` event is **never
+            inside its own reported range**: it is a delivered event in the current domain, and
+            the range describes undelivered events.
+
+            `lost_range` is **absent** when the loss cannot be expressed as a range — an unknown
+            `stream_id` or an unparseable resume position, where the server has no trustworthy
+            prior position to subtract from. The client then refetches the affected threads
+            wholesale rather than assuming a bound. `reason` always says which case this is.
           properties:
             type:
               const: resync
-            from_seq:
-              type: integer
-              minimum: 0
-            to_seq:
-              type: integer
-              minimum: 0
+            reason:
+              type: string
+              description: |
+                Why the resync was issued. `window_aged_out` — the position was valid but has
+                fallen out of the bounded replay buffer. `unknown_stream` — the `stream_id` is not
+                one the server has (restart, or the connection was reaped). `unparseable_position`
+                — the `Last-Event-ID` did not parse and was not guessed at.
+                `gap_detected` — the server detected a gap in its own emission.
+              enum: [window_aged_out, unknown_stream, unparseable_position, gap_detected]
+            lost_range:
+              type: object
+              additionalProperties: false
+              required: [stream_id, from_seq, to_seq]
+              description: |
+                The undelivered range, in the sequence domain of `stream_id`. Present only when a
+                trustworthy prior position exists — that is, for `window_aged_out` and
+                `gap_detected`. Absent for `unknown_stream` and `unparseable_position`.
+              properties:
+                stream_id:
+                  allOf:
+                    - $ref: "#/components/schemas/Id"
+                  description: The connection whose sequence domain `from_seq` and `to_seq` are
+                    expressed in. Often the **previous** connection, not the current one.
+                from_seq:
+                  type: integer
+                  minimum: 0
+                  description: First undelivered `seq`. **Inclusive.**
+                to_seq:
+                  type: integer
+                  minimum: 0
+                  description: Last undelivered `seq`. **Inclusive.**
             affected_thread_ids:
               type: array
               maxItems: 100

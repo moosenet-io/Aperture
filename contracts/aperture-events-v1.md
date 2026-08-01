@@ -129,12 +129,59 @@ Some event types have a fixed `origin`, asserted by the schema:
 | `presence` | always `system` |
 | `resync` | always `system` |
 | `heartbeat` | always `system` |
-| `message.start` / `message.end` | the origin of the message being opened or closed |
-| `context` | `user` or `system`, per what produced the event |
+| `message.start` / `message.end` | always `system` — see below |
+| `context` | `user` or `system` only, **constrained in the schema** |
+
+Every one of these is a schema-level `const` or a restricted `enum`, not a description. A
+constraint that lives only in prose is a constraint six sprints will code past.
+
+**Lifecycle events are `origin: system`, and carry `message_origin` separately.** A
+`message.start` is produced by the platform, not by whatever the message will go on to contain,
+so its own `origin` is `system` — consistent with §2.3. The provenance of the **message** is a
+separate mandatory field, `message_origin`, and that is what a client binds its attribution to.
+`message.end` repeats it and must repeat it identically; a mismatch is a protocol violation and
+the client keeps what it recorded at `message.start`.
 
 A client publishing to `POST /v1/aperture/events` may never assert `origin: assistant` or
-`origin: tool`; the server rejects such a request with `validation-failed`. Provenance is always a
-server-side determination.
+`origin: tool`; the schema restricts `context` to `user | system` and the server rejects anything
+else with `validation-failed`. Provenance is always a server-side determination.
+
+### 2.6 The message-association invariant — closing the indirect path
+
+Pinning `token` to `assistant` and `tool.result` to `tool` closes the **direct** laundering path.
+It does not close the **indirect** one, which runs through the message an event is associated
+with:
+
+> If a `tool.result` could be associated with a message opened as `message_origin: assistant`,
+> then a client faithfully following this contract would render tool output inside an assistant
+> message. Every individual event would validate. The tool payload would have been laundered by
+> association rather than by label.
+
+That is the same failure D9 exists to prevent, reached one step sideways. It is closed by three
+rules:
+
+1. **`message_origin` is declared once, at `message.start`, and is immutable.** It has no
+   default, cannot be inferred, and is never revised — not by `role_hint`, not by content, not by
+   a later event claiming otherwise.
+2. **`tool.call`, `tool.result`, and `token` all carry a required `message_id`.** The association
+   is explicit. It is never inferred from adjacency in the stream, which was the previous
+   implicit and unstateable rule.
+3. **The association must agree with the provenance:**
+   - a `token` may only reference a message opened `message_origin: assistant`;
+   - a `tool.call` or `tool.result` may only reference a message opened `message_origin: tool`.
+
+**This constraint spans two events and is therefore not expressible in OpenAPI.** No `$ref`,
+`allOf`, `oneOf`, or `discriminator` can reach back to a previously emitted event and check what
+it declared. Rather than leave that as an unstated gap, it is stated here in those words and
+enforced by conformance test **T-ORIGIN-5**, which asserts it on both sides:
+
+- the **server** MUST NOT emit an event violating it, and the test drives the server to try;
+- a **client** receiving one MUST fail closed — render it under tool framing, or discard it.
+  Rendering it where it landed is not an option, and neither is trusting the association.
+
+The generalized rule, worth stating because it is the one a future event type must also obey:
+**an event is attributed by the provenance of the message it belongs to and by its own `origin`,
+and where those two disagree, the event is invalid rather than resolved in either direction.**
 
 ---
 
@@ -147,15 +194,15 @@ other fails the build.
 | `type` | `origin` | Carries | Purpose |
 |---|---|---|---|
 | `token` | `assistant` | `text`, `message_id`, `thread_id` | A text delta appended to an open message. |
-| `message.start` | message's | `message_id`, `thread_id` | Opens a message. |
-| `message.end` | message's | `message_id`, `thread_id`, `reason` | Closes a message with a terminal reason. |
-| `tool.call` | `tool` | `tool_call_id`, `tool_name`, `arguments_digest` | A tool invocation has begun. |
-| `tool.result` | `tool` | `tool_call_id`, `status`, `result` | A tool invocation returned. Inert data. |
+| `message.start` | `system` | `message_id`, `thread_id`, **`message_origin`** | Opens a message and declares its provenance. |
+| `message.end` | `system` | `message_id`, `thread_id`, `reason`, **`message_origin`** | Closes a message with a terminal reason. |
+| `tool.call` | `tool` | `tool_call_id`, `tool_name`, `arguments_digest`, **`message_id`** | A tool invocation has begun. |
+| `tool.result` | `tool` | `tool_call_id`, `status`, `result`, **`message_id`** | A tool invocation returned. Inert data. |
 | `thinking` | `assistant` | `text` | Reasoning progress. Advisory; droppable. |
 | `error` | `system` | `error` (problem details) | An in-stream failure. |
 | `context` | `user`/`system` | `topic`, `payload` | A context-bus event. |
 | `presence` | `system` | `state`, `detail` | An assistant availability/attention signal. |
-| `resync` | `system` | `from_seq`, `to_seq`, affected ids | The client's position aged out; refetch. |
+| `resync` | `system` | `reason`, `lost_range`, affected ids | Events were not delivered; refetch. |
 | `heartbeat` | `system` | — | Liveness tick. |
 
 Every event additionally carries the common envelope: `type`, `stream_id`, `seq`, `origin`, `ts`,
@@ -253,28 +300,72 @@ only. **Resume is never unbounded**, and no client may assume otherwise.
 
 ### 5.3 `resync`
 
-When a client's `Last-Event-ID` has aged out of the window, the server does **not** silently start
-from live and does **not** pretend the gap did not happen. It emits a `resync` event naming the
-lost `seq` range and the affected thread and message ids, then continues live.
+Whenever events could not be delivered, the server says so. It does **not** silently start from
+live and does **not** pretend the gap did not happen.
 
-On receiving `resync` the client:
+**The four cases, and there are only four** — the `reason` field always names which one:
 
-1. marks the named threads/messages as stale;
-2. refetches the authoritative state over REST — `GET /v1/aperture/threads/{threadId}/turns/{turnId}`
-   for a turn, or the thread's message list where the loss is broader;
-3. reconciles by `message_id`, not by position;
-4. resumes normal live handling.
+| `reason` | When | `lost_range` |
+|---|---|---|
+| `window_aged_out` | The position was valid but has fallen out of the bounded buffer. | Present |
+| `gap_detected` | The server detected a gap in its own emission. | Present |
+| `unknown_stream` | The `stream_id` is not one the server has — restart, or the connection was reaped. | **Absent** |
+| `unparseable_position` | The `Last-Event-ID` did not parse. | **Absent** |
 
-A client that observes a `seq` gap without a `resync` treats it identically to a `resync` for the
-gap range: the invariant is "no silent loss", and the client enforces it too.
+#### The sequence domain of the reported range
 
-### 5.4 An unknown `stream_id`
+This is the part two implementers would otherwise read two ways, so it is pinned:
 
-If the `stream_id` in a resume request is entirely unknown — the server restarted, or the
-connection was reaped — the server issues a **fresh** `stream_id` with its own `seq` domain
-starting from the beginning, and immediately emits a `resync` so the client knows to refetch
-rather than assuming continuity. It does **not** silently pretend the old position was honoured,
-and it does **not** reject the connection.
+- The `resync` event's **envelope** `stream_id` and `seq` belong to the **current** connection —
+  the one the client is reading right now.
+- The **lost events** belong to whichever connection they were numbered in, which after a
+  reconnect is the **previous** one.
+- Therefore `lost_range` carries its **own** `stream_id`, and that is the domain `from_seq` and
+  `to_seq` are expressed in. It is frequently *not* equal to the envelope's `stream_id`, and a
+  client must never assume it is.
+
+#### Inclusive, and never self-referential
+
+- `from_seq` and `to_seq` are **inclusive on both ends**. The closed interval
+  `[from_seq, to_seq]` is exactly the set of `seq` values that were not delivered.
+- `from_seq == to_seq` means **precisely one** lost event.
+- A `resync` is **never inside its own reported range**. It is a delivered event in the current
+  domain; the range describes undelivered events, in a domain it names explicitly. There is no
+  case in which a client should subtract the `resync` itself from the range.
+
+Where the loss cannot be expressed as a range — `unknown_stream`, `unparseable_position` — the
+server has no trustworthy prior position to subtract from, so it omits `lost_range` entirely
+rather than inventing a plausible one. The client then refetches the affected threads wholesale.
+
+#### What the client does
+
+1. Marks the named threads/messages stale.
+2. Refetches authoritative state over REST — `GET /v1/aperture/threads/{threadId}/turns/{turnId}`
+   for a turn, or the thread's message list where the loss is broader, or wholesale where
+   `lost_range` is absent.
+3. Reconciles by `message_id`, **not** by position.
+4. Resumes normal live handling.
+
+A client that observes a `seq` gap without a `resync` treats it identically to a `resync` with
+`reason: gap_detected` for the gap range: the invariant is "no silent loss", and the client
+enforces it too.
+
+### 5.4 An unknown or unparseable resume position
+
+**Unknown `stream_id`.** The server restarted, or the connection was reaped. The server issues a
+**fresh** `stream_id` with its own `seq` domain and immediately emits a `resync` with
+`reason: unknown_stream`, so the client refetches rather than assuming continuity. It does not
+silently pretend the old position was honoured, and it does not reject the connection.
+
+**Unparseable `Last-Event-ID`. This is NOT treated as absent.** Absent means "I have never
+connected, start me at live" — a legitimate, lossless request. Malformed means "resume me from
+somewhere", and quietly answering that with live delivery loses continuity without telling the
+client, which is precisely the silent loss this section forbids. The server therefore treats it
+exactly like an unknown stream: fresh `stream_id`, immediate `resync` with
+`reason: unparseable_position`, no `lost_range`. It never parse-guesses the value.
+
+The only case that starts at live with no `resync` is a genuine first connection with no
+`Last-Event-ID` at all.
 
 Two tabs resuming the same `stream_id` concurrently is permitted: both may replay. Emission
 remains single-writer per `stream_id`, so `seq` stays strictly increasing and gapless for each.
@@ -349,20 +440,33 @@ is individually well-formed.
 
 ## 9. Conformance tests this document requires
 
-A conformance suite asserts, mechanically:
+Each test below has a **stable id**, cited from `aperture-api-v1.yaml` wherever a constraint is
+stated in prose because it cannot be stated in the schema. Where this contract says "enforced by
+T-*", that is a commitment that the test exists — not a euphemism for "we wrote it down and hoped".
 
-1. The `EventType` enum in `aperture-api-v1.yaml` matches §3's table exactly, in both directions.
-2. Every event schema **requires** `origin`, and `origin` has **no default**.
-3. An event object with an absent, empty, or out-of-domain `origin` is **rejected**, not coerced.
-4. A `tool.result` whose `result` field contains SSE-frame-shaped or assistant-event-shaped bytes
-   is delivered as a `tool.result` and rendered as a tool result — the negative test for §2.2.
-5. No code path compares two `ts` values to decide ordering, replay, or eviction.
-6. `resync` round-trips with its lost range and affected ids.
-7. Every opened message receives exactly one `message.end`, including on cancellation and failure.
+**A constraint that no schema can express and no test enforces is not a constraint.** Every such
+gap in this contract is named as one, in those words, and given a test id here.
+
+| Id | Asserts | Enforceable in the schema? |
+|---|---|---|
+| **T-ORIGIN-1** | The `EventType` enum matches §3's taxonomy table exactly, in both directions. | Yes — schema/doc drift check |
+| **T-ORIGIN-2** | Every event schema **requires** `origin`, and `origin` has **no default**. | Yes |
+| **T-ORIGIN-3** | An event with an absent, empty, or out-of-domain `origin` is **rejected**, never coerced. | Yes |
+| **T-ORIGIN-4** | The fixed origins of §2.5 hold: `token`/`thinking` are `assistant`, `tool.call`/`tool.result` are `tool`, `error`/`presence`/`resync`/`heartbeat`/`message.start`/`message.end` are `system`, and `context` is `user\|system` and nothing else. | Yes — `const` / restricted `enum` |
+| **T-ORIGIN-5** | **The message-association invariant of §2.6.** A `token` may only reference a message opened `message_origin: assistant`; a `tool.call`/`tool.result` may only reference one opened `message_origin: tool`. Asserted on **both** sides: the server refuses to emit a violation when driven to, and a client receiving one fails closed rather than rendering it in place. | **No — spans two events.** This test is the only enforcement. |
+| **T-ORIGIN-6** | A `tool.result` whose `result` contains SSE-frame-shaped or assistant-event-shaped bytes is delivered as a `tool.result` and rendered as a tool result. The §2.2 negative test. | Partly — the rest is behavioural |
+| **T-ORIGIN-7** | `message.end.message_origin` equals the value declared at `message.start`; a mismatch is rejected and the client keeps the recorded value. | **No — spans two events.** |
+| **T-RESYNC-1** | `resync` round-trips with `reason`, `lost_range` (including its own `stream_id` domain), and affected ids; `from_seq`/`to_seq` are honoured as **inclusive**; `lost_range` is absent exactly for `unknown_stream` and `unparseable_position`. | Partly |
+| **T-RESYNC-2** | An **unparseable** `Last-Event-ID` produces a fresh stream plus a `resync` with `reason: unparseable_position` — **never** silent live delivery. An unknown `stream_id` likewise, with `reason: unknown_stream`. A genuine first connection produces neither. | No — behavioural |
+| **T-CLOCK-1** | No code path compares two `ts` values to decide ordering, replay, or eviction. | No — static/grep gate |
+| **T-LIFECYCLE-1** | Every opened message receives exactly one `message.end`, including on cancellation and failure. | No — behavioural |
+| **T-PROBLEM-1** | Every error response is `application/problem+json`; `Problem.type` matches the `urn:aperture:error:<class>` pattern; the object is **closed**, so an extension member is rejected rather than passed through. | Yes |
+| **T-CORS-1** | No response on `/v1/aperture/*` carries a CORS header, and no route in the contract declares one. | Yes — contract lint |
 
 Per the enforcement rule, each assertion is written in the language whose property it asserts: a
 Rust property is asserted by a Rust test, a TypeScript property by a TypeScript test. Neither
-asserts the other's.
+asserts the other's. **T-ORIGIN-5** and **T-ORIGIN-7** exist in both languages, because both a
+server and a client can violate them independently.
 
 ---
 
