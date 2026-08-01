@@ -134,9 +134,16 @@
 //     An earlier revision claimed a named colour in TS had "no route to the DOM that another
 //     rule does not already close". THAT WAS FALSE: a JSX presentation attribute
 //     (`<circle fill="red" />`) was exactly such a route, and a reviewer found it. It is now
-//     covered. The claim is narrowed to what is actually true: the remaining uncovered routes
-//     are a value passed to a third-party component's colour prop, and any value that is not a
-//     static string literal (`fill={colour}`) — neither of which a source lint can resolve.
+//     covered. The NEXT revision covered only the bare-string spelling and claimed the
+//     remainder was "any non-static value" — ALSO FALSE, because `fill={'red'}` is entirely
+//     static and was uncovered. Both corrections were written from the fix just made rather
+//     than from what the code then did; this is the third time this one sentence has been
+//     wrong, so it is now stated from the unwrapper's actual cases.
+//     STATICALLY KNOWN values are covered in every spelling: bare string, expression container,
+//     no-substitution template, parenthesised, and `as`/`satisfies`/angle-bracket assertion.
+//     What remains is what a source lint genuinely cannot resolve: a value computed at runtime
+//     (`fill={colour}`, a template WITH substitutions, a value from props or state) and a colour
+//     handed to a third-party component's own prop.
 //   * The markup scanner is PARTIAL. It is a hand-written scanner, not a spec-compliant HTML
 //     tokenizer: it ends a tag at the next `>`, so an attribute value CONTAINING `>`
 //     desynchronizes it and behaviour after that point is UNMODELLED — a violation there may
@@ -366,7 +373,15 @@ const VENDOR_KEYFRAMES = /^-(webkit|moz|ms|o)-keyframes$/;
  *     properly is the same target-aware problem.
  *   * A legacy presentational attribute whose value is not a CSS value can therefore produce a
  *     FALSE POSITIVE. `background` — the legacy HTML body/table image URL — was in this list and
- *     has been removed for exactly that reason. The allowlist is the remedy for any that remain.
+ *     has been removed for exactly that reason.
+ *
+ *     THE ALLOWLIST IS NOT A REMEDY FOR THESE, and an earlier revision of this comment said it
+ *     was. `color-allowlist.json` admits only syntax-theme CSS paths, so a markup or TSX finding
+ *     cannot be allowlisted at all — a pointer to a door that does not exist, which is worse
+ *     than saying there is none. Remediation is a SOURCE change (write the value so it is not a
+ *     bare colour) or a reviewed change to this code-owned registry. The allowlist staying
+ *     narrow is deliberate: widening it to markup would reopen the configuration-widening hole
+ *     that complete functional-colour capture was introduced to close.
  *
  * The enforcing control for everything this misses is the runtime CSP (APTR-99), as it is for
  * every other frontier in this file. Growing this list toward SVG 2 completeness inside a build
@@ -652,6 +667,27 @@ function fontLiteralDetail(decl) {
 
 /* ── TypeScript ──────────────────────────────────────────────────────────────────────────── */
 
+/**
+ * The literal node behind a JSX attribute value, if the value is STATICALLY KNOWN.
+ *
+ * `fill="red"`, `fill={'red'}`, a no-substitution template, `fill={('red')}` and
+ * `fill={'red' as string}` are the same value written five ways, and a lint that treats them
+ * differently is telling people the rule is about syntax when it is about the value. Returns
+ * the underlying literal (which carries `.text`), or undefined when the value is dynamic.
+ *
+ * A template WITH substitutions is not static and is deliberately not unwrapped.
+ */
+function staticStringNode(node) {
+  if (!node) return undefined;
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node;
+  if (ts.isJsxExpression(node)) return staticStringNode(node.expression);
+  if (ts.isParenthesizedExpression(node)) return staticStringNode(node.expression);
+  if (ts.isAsExpression(node)) return staticStringNode(node.expression);
+  if (ts.isSatisfiesExpression && ts.isSatisfiesExpression(node)) return staticStringNode(node.expression);
+  if (ts.isTypeAssertionExpression && ts.isTypeAssertionExpression(node)) return staticStringNode(node.expression);
+  return undefined;
+}
+
 function scriptKindFor(ext) {
   if (ext === '.tsx') return ts.ScriptKind.TSX;
   return ts.ScriptKind.TS;
@@ -686,6 +722,9 @@ function scanTypeScript(relPath, text, ext, findings, errors) {
 
   const lineOf = (node) => source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
 
+  /** Literal nodes already reported as a presentation attribute's CSS value. */
+  const claimedByPresentationAttribute = new Set();
+
   const identifierName = (node) => {
     if (!node) return undefined;
     if (ts.isIdentifier(node)) return node.text;
@@ -704,14 +743,22 @@ function scanTypeScript(relPath, text, ext, findings, errors) {
 
     /* A JSX PRESENTATION ATTRIBUTE is a CSS value, exactly as it is in markup. Routed through
        the same lexer so the two scanners agree — `<circle fill="red" />` in a .tsx file and the
-       same element in an .svg file must reach the same verdict. Before this, JSX attribute
-       values fell through to the free-text scanner, which deliberately skips named colours, so
-       a named colour in a presentation attribute was a real uncovered route to the DOM. */
+       same element in an .svg file must reach the same verdict.
+
+       This handles the EXPRESSION forms too. An earlier revision unwrapped only a direct
+       `StringLiteral`, so `fill={'red'}`, a no-substitution template, `fill={('red')}` and
+       `fill={'red' as string}` all bypassed the lexer and fell through to the free-text
+       scanner, which skips named colours — while the identical SVG markup was rejected. Every
+       one of those is entirely STATIC; "static" is the property that matters here, not
+       "spelled without braces". */
     if (ts.isJsxAttribute(node) && isCssValuedAttribute(identifierName(node.name) ?? '')) {
-      const value = node.initializer;
-      if (value && ts.isStringLiteral(value)) {
+      const valueNode = staticStringNode(node.initializer);
+      if (valueNode) {
         const attribute = identifierName(node.name) ?? '';
-        for (const literal of findValueLiterals(value.text, { named: true }).colors) {
+        // Claim the node so the free-text scanner below does not report the same value again.
+        // Recorded by NODE rather than by parent shape, so any wrapper depth is covered.
+        claimedByPresentationAttribute.add(valueNode);
+        for (const literal of findValueLiterals(valueNode.text, { named: true }).colors) {
           findings.push(finding('color-literal', relPath, lineOf(node), `${attribute}="${literal}"`, literal));
         }
       }
@@ -797,13 +844,8 @@ function scanTypeScript(relPath, text, ext, findings, errors) {
     else if (ts.isJsxText(node)) literalText = node.text;
 
     // A presentation attribute's value was already lexed above as the CSS value it is; running
-    // the free-text scanner over it as well would report the same hex twice.
-    const isPresentationAttributeValue = node.parent
-      && ts.isJsxAttribute(node.parent)
-      && node.parent.initializer === node
-      && isCssValuedAttribute(identifierName(node.parent.name) ?? '');
-
-    if (literalText !== undefined && !isPresentationAttributeValue) {
+    // the free-text scanner over it as well would report the same value twice.
+    if (literalText !== undefined && !claimedByPresentationAttribute.has(node)) {
       // Free text, not a CSS value — pattern matching, and the header says so. Named colours
       // are deliberately not checked here; see NON-GOALS.
       for (const literal of findColorLiteralsInText(literalText)) {

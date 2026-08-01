@@ -62,6 +62,21 @@ function expectClean(result) {
   expect(result.findings).toEqual([]);
 }
 
+/**
+ * Assert a RECORDED non-detection: the scan ran, and found nothing.
+ *
+ * The errors assertion is the load-bearing half. A recording that checks only `findings` cannot
+ * tell SILENCE from FAILURE — it would pass if the scan errored and produced no findings for
+ * that reason, recording "not detected" when the truth is "did not run". A recording that
+ * cannot distinguish those records nothing. Errors are asserted FIRST so a broken fixture
+ * reports as a broken fixture rather than as a changed behaviour.
+ */
+function expectRecordedNotDetected(result, message) {
+  expect(result.errors, `${message} (the scan ERRORED — this is a broken fixture, not a behaviour change)`)
+    .toEqual([]);
+  expect(result.findings, message).toEqual([]);
+}
+
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'aperture-adherence-'));
 });
@@ -226,9 +241,69 @@ describe('JSX presentation attributes are CSS values too', () => {
     expect(found.map((f) => f.literal)).toContain(literal);
   });
 
-  it('reports a hex ONCE, not once per scanner', () => {
+  it.each([
+    ['an expression container', "fill={'red'}"],
+    ['a no-substitution template', 'fill={`red`}'],
+    ['a parenthesised expression', "fill={('red')}"],
+    ['an `as` assertion', "fill={'red' as string}"],
+    ['a `satisfies` expression', "fill={'red' satisfies string}"],
+    ['nested wrappers', "fill={(('red') as string)}"],
+  ])('reports a named colour written as %s — static is static', (_name, attribute) => {
+    // An earlier revision unwrapped only a bare `StringLiteral`, so every one of these bypassed
+    // the CSS-value path and fell through to free-text scanning, which skips named colours —
+    // while the identical SVG markup was rejected. The rule is about the VALUE, not the
+    // spelling, and a lint that disagrees with itself by syntax teaches the wrong rule.
+    fixture({ 'src/Icon.tsx': `export const I = () => <svg><circle ${attribute} /></svg>;\n` });
+    expect(lint().findings.map((f) => f.literal)).toContain('red');
+  });
+
+  it.each([
+    ['a static expression', "fill={'red'}"],
+    ['a bare string', 'fill="red"'],
+  ])('agrees with the markup scanner when written as %s', (_name, attribute) => {
+    fixture({ 'src/Icon.tsx': `export const I = () => <svg><circle ${attribute} /></svg>;\n` });
+    const fromJsx = lint().findings.map((f) => f.literal);
+
+    rmSync(root, { recursive: true, force: true });
+    root = mkdtempSync(join(tmpdir(), 'aperture-adherence-'));
+    fixture({ 'src/icon.svg': '<svg><circle fill="red"/></svg>' });
+    expect(fromJsx).toEqual(lint().findings.map((f) => f.literal));
+  });
+
+  it('leaves a runtime value alone — genuinely unresolvable by a source lint', () => {
+    // This is what the corrected claim now says, and nothing more.
+    fixture({ 'src/Icon.tsx': 'declare const colour: string;\nexport const I = () => <svg><circle fill={colour} /></svg>;\n' });
+    expectClean(lint());
+  });
+
+  it('leaves a template WITH substitutions alone, even when its static head is a colour', () => {
+    // RECORDED. The fixture deliberately uses a NON-EMPTY head (`red${c}`): an earlier version
+    // used `${c}`, whose head is the empty string, so a mutation treating substituted templates
+    // as static changed nothing and the test could not discriminate. Mutation testing caught it.
+    //
+    // The behaviour itself is deliberate: `` `red${c}` `` is not the value "red", it is "red"
+    // concatenated with something unknown, so the value as a whole is not statically known. If
+    // this ever starts being reported, widen the claim in the header and delete this recording.
+    fixture({ 'src/Icon.tsx': 'declare const c: string;\nexport const I = () => <svg><circle fill={`red${c}`} /></svg>;\n' });
+    expectRecordedNotDetected(
+      lint(),
+      'RECORDED BEHAVIOUR CHANGED: the static head of a substituted template is now reported. '
+      + 'Widen the claim at the NON-GOALS header and delete this recording.',
+    );
+  });
+
+  it('leaves a static expression on a NON-presentation attribute alone', () => {
+    fixture({ 'src/Icon.tsx': "export const I = () => <div className={'red'} />;\n" });
+    expectClean(lint());
+  });
+
+  it.each([
+    ['a bare string', 'fill="#7C3AED"'],
+    ['an expression container', "fill={'#7C3AED'}"],
+  ])('reports a hex ONCE for %s, not once per scanner', (_name, attribute) => {
     // The value is lexed as a CSS value AND is a string literal; only one path may claim it.
-    fixture({ 'src/Icon.tsx': 'export const I = () => <svg><circle fill="#7C3AED" /></svg>;\n' });
+    // Claiming is recorded by NODE, so it holds however deeply the literal is wrapped.
+    fixture({ 'src/Icon.tsx': `export const I = () => <svg><circle ${attribute} /></svg>;\n` });
     expect(lint().findings.filter((f) => f.rule === 'color-literal')).toHaveLength(1);
   });
 
@@ -273,16 +348,31 @@ describe('the presentation-attribute registry is BOUNDED — recorded, not silen
     // target-aware resolution across elements. Out of scope for a source lint; the runtime CSP
     // is the enforcing control.
     fixture({ 'src/icon.svg': svg });
-    expect(lint().findings, RECORDED).toEqual([]);
+    expectRecordedNotDetected(lint(), RECORDED);
+  });
+
+  it('a recording cannot pass on an ERROR — silence and failure are distinguished', () => {
+    // The guard on the guard. This fixture produces zero findings because the scan FAILED, not
+    // because the case is undetected. The old assertion (`findings === []`) passed here; the
+    // recording helper must not.
+    fixture({ 'src/icon.svg': '<svg><animate attributeName="fill" from="red"/></svg>', 'src/broken.ts': 'const x = ;\n' });
+    const result = lint();
+    expect(result.errors.length, 'fixture should error').toBeGreaterThan(0);
+    expect(() => expectRecordedNotDetected(result, 'RECORDED')).toThrow();
   });
 
   it('DOES report a registry attribute on an element where it is not presentational', () => {
     // The registry is name-based, not element-aware, so this is a false positive. Answering it
-    // properly is the same target-aware problem as the animation case. The allowlist is the
-    // remedy if one ever appears in this codebase.
+    // properly is the same target-aware problem as the animation case.
+    //
+    // The remedy is NOT the allowlist — an earlier comment here said it was, and it is not: the
+    // allowlist admits only syntax-theme CSS paths, so a markup finding cannot be allowlisted at
+    // all. Remediation is a source change or a reviewed change to the code-owned registry.
     fixture({});
     writeFileSync(join(root, 'index.html'), '<div fill="red"></div>');
-    expect(rules(lint()), RECORDED).toContain('color-literal');
+    const result = lint();
+    expect(result.errors, `${RECORDED} (the scan ERRORED)`).toEqual([]);
+    expect(result.findings.map((f) => f.rule), RECORDED).toContain('color-literal');
   });
 
   it('no longer reports the legacy <body background> attribute as a colour', () => {

@@ -355,11 +355,16 @@ inverted so the unanticipated case fails rather than passes, it is.**
   seen. (There is no such dependency today.)
 - CSS **named** colours are checked in CSS, in markup presentation attributes and in JSX
   presentation attributes — not in ordinary TypeScript strings, where the false-positive cost on
-  prose is not worth it. An earlier revision claimed a named colour in TypeScript had "no route
-  to the DOM that another rule does not already close"; **that was false** — a JSX presentation
-  attribute was exactly such a route, and it is now covered. What remains uncovered is a value
-  passed to a third-party component's colour prop, and any value that is not a static string
-  literal (`fill={colour}`).
+  prose is not worth it. In JSX every **statically known** spelling counts: a bare string, an
+  expression container (`fill={'red'}`), a no-substitution template, a parenthesised expression,
+  and an `as` / `satisfies` / angle-bracket assertion. The rule is about the value, not the
+  syntax, and a test asserts the JSX and markup scanners return identical findings for the same
+  element.
+
+  This sentence has been wrong twice, so it is worth being precise about what is *not* covered:
+  a value computed at runtime (`fill={colour}`, a template **with** substitutions, a value from
+  props or state) and a colour handed to a third-party component's own prop. Both are outside
+  what a source lint can resolve.
 - other CSSOM routes to a stylesheet (`insertRule`, `adoptedStyleSheets`, an aliased tag name)
   are not detected.
 - the HTML/SVG scanner is **partial** — a hand-written scanner, not a spec tokenizer. An
@@ -381,13 +386,22 @@ inverted so the unanticipated case fails rather than passes, it is.**
     on `attributeName` — target-aware resolution across elements, which is out of scope for a
     source lint.
   - **The registry is name-based, not element-aware**, so a listed attribute on an element where
-    it is not presentational (`<div fill="red">`) is reported anyway. That is a false positive;
-    the allowlist is the remedy. (`background`, the legacy HTML image-URL attribute, *was* in the
-    registry and has been removed — that one was removable without opening the element question.)
+    it is not presentational (`<div fill="red">`) is reported anyway. That is a false positive.
+    (`background`, the legacy HTML image-URL attribute, *was* in the registry and has been
+    removed — that one was removable without opening the element question.)
+
+    **The allowlist is not the remedy for these**, and an earlier version of this page said it
+    was. `color-allowlist.json` admits only syntax-theme CSS paths, so a markup or TSX finding
+    cannot be allowlisted at all — pointing at a door that does not exist is worse than saying
+    there is none. Remediation is a **source change**, or a reviewed change to the code-owned
+    registry. Keeping the allowlist narrow is deliberate: widening it to markup would reopen the
+    configuration-widening hole that complete functional-colour capture closed.
   - The enforcing control for anything this misses is, as ever, the **runtime CSP**.
 
   Each of those cases is pinned by a test that records the current behaviour and fails with an
-  instruction to widen the claim if it ever changes.
+  instruction to widen the claim if it ever changes. Those recordings assert **no errors as well
+  as no findings**: a recording that checks only findings cannot tell silence from failure, and
+  would quietly record "not detected" when the truth was "did not run".
 - it scans **source**, so a dependency's stylesheet is out of scope; and it checks that a raw
   value is not used, not that the *right* token was chosen. Contrast and motion gating is a
   separate item.
