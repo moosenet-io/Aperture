@@ -12,10 +12,14 @@ restart, a host config edit, secret rotation, disk cleanup.
 
 ```
 ground → ingest → worktree → implement → test gate → review gate → merge
-      → POST-MERGE GATE ─┬─ verify                                → cleanup
-                         ├─ docs current                             ↳ once per build:
-                         ├─ public mirror                              epic capstone
-                         └─ knowledge-graph refresh
+                                                                    │
+        ┌───────────────── POST-MERGE GATE ─────────────────────────┘
+        │   (one indivisible phase — all four, in this order)
+        └── verify → docs current → mirror → KG refresh ──┐
+                                                          │
+                                                cleanup ──┘
+
+once per build, after the last item: epic capstone
 ```
 
 The post-merge gate is **one phase, not four stages.** Its four actions run in the order

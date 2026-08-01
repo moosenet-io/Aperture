@@ -15,7 +15,11 @@ can read the rationale rather than take the rule on faith.
 There is one route, and it is the same for a one-line fix as for a new module:
 
 > tracked work item → isolated worktree → implement → test gate → independent review gate →
-> merge → post-merge gate → verify → docs → cleanup
+> merge → post-merge gate (verify → docs current → mirror → KG refresh) → cleanup
+
+The four actions in brackets are **inside** the post-merge gate, in that order. They are not
+stages that follow it: the gate is one indivisible phase with the merge, and nothing in it can
+be reported, deferred, or skipped on its own.
 
 **The gates are not bypassable.** Not for a typo fix, not for a revert, not under time
 pressure. If a gate is failing and you believe it is wrong, prove it is wrong against the
