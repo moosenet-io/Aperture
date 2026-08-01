@@ -15,6 +15,7 @@ import {
   parseColor,
   readStylesheet,
   gradientStops,
+  excludedTokenUses,
   readTokenBlocks,
   resolveToken,
   styleRules,
@@ -213,22 +214,96 @@ describe.each(Object.entries(CHAINS))('%s theme contrast', (_theme, chain) => {
   });
 });
 
+const EXCLUDED_TEXT_TOKENS = ['--text-faint', '--text-disabled'];
+
 describe('the primitives layer does not use an excluded text token as live text', () => {
-  it('never applies --text-faint or --text-disabled outside their documented scope', () => {
-    // The placeholder defect: an exclusion documented for de-emphasised metadata was being
-    // applied to live interface text in an active field. A contrast suite cannot catch that on
-    // its own, because the token is excluded FROM the suite — so the use is checked instead.
-    const offending = [];
-    for (const rule of styleRules(primitivesCss, 'primitives.css')) {
-      const usesExcluded = rule.declarations.some(
-        (decl) => decl.prop === 'color' && /^var\(--text-(faint|disabled)\)$/.test(decl.value),
-      );
-      if (!usesExcluded) continue;
-      // The only sanctioned use: a genuinely disabled control, which WCAG 1.4.3 exempts.
-      if (/:disabled|\[aria-disabled/.test(rule.selector)) continue;
-      offending.push(rule.selector.trim());
+  it.each(Object.entries(CHAINS))('resolves ALIASES too — %s', (_theme, chain) => {
+    // The placeholder defect: an exclusion documented for de-emphasised metadata was applied to
+    // live interface text. A contrast suite cannot catch that, because the token is excluded
+    // FROM the suite — so the USE is checked instead.
+    //
+    // Aliases are resolved rather than matched by spelling. A guard that only recognised a
+    // direct `var(--text-faint)` would pass `color: var(--placeholder-ink)` where that token is
+    // itself `var(--text-faint)` — reopening exactly the blind spot it exists to cover.
+    expect(excludedTokenUses(primitivesCss, chain, EXCLUDED_TEXT_TOKENS, { from: 'primitives.css' }))
+      .toEqual([]);
+  });
+
+  it('catches an excluded token reached through an intermediate alias', () => {
+    // Proves the guard has teeth, against a stylesheet built to defeat the naive version.
+    const blocks = [{ '--placeholder-ink': 'var(--text-faint)', '--text-faint': '#6b7280' }];
+    const sneaky = '.input::placeholder { color: var(--placeholder-ink); }';
+    const found = excludedTokenUses(sneaky, blocks, EXCLUDED_TEXT_TOKENS);
+    expect(found).toHaveLength(1);
+    expect(found[0].token).toBe('--text-faint');
+    expect(found[0].via).toEqual(['--placeholder-ink', '--text-faint']);
+  });
+
+  it('still permits an excluded token on a genuinely disabled control', () => {
+    const blocks = [{ '--text-disabled': '#4b5563' }];
+    expect(excludedTokenUses('.btn:disabled { color: var(--text-disabled); }', blocks, EXCLUDED_TEXT_TOKENS))
+      .toEqual([]);
+  });
+});
+
+/**
+ * THE DOCUMENTED MINIMUM, AND WHERE IT OCCURS.
+ *
+ * The previous cycle reported "worst case 4.96:1". That figure was the LIGHT theme's minimum,
+ * quoted as if it were the global one — the dark theme's 4.834:1 was lower and was simply not
+ * looked at. The suite was complete; the summary of it was not. A figure nobody can reproduce
+ * from the method is the same defect as a count that disagrees with its table, so the figure is
+ * now COMPUTED from the same cross-product the assertions use and checked against the
+ * documented constant. Change the palette and this fails until the number is updated.
+ */
+const DOCUMENTED_MINIMUM = { ratio: 4.834, theme: 'dark', fg: '--on-error', tint: '--tint-error', surface: '--surface-chip' };
+
+describe('the documented contrast minimum', () => {
+  function globalMinimum() {
+    let worst = { ratio: Infinity };
+    for (const [theme, chain] of Object.entries(CHAINS)) {
+      const surfaces = surfacesFor(chain);
+      const colour = (token) => parseColor(resolveToken(token, chain));
+      for (const token of TEXT_TOKENS) {
+        for (const [name, surface] of surfaces) {
+          const ratio = contrastRatio(colour(token), surface);
+          if (ratio < worst.ratio) worst = { ratio, theme, fg: token, tint: null, surface: name };
+        }
+      }
+      for (const [fg, tint] of TINTED_PAIRS) {
+        for (const [name, surface] of surfaces) {
+          const ratio = contrastRatio(colour(fg), over(colour(tint), surface));
+          if (ratio < worst.ratio) worst = { ratio, theme, fg, tint, surface: name };
+        }
+      }
     }
-    expect(offending).toEqual([]);
+    return worst;
+  }
+
+  it('is reproducible from the method, and occurs where the documentation says', () => {
+    const worst = globalMinimum();
+    expect(worst.theme).toBe(DOCUMENTED_MINIMUM.theme);
+    expect(worst.fg).toBe(DOCUMENTED_MINIMUM.fg);
+    expect(worst.tint).toBe(DOCUMENTED_MINIMUM.tint);
+    expect(worst.surface).toBe(DOCUMENTED_MINIMUM.surface);
+    expect(worst.ratio).toBeCloseTo(DOCUMENTED_MINIMUM.ratio, 2);
+  });
+
+  it('pins the exact worst pair by name: dark --on-error over --tint-error on --surface-chip', () => {
+    // Named explicitly because it is the pair a reviewer computed independently and used to
+    // question whether the derivation was complete. It is in the suite, it is the true minimum,
+    // and it clears 4.5:1.
+    const chain = CHAINS.dark;
+    const chip = parseColor(resolveToken('--surface-chip', chain));
+    const background = over(parseColor(resolveToken('--tint-error', chain)), chip);
+    const ratio = contrastRatio(parseColor(resolveToken('--on-error', chain)), background);
+
+    expect(resolveToken('--surface-chip', chain)).toBe('#26262f');
+    expect(background.r).toBeCloseTo(66.84, 1);
+    expect(background.g).toBeCloseTo(41.5, 1);
+    expect(background.b).toBeCloseTo(53.58, 1);
+    expect(ratio).toBeCloseTo(4.834, 2);
+    expect(ratio).toBeGreaterThanOrEqual(4.5);
   });
 });
 

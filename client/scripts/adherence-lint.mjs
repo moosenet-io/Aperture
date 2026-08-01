@@ -337,6 +337,24 @@ const AT_RULES_ALLOWED_INSIDE_A_STYLE_RULE = new Set(['media', 'supports', 'cont
 
 const VENDOR_KEYFRAMES = /^-(webkit|moz|ms|o)-keyframes$/;
 
+/**
+ * Attributes whose value IS a CSS value, and may therefore be lexed as one.
+ *
+ * Code-owned, because the alternative was lexing EVERY attribute — which reported
+ * `class="red"`, `title="rgb(1,2,3)"`, `id="tan"` and `data-state="green"` as colour literals.
+ * The comment already said only presentation attributes are CSS values; the code did not
+ * enforce it. An ordinary attribute is DATA and is not scanned for colours at all: a colour in
+ * `data-brand` styles nothing, and the false positives cost more than the hypothetical catch.
+ */
+const CSS_VALUED_ATTRIBUTES = new Set([
+  'style', // a declaration list — also an inline-style violation in its own right
+  // SVG/CSS presentation attributes that take a <color>
+  'color', 'fill', 'stroke', 'stop-color', 'flood-color', 'lighting-color', 'solid-color',
+  'background', 'background-color', 'border-color', 'outline-color', 'caret-color',
+  'text-decoration-color', 'column-rule-color',
+  'bgcolor', // legacy HTML presentation attribute
+]);
+
 /** A valid CSS property name: a custom property, or an ident with an optional vendor prefix. */
 const VALID_PROPERTY_NAME = /^(--[A-Za-z0-9_-]+|-{0,2}[A-Za-z_][A-Za-z0-9_-]*)$/;
 
@@ -517,14 +535,32 @@ function hasDimensionReason(node) {
  *     `background`, `grid-template-areas` and every other string-valued property are silent.
  */
 
+/**
+ * The FALLBACK nodes of a `var()`, i.e. everything after the first comma.
+ *
+ * `var(--font, sans-serif)` declares a font stack: if the custom property is not set, the
+ * fallback is what renders. Treating any `var()` as pure indirection without looking inside it
+ * meant a fallback could carry a literal past a fail-closed rule.
+ */
+function varFallback(node) {
+  const comma = node.nodes.findIndex((n) => n.type === 'div' && n.value === ',');
+  return comma === -1 ? [] : node.nodes.slice(comma + 1);
+}
+
 /** Is every meaningful token a `var()` or a CSS-wide keyword — i.e. does it declare nothing? */
 function isPureIndirection(nodes) {
   const meaningful = nodes.filter((n) => n.type !== 'space' && n.type !== 'div' && n.type !== 'comment');
   if (meaningful.length === 0) return true;
-  return meaningful.every((n) => (
-    (n.type === 'function' && n.value.toLowerCase() === 'var')
-    || (n.type === 'word' && CSS_WIDE_KEYWORDS.has(n.value.toLowerCase()))
-  ));
+  return meaningful.every((n) => {
+    if (n.type === 'word') return CSS_WIDE_KEYWORDS.has(n.value.toLowerCase());
+    if (n.type === 'function' && n.value.toLowerCase() === 'var') {
+      const fallback = varFallback(n);
+      // No fallback declares nothing. A fallback is a real value and is judged as one,
+      // recursively, so `var(--a, var(--b, Inter))` is not pure indirection either.
+      return fallback.length === 0 || isPureIndirection(fallback);
+    }
+    return false;
+  });
 }
 
 function namesAGenericFamily(parsed) {
@@ -899,11 +935,13 @@ function scanMarkup(relPath, text, findings) {
       if (name === 'style') {
         findings.push(finding('inline-style', relPath, line, `style attribute on <${tag}>`));
       }
-      // A presentation attribute (`fill`, `stroke`, `stop-color`, `style`) takes a CSS value
-      // by specification, so it is lexed rather than pattern-matched, and a named colour is
-      // therefore in scope here as it is in a stylesheet.
-      for (const literal of findValueLiterals(value, { named: true }).colors) {
-        findings.push(finding('color-literal', relPath, line, `${name}="${literal}"`, literal));
+      // ONLY a presentation attribute is a CSS value, so only one is lexed as such. A named
+      // colour is in scope here exactly as it is in a stylesheet — but `class="red"` is a class
+      // name, not a hue.
+      if (CSS_VALUED_ATTRIBUTES.has(name)) {
+        for (const literal of findValueLiterals(value, { named: true }).colors) {
+          findings.push(finding('color-literal', relPath, line, `${name}="${literal}"`, literal));
+        }
       }
       if (name === 'font-family') {
         findings.push(finding('font-literal', relPath, line, `${name}="${value}"`));

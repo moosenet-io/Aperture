@@ -361,6 +361,9 @@ inverted so the unanticipated case fails rather than passes, it is.**
 - the HTML/SVG scanner is **partial** — a hand-written scanner, not a spec tokenizer. An
   attribute value containing `>` desynchronizes it and behaviour after that point is
   **unmodelled**. It deliberately does not skip comments: it errs toward the false alarm.
+- only a **presentation attribute** (`style`, `fill`, `stroke`, `stop-color`, …) is treated as a
+  CSS value. A colour-shaped string in an ordinary attribute — `class`, `title`, `data-*`, `id`
+  — is data and is not reported; lexing every attribute reported `class="red"` as a colour.
 - it scans **source**, so a dependency's stylesheet is out of scope; and it checks that a raw
   value is not used, not that the *right* token was chosen. Contrast and motion gating is a
   separate item.
@@ -387,11 +390,18 @@ composited onto the most favourable one, and passed a light success badge that m
 against the darker end. A new surface token or gradient endpoint now enters the suite by
 existing.
 
+The measured minimum across the whole cross-product is **4.834:1**, in dark, for `--on-error`
+over `--tint-error` composited on `--surface-chip`. That figure is computed by the test suite
+from the same cross-product the assertions use and checked against the documented constant, so
+it cannot go stale: change the palette and the build fails until the number is updated. (It was
+stale once — a previous revision quoted the light theme's minimum as if it were the global one.)
+
 `--text-faint` and `--text-disabled` are excluded **by rule**, not by convenience: faint is
 de-emphasised metadata beside an already-labelled value, and a disabled control is exempt from
 WCAG 1.4.3. Both say so where they are declared, and a separate test asserts the primitives
 layer never applies either as live text outside that scope — a contrast suite cannot police a
-token it excludes.
+token it excludes. That check **resolves aliases**, so reaching an excluded token through an
+intermediate custom property is caught too.
 
 ## Contributing
 

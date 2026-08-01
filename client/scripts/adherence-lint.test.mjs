@@ -20,6 +20,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import valueParser from 'postcss-value-parser';
+
 import { runAdherenceLint, findValueLiterals, findColorLiteralsInText } from './adherence-lint.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -168,6 +170,47 @@ describe('colour literals', () => {
   });
 });
 
+describe('markup attributes — only a presentation attribute is a CSS value', () => {
+  it.each([
+    ['class', '<div class="red"></div>'],
+    ['title', '<div title="rgb(1,2,3)"></div>'],
+    ['data-*', '<div data-state="green"></div>'],
+    ['id', '<span id="tan"></span>'],
+    ['alt text', '<img alt="a tan coloured dog" src="x.png">'],
+  ])('does not report an ordinary %s attribute as a colour', (_name, html) => {
+    // Lexing EVERY attribute as a CSS value reported all of these. A class name is not a hue,
+    // and a colour in a data attribute styles nothing. This is the mirror of the exponent case:
+    // there detection was narrowed by accident, here it was widened — both from applying the
+    // parser without checking what it was being applied to.
+    fixture({});
+    writeFileSync(join(root, 'index.html'), html);
+    expectClean(lint());
+  });
+
+  it.each([
+    ['fill', '<svg><circle fill="#7C3AED"/></svg>'],
+    ['stroke with a named colour', '<svg><circle stroke="red"/></svg>'],
+    ['stop-color', '<svg><stop stop-color="#fff"/></svg>'],
+    ['bgcolor', '<svg><rect bgcolor="#abc"/></svg>'],
+  ])('still reports a presentation attribute — %s', (_name, svg) => {
+    fixture({ 'src/icon.svg': svg });
+    expect(rules(lint())).toContain('color-literal');
+  });
+
+  it('still reports a colour inside a style attribute', () => {
+    fixture({});
+    writeFileSync(join(root, 'index.html'), '<div style="color:#fff"></div>');
+    const found = rules(lint());
+    expect(found).toContain('inline-style');
+    expect(found).toContain('color-literal');
+  });
+
+  it('permits fill="currentColor"', () => {
+    fixture({ 'src/icon.svg': '<svg><circle fill="currentColor"/></svg>' });
+    expectClean(lint());
+  });
+});
+
 describe('style blocks', () => {
   it('rejects a <style> element in TSX', () => {
     fixture({ 'src/Bad.tsx': 'export const Bad = () => <style>{".x{}"}</style>;\n' });
@@ -198,6 +241,23 @@ describe('font literals', () => {
     // property name alone would miss it entirely.
     fixture({ 'src/styles/x.css': ".x { --sneaky: 'Comic Sans', sans-serif; }\n" });
     expect(rules(lint())).toContain('font-literal');
+  });
+
+  it.each([
+    ['a generic family in the fallback', '.x { font-family: var(--font, sans-serif); }'],
+    ['a quoted family in the fallback', '.x { font-family: var(--font, "Inter"); }'],
+    ['an unquoted family in the fallback', '.x { --body-font: var(--font, Inter); }'],
+    ['a family in a NESTED fallback', '.x { font-family: var(--a, var(--b, Inter)); }'],
+  ])('rejects %s — a fallback is a real value, not indirection', (_name, css) => {
+    // Treating any `var()` as pure indirection without looking inside it let a fallback carry
+    // a literal straight past a fail-closed rule, in a known font context.
+    fixture({ 'src/styles/x.css': css });
+    expect(rules(lint())).toContain('font-literal');
+  });
+
+  it('permits a var() whose fallback is only a CSS-wide keyword', () => {
+    fixture({ 'src/styles/x.css': '.x { font-family: var(--font-sans, inherit); }\n' });
+    expectClean(lint());
   });
 
   it('permits a font-family that references a token', () => {
@@ -292,6 +352,20 @@ describe('forced colours', () => {
 
   it('rejects it in the token layer too — no file may defeat a user\'s own palette', () => {
     fixture({ 'src/styles/constellation.css': ':root { --a: #fff; }\n.x { forced-color-adjust: none; }\n' });
+    expect(rules(lint())).toContain('forced-color-none');
+  });
+
+  it('rejects the !important form too', () => {
+    // postcss splits `!important` off into `decl.important`, leaving `value === "none"`, so the
+    // existing comparison already covers it. Pinned because that is a property of the PARSER,
+    // not of this code: if postcss ever left the flag in the value, the check would silently
+    // stop matching and nothing else would notice.
+    fixture({ 'src/styles/x.css': '.x { forced-color-adjust: none !important; }\n' });
+    expect(rules(lint())).toContain('forced-color-none');
+  });
+
+  it('rejects it with unusual spacing around the flag', () => {
+    fixture({ 'src/styles/x.css': '.x { forced-color-adjust:none   !important ; }\n' });
     expect(rules(lint())).toContain('forced-color-none');
   });
 
@@ -797,6 +871,24 @@ describe('findValueLiterals — the CSS value lexer', () => {
 
   it('skips url() contents — an address is not a style value', () => {
     expect(findValueLiterals('url("#ff0000.png")', { named: true }).colors).toEqual([]);
+  });
+});
+
+describe('the value lexer dependency itself', () => {
+  it('splits exponent dimensions the way the CSS number grammar requires', () => {
+    // The exponent guarantee rests on postcss-value-parser's `unit()`. 4.2.0 implements CSS
+    // Syntax 3 "consume a number" INCLUDING the exponent branch — but that is a property of a
+    // pinned third-party function, not of this repository. A version change that altered the
+    // split would turn every exponent case into a silent false negative, which is precisely the
+    // failure a reviewer suspected had already happened. Characterised here so it would fail at
+    // the dependency boundary, loudly, with this comment attached.
+    for (const [value, unit] of [
+      ['1e3px', 'px'], ['1E3px', 'px'], ['1e+3px', 'px'], ['1e-3px', 'px'],
+      ['1.5e3px', 'px'], ['.5e-3px', 'px'], ['+1e3px', 'px'], ['-1e3px', 'px'],
+      ['7px', 'px'], ['7PX', 'PX'],
+    ]) {
+      expect(valueParser.unit(value), value).toMatchObject({ unit });
+    }
   });
 });
 

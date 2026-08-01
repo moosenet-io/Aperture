@@ -114,6 +114,51 @@ export function styleRules(css, from = 'stylesheet.css') {
 }
 
 /**
+ * The chain of token NAMES a reference walks through before reaching a concrete value.
+ *
+ * `resolveToken` returns the final colour, which is exactly what a contrast check wants and
+ * exactly what a "is this token used here" check must NOT rely on: two tokens can resolve to
+ * the same colour for unrelated reasons. This returns the names, so a guard can ask whether a
+ * declaration reaches an excluded token THROUGH an alias rather than only by naming it.
+ */
+export function aliasChain(token, blocks, depth = 0) {
+  if (depth > 12) throw new Error(`token layer: \`${token}\` does not resolve (cycle?)`);
+  let value;
+  for (const block of blocks) {
+    if (block[token] !== undefined) { value = block[token]; break; }
+  }
+  if (value === undefined) return [token];
+
+  const next = /^var\(\s*(--[A-Za-z0-9_-]+)\s*\)$/.exec(value);
+  return next ? [token, ...aliasChain(next[1], blocks, depth + 1)] : [token];
+}
+
+/**
+ * Selectors in a stylesheet that apply an EXCLUDED text token as live text.
+ *
+ * Aliases are resolved: a declaration reaching `--text-faint` through an intermediate token is
+ * the same defect as naming it directly, and a guard that only matched the direct spelling
+ * would reopen the blind spot it exists to cover.
+ */
+export function excludedTokenUses(css, blocks, excluded, { from = 'stylesheet.css' } = {}) {
+  const offending = [];
+  for (const rule of styleRules(css, from)) {
+    // WCAG 1.4.3 exempts a genuinely disabled control; nothing else is exempt.
+    if (/:disabled|\[aria-disabled/.test(rule.selector)) continue;
+
+    for (const decl of rule.declarations) {
+      if (decl.prop !== 'color') continue;
+      const reference = /^var\(\s*(--[A-Za-z0-9_-]+)\s*\)$/.exec(decl.value);
+      if (!reference) continue;
+      const chain = aliasChain(reference[1], blocks);
+      const hit = chain.find((name) => excluded.includes(name));
+      if (hit) offending.push({ selector: rule.selector.trim(), token: hit, via: chain });
+    }
+  }
+  return offending;
+}
+
+/**
  * The colour stops of a gradient token, resolved.
  *
  * A component does not sit on "the panel"; it sits on whatever is actually painted behind it,
