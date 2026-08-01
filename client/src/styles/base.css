@@ -1,0 +1,42 @@
+/* Minimal base layer for the scaffold.
+ *
+ * The real styling layer — the constellation token set and its primitives — lands in APTR-02.
+ * Nothing here declares a colour literal, so it will not collide with that port or with the
+ * adherence lint that arrives alongside it. Font families reference the bundled @fontsource
+ * faces imported in main.tsx; no font is ever fetched at runtime.
+ */
+
+:root {
+  --aperture-font-sans: 'Inter', system-ui, sans-serif;
+  --aperture-font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  color-scheme: light dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--aperture-font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+code,
+pre,
+kbd,
+samp {
+  font-family: var(--aperture-font-mono);
+}
+
+.app-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  height: 100%;
+  text-align: center;
+}

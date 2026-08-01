@@ -43,7 +43,8 @@ egress of its own, sends no telemetry anywhere, and never talks to a model provi
 - **Not a replacement for Matrix.** Matrix remains a first-class, fully supported transport.
   Aperture is an addition, not a migration.
 - **Not a telemetry surface.** No analytics, no external CDN, no remote fonts, no phone-home.
-  The build fails if an external origin appears in the bundle.
+  A build-time lint fails the build if an external origin appears in the bundle, and the
+  runtime CSP served by the backend is what actually enforces it.
 
 ---
 
@@ -102,16 +103,119 @@ guarded agent loop, so behaviour is identical regardless of where a message arri
 ## Quick start
 
 ```bash
-# client workspace
+# client workspace — Node >= 20
 npm --prefix client ci
-npm --prefix client run build      # tsc --noEmit && vite build
+npm --prefix client run build      # tsc --noEmit && vite build && egress lint
 npm --prefix client run test
-npm --prefix client run lint:adherence
 ```
 
 The backend feature ships with the agent core behind a cargo feature. Full setup — including
 secret provisioning, first-run onboarding, and per-target installation — is in
 **[docs/INSTALL.md](docs/INSTALL.md)**.
+
+## The client workspace
+
+`client/` is a Vite + React 18 + TypeScript single-page app. Dependency versions are pinned
+exactly — no ranges — so every machine and every CI run builds the same tree. There is no
+Tailwind: styling is the shared constellation token layer (see **Design system** below).
+
+| Script | What it does |
+|---|---|
+| `npm --prefix client run dev` | Vite dev server |
+| `npm --prefix client run typecheck` | `tsc --noEmit` under `strict` |
+| `npm --prefix client run build` | `tsc --noEmit` → `vite build` → the egress lint. A type error fails the build |
+| `npm --prefix client run test` | vitest |
+| `npm --prefix client run assert-no-external-hosts` | the egress lint, against an existing `client/dist` |
+
+Fonts are **bundled**, not fetched: the `@fontsource/*` packages emit the woff2 files into the
+build output, so no font host is contacted at runtime. Backend addressing is never compiled in
+— no absolute URL and no default endpoint anywhere in the client. The transport's base URL is
+injected per target.
+
+### The egress lint — what it guarantees, and what it does not
+
+`client/scripts/assert-no-external-hosts.mjs` runs as the last step of every build, over the
+**built** output, and fails the build if an absolute `http(s)` origin appears in an emitted
+asset.
+
+**It is a defence-in-depth lint. It is not a security boundary.** A static scanner over
+emitted JavaScript cannot establish "this client never fetches anything external": a URL can
+be assembled at runtime from fragments, character codes, or decoded data. **The enforcing
+control is the runtime CSP served by the BFF**, applied by the browser at request time. Do not
+read a green lint as a proof of sovereignty — an overclaimed control is worse than a modest
+one, because people stop looking past it.
+
+What the lint reliably catches, and why it runs on every build:
+
+- an accidental `fetch()`, `<script src>`, or `@font-face src` pointing at a CDN or an API
+- **dependency drift** — a dependency that grows a phone-home, a beacon, or a remote font
+  between upgrades. This is the common real-world regression.
+- a font or asset host sneaking back in after being removed
+- an origin assembled by static string concatenation (`"https:" + "//host"`), which is folded
+  before comparison
+
+What it cannot catch: deliberate obfuscation, and any URL built at runtime from values not
+present in the bundle.
+
+**JavaScript, CSS and JSON are parsed** rather than pattern-matched: JavaScript through
+Rollup's parser (`rollup/parseAst`), CSS through `postcss` — both already Vite's own
+dependencies, so nothing is added to the tree — and JSON through `JSON.parse`. Comments, regex
+literals, and string boundaries are therefore correct **by construction**: a licence banner's
+URL is inert because comments do not exist in an AST, not because a stripping pass removed it.
+An asset that is scanned but cannot be parsed **fails** — an unparseable asset is not evidence
+of safety, and an asset with no registered parser is skipped only if it matches a known binary
+format's signature — everything else is reported rather than skipped, so an unrecognised asset
+is never passed over in silence.
+
+**HTML and SVG are the exception: they are scanned by a partial, hand-written scanner, not an
+HTML parser.** No HTML parser is in the dependency tree and one is not being added for a
+control that is not the security boundary. It skips comments and declarations, reads quoted and
+unquoted attribute values and text between tags, splits `srcset`/`imagesrcset` into their
+candidates, routes a `style` attribute through the CSS scanner, and routes `<script>` and
+`<style>` bodies to the JavaScript, JSON, or CSS scanner — so a `<script>` body is never
+treated as comment-strippable text.
+
+**Documented non-goals — accepted limitations, not silent gaps.** Each is covered by the
+runtime CSP. Most have a test recording the current behaviour so a change goes red; where one
+does not, it says so:
+
+- **HTML character references are not decoded.** An origin written as `&#x2F;&#x2F;evil…` is
+  not detected.
+- **CSS escapes are not decoded.** An origin written as `\68 ttps://evil…` is not detected.
+- **An attribute value containing `>` desynchronizes the markup scanner.** Detection after that
+  point is **unmodelled**: an origin there may be missed, or reported as a garbled fragment.
+  Do not rely on it.
+- **A binary signature identifies format, not intent.** An asset is skipped only if it matches a
+  known binary format's signature, and binary content is never scanned. An asset deliberately
+  crafted to begin with a known signature, and a structurally genuine binary carrying an origin
+  in its metadata or trailing data, are both skipped. That is deliberate obfuscation — the case
+  this lint already delegates to the CSP. Closing it would mean parsing container structure and
+  scanning printable strings inside binaries, which is a different and much larger tool.
+  **Test coverage is partial:** the crafted-signature half is recorded by two tests; the
+  conforming-binary-with-an-origin-in-its-metadata half is **documented but untested**, because
+  it needs a real conforming fixture and the CSP is the control either way.
+
+Candidate values are compared **whole and never truncated at a delimiter**. That is what makes
+`http://www.w3.org/2000/svg;payload` and `…/2000/svg?exfil=1` fail rather than reduce to an
+allowlisted URI.
+
+**The allowlist.** The set of allowlistable URIs is a **code-owned registry** of XML/HTML
+namespace URIs inside the script itself. `client/scripts/external-host-allowlist.json` can
+only say *which* of them are in use and *why* — every entry carries a mandatory `reason`, and
+an entry that is not in the registry, is a duplicate, or is missing a reason fails the lint. An
+empty allowlist fails too, rather than silently allowing everything. **A CDN, a font host, or
+an API endpoint therefore cannot be allowlisted by configuration at all** — widening the
+registry is a source change a reviewer has to approve.
+
+Where a dependency bakes an external URL into a *string* rather than a comment (react-dom's
+minified-error documentation link), it is neutralized at build time by an exact replacement,
+**scoped to the chunk containing that dependency**, declared with its reason in
+`client/scripts/vendor-url-neutralization.ts` and covered by a regression test proving the
+error **code**, its invariant and its `&args[]` all still survive the message formatting. The
+replacement is not a working link — `react-error-decoder` is not a route this app serves — so
+the code is preserved for manual lookup only; a same-origin decoder route would be needed to
+make the message directly actionable, and that is a follow-up, not part of this scaffold. A
+rule that matches nothing fails the build rather than rotting silently.
 
 ## Documentation
 
@@ -135,7 +239,9 @@ secret provisioning, first-run onboarding, and per-target installation — is in
 Aperture uses the shared constellation design system: token-based CSS custom properties, a
 deep-space violet palette, glow as the elevation system, and the node-dot iconography
 language. **There is no Tailwind and no parallel palette.** An adherence lint fails the build
-on inline styles, hardcoded colour literals, and stray style blocks.
+on inline styles, hardcoded colour literals, and stray style blocks. The token layer, the
+primitives, and that lint (`lint:adherence`) arrive with the design-system import; the
+scaffold ships only a colour-free base layer so the two cannot collide.
 
 ## Contributing
 

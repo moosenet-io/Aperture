@@ -1,0 +1,36 @@
+{
+  "$schema-note": "Read by scripts/assert-no-external-hosts.mjs. DATA ONLY — no code, no logic.",
+  "policy": [
+    "This file selects from a CODE-OWNED registry of XML/HTML namespace URIs; it cannot extend it.",
+    "RECOGNISED_NAMESPACE_URIS in assert-no-external-hosts.mjs is the registry. A uri that is not",
+    "in it fails the lint, so a CDN, font host, or API endpoint cannot be allowlisted here at all —",
+    "widening the registry is a source change a reviewer must approve.",
+    "A namespace URI is an identifier, never an address: nothing is ever fetched from it.",
+    "Matching is exact-string over the COMPLETE value, never a prefix and never truncated at a",
+    "delimiter, so '...svg;payload' and '...svg?x=1' are failures.",
+    "Every entry MUST carry a non-empty 'reason'. An entry without one fails the lint, as does an",
+    "empty entries array."
+  ],
+  "entries": [
+    {
+      "uri": "http://www.w3.org/2000/svg",
+      "reason": "SVG namespace. Bundled inline SVG (brand marks, icons) legitimately carries xmlns=\"…/2000/svg\"; it is an identifier, not fetched."
+    },
+    {
+      "uri": "http://www.w3.org/1999/xlink",
+      "reason": "XLink namespace. Emitted by SVG tooling for xlink:href on <use>/<image> in bundled inline SVG; never dereferenced."
+    },
+    {
+      "uri": "http://www.w3.org/1999/xhtml",
+      "reason": "XHTML namespace. Appears in SVG <foreignObject> content and in serialized DOM fixtures; never dereferenced."
+    },
+    {
+      "uri": "http://www.w3.org/1998/Math/MathML",
+      "reason": "MathML namespace. react-dom's namespace table maps <math> to it when creating elements; it is an identifier passed to createElementNS, never fetched."
+    },
+    {
+      "uri": "http://www.w3.org/XML/1998/namespace",
+      "reason": "Core XML namespace, bound to the reserved xml: prefix (xml:lang, xml:space) in bundled inline SVG; never dereferenced."
+    }
+  ]
+}
