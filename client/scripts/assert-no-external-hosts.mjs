@@ -66,18 +66,21 @@
 //     `&#x2F;&#x2F;evil…` is not detected.
 //   * CSS escapes are NOT decoded. An origin written as `\68 ttp://evil…` is not detected.
 //   * The markup scanner is not a spec-compliant HTML tokenizer. It ends a tag at the next `>`,
-//     so an attribute VALUE CONTAINING `>` desynchronizes it: values after that point may be
-//     missed entirely, or reported as a garbled fragment rather than as the attribute value.
-//     Detection there is unreliable in both directions. Element nesting, implied end tags,
-//     CDATA sections, and namespace-prefixed raw-text elements are not modelled.
+//     so an attribute VALUE CONTAINING `>` desynchronizes it: the rest of that tag is read as
+//     text, and an origin there is reported as a GARBLED FRAGMENT rather than as the attribute
+//     value. Behaviour in that state is not modelled — do not rely on detection there. Element
+//     nesting, implied end tags, CDATA sections, and namespace-prefixed raw-text elements are
+//     not modelled either.
 //   * What the markup scanner DOES do, and all it claims: it skips `<!-- … -->` comments and
 //     `<!…>` / `<?…>` declarations; it reads quoted and unquoted attribute values and text
 //     between tags as complete values; and for `<script>` / `<style>` it extracts the body up
 //     to the matching close tag and routes it to the JavaScript, JSON, or CSS scanner — so a
 //     `<script>` body is never treated as comment-strippable text.
-//   * Only the file extensions in SCANNED are parsed. An asset with an unrecognised extension
-//     whose content is TEXTUAL is reported as a failure rather than skipped (see scanDist);
-//     recognised binary asset types are skipped by an explicit, narrow allowlist.
+//   * Only the file extensions in SCANNED are parsed. An asset with no registered parser is
+//     skipped ONLY IF its magic bytes positively identify an approved binary format (see
+//     BINARY_FORMATS); everything else is reported as a failure rather than skipped. Note this
+//     is a NON-GOAL only in the sense that such an asset is not *scanned* — it is never passed
+//     over in silence.
 //
 // ── EXACTNESS ───────────────────────────────────────────────────────────────────────────────
 //
@@ -119,16 +122,48 @@ export const RECOGNISED_NAMESPACE_URIS = Object.freeze([
 ]);
 
 /**
- * Asset types that are binary by definition and therefore hold no scannable text. This is the
- * NARROW, justified skip list: anything not here and not in SCANNED is reported rather than
- * skipped, so "the lint said nothing" can never quietly mean "the lint never looked".
+ * Approved binary formats, identified by MAGIC BYTES rather than by extension or by the absence
+ * of NUL bytes.
+ *
+ * The direction matters. Inferring "binary" from the absence of NULs made UTF-16 text — which
+ * is full of NULs — look binary, so an unknown UTF-16 asset carrying an origin was skipped and
+ * counted as safe. That is absence of evidence treated as evidence, the same mistake as
+ * "unparseable means fine". So the default is now inverted: an unrecognised asset is SKIPPED
+ * ONLY IF it positively identifies as one of these formats. Anything else is reported.
+ *
+ * Brotli (.br) is deliberately absent: it has no magic number, so it cannot be positively
+ * identified. A precompressed .br asset would be reported, which is the correct direction for a
+ * format we cannot verify. Nothing in this build emits one.
  */
-const BINARY_EXTENSIONS = new Set([
-  '.woff', '.woff2', '.ttf', '.otf', '.eot', // fonts (emitted by @fontsource)
-  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif', '.ico', '.bmp', // raster images
-  '.mp4', '.webm', '.ogv', '.mp3', '.wav', '.ogg', '.flac', '.m4a', // media
-  '.pdf', '.zip', '.gz', '.br', '.wasm', // archives and binaries
-]);
+const BINARY_FORMATS = [
+  // fonts (these are what @fontsource emits)
+  { name: 'woff', test: (b) => b.subarray(0, 4).toString('latin1') === 'wOFF' },
+  { name: 'woff2', test: (b) => b.subarray(0, 4).toString('latin1') === 'wOF2' },
+  { name: 'truetype', test: (b) => b.subarray(0, 4).toString('hex') === '00010000' || b.subarray(0, 4).toString('latin1') === 'true' },
+  { name: 'truetype-collection', test: (b) => b.subarray(0, 4).toString('latin1') === 'ttcf' },
+  { name: 'opentype', test: (b) => b.subarray(0, 4).toString('latin1') === 'OTTO' },
+  { name: 'embedded-opentype', test: (b) => b.length > 36 && b[34] === 0x4c && b[35] === 0x50 },
+  // raster images
+  { name: 'png', test: (b) => b.subarray(0, 8).toString('hex') === '89504e470d0a1a0a' },
+  { name: 'jpeg', test: (b) => b.subarray(0, 3).toString('hex') === 'ffd8ff' },
+  { name: 'gif', test: (b) => ['GIF87a', 'GIF89a'].includes(b.subarray(0, 6).toString('latin1')) },
+  { name: 'webp', test: (b) => b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP' },
+  { name: 'avif/heif', test: (b) => b.subarray(4, 8).toString('latin1') === 'ftyp' && /avif|avis|heic|mif1/.test(b.subarray(8, 12).toString('latin1')) },
+  { name: 'ico', test: (b) => b.subarray(0, 4).toString('hex') === '00000100' },
+  { name: 'bmp', test: (b) => b.subarray(0, 2).toString('latin1') === 'BM' },
+  // media
+  { name: 'mp4/m4a', test: (b) => b.subarray(4, 8).toString('latin1') === 'ftyp' },
+  { name: 'matroska/webm', test: (b) => b.subarray(0, 4).toString('hex') === '1a45dfa3' },
+  { name: 'ogg', test: (b) => b.subarray(0, 4).toString('latin1') === 'OggS' },
+  { name: 'wav', test: (b) => b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WAVE' },
+  { name: 'flac', test: (b) => b.subarray(0, 4).toString('latin1') === 'fLaC' },
+  { name: 'mp3', test: (b) => b.subarray(0, 3).toString('latin1') === 'ID3' || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0) },
+  // archives and binaries
+  { name: 'pdf', test: (b) => b.subarray(0, 5).toString('latin1') === '%PDF-' },
+  { name: 'zip', test: (b) => b.subarray(0, 2).toString('latin1') === 'PK' },
+  { name: 'gzip', test: (b) => b[0] === 0x1f && b[1] === 0x8b },
+  { name: 'wasm', test: (b) => b.subarray(0, 4).toString('hex') === '0061736d' },
+];
 
 /** Extensions worth scanning, and how to parse each. */
 const SCANNED = new Map([
@@ -247,7 +282,15 @@ function isViolation(rawValue, allowed) {
   const value = rawValue.trim(); // surrounding whitespace is not part of a URI
   if (value === '') return false;
   if (allowed.has(value)) return false; // exact match, whole value, nothing else
-  return ABSOLUTE_ORIGIN_RE.test(value) || isProtocolRelativeOrigin(value);
+  if (ABSOLUTE_ORIGIN_RE.test(value)) return true;
+  if (isProtocolRelativeOrigin(value)) return true;
+  // A protocol-relative origin need not be the whole value: `srcset="/a.png 1x, //host/b 2x"`
+  // and its JavaScript equivalent (`srcSet:"…"` in the bundle) carry several candidates in one
+  // string. An absolute origin is found anywhere by the regex above; this gives the
+  // protocol-relative form the same reach, on token boundaries.
+  return value
+    .split(/[\s,;'"()]+/)
+    .some((token) => isProtocolRelativeOrigin(token));
 }
 
 function lineOf(text, offset) {
@@ -430,7 +473,9 @@ const RAW_TEXT_ELEMENTS = new Set(['script', 'style']);
  *
  * What it does, and all it claims:
  *   * skips `<!-- … -->` comments and `<!…>` / `<?…>` declarations
- *   * reads quoted and unquoted attribute values, and text between tags, as complete values
+ *   * reads quoted and unquoted attribute values, and text between tags, as complete values —
+ *     except `srcset`/`imagesrcset`, which are split into their candidates, and `style`, which
+ *     is routed through the CSS scanner, since both hold several values in one attribute
  *   * for `<script>` / `<style>`, takes the body up to the matching close tag and routes it to
  *     the JavaScript, JSON, or CSS scanner
  *
@@ -477,11 +522,35 @@ function scanMarkup(code, allowed) {
     if (tagEnd === -1) break;
     const tagText = code.slice(lt, tagEnd + 1);
 
-    // Attribute values are complete values, compared whole.
-    for (const attr of tagText.matchAll(/[a-z_:][-a-z0-9_:.]*\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'`=<>]+))/gi)) {
-      const value = attr[2] ?? attr[3] ?? attr[4] ?? '';
+    // Attribute values are complete values, compared whole — EXCEPT the two attribute types
+    // that are themselves a container of several values. Passing those whole would let a
+    // protocol-relative origin hide anywhere but the start (`isProtocolRelativeOrigin` matches
+    // at the start of a value, by design), so `srcset` is split into its candidates and a
+    // `style` value is routed through the CSS scanner that already exists.
+    for (const attr of tagText.matchAll(/([a-z_:][-a-z0-9_:.]*)\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'`=<>]+))/gi)) {
+      const name = (attr[1] ?? '').toLowerCase();
+      const value = attr[3] ?? attr[4] ?? attr[5] ?? '';
+      const line = lineOf(code, lt + (attr.index ?? 0));
+
+      if (name === 'srcset' || name === 'imagesrcset') {
+        // "url 1x, url 2x" — each comma-separated candidate is `url [descriptor]`.
+        for (const candidate of value.split(',')) {
+          const url = candidate.trim().split(/\s+/)[0] ?? '';
+          if (isViolation(url, allowed)) findings.push({ line, value: url.trim() });
+        }
+        continue;
+      }
+
+      if (name === 'style') {
+        // An inline style is a declaration list; wrap it so postcss can parse it as one.
+        for (const f of scanCss(`*{${value}}`, allowed)) {
+          findings.push({ line, value: f.value });
+        }
+        continue;
+      }
+
       if (isViolation(value, allowed)) {
-        findings.push({ line: lineOf(code, lt + (attr.index ?? 0)), value: value.trim() });
+        findings.push({ line, value: value.trim() });
       }
     }
 
@@ -583,22 +652,27 @@ function* walk(dir) {
 }
 
 /**
- * Does this buffer look like text? A NUL byte or a UTF-8 decode failure means binary, and
- * binary content holds no scannable text regardless of what the file is called.
+ * Positively identify an approved binary format by its magic bytes.
+ * @returns {string|null} format name, or null if it is not recognised as binary
  */
-function looksTextual(buffer) {
-  if (buffer.includes(0)) return false;
-  const text = buffer.toString('utf8');
-  return !text.includes('�');
+export function identifyBinaryFormat(buffer) {
+  for (const format of BINARY_FORMATS) {
+    try {
+      if (format.test(buffer)) return format.name;
+    } catch {
+      // a truncated file simply does not match
+    }
+  }
+  return null;
 }
 
 /**
  * Scan a built output directory.
  *
  * Unknown extensions do NOT pass silently — that would contradict the fail-closed claim above.
- * A file that is neither in SCANNED nor in BINARY_EXTENSIONS is content-sniffed: textual
- * content is reported as an unscanned asset (add it to SCANNED with a parser, or to
- * BINARY_EXTENSIONS with a reason), while genuinely binary content is skipped and counted.
+ * A file with no registered parser is skipped ONLY IF its magic bytes positively identify an
+ * approved binary format. Everything else is reported as an unscanned asset (fix it by adding
+ * the type to SCANNED with a parser, or to BINARY_FORMATS with a magic-byte test).
  *
  * @returns {{ scanned: number, skippedBinary: number, findings: {file:string,line:number,value:string}[] }}
  */
@@ -613,19 +687,15 @@ export function scanDist(distDir, allowed) {
 
     if (!kind) {
       const ext = extname(file).toLowerCase();
-      if (BINARY_EXTENSIONS.has(ext)) {
-        skippedBinary++;
-        continue;
-      }
       const buffer = readFileSync(file);
-      if (!looksTextual(buffer)) {
+      if (identifyBinaryFormat(buffer) !== null) {
         skippedBinary++;
         continue;
       }
       findings.push({
         file: rel,
         line: 0,
-        value: `<unscanned textual asset: no parser is registered for '${ext || '(no extension)'}'>`,
+        value: `<unscanned asset: no parser is registered for '${ext || '(no extension)'}', and it is not a recognised binary format>`,
       });
       continue;
     }
@@ -682,7 +752,9 @@ function main(argv) {
 
   console.log(`${tag} OK: ${result.scanned} asset(s) parsed in ${distDir} (${result.skippedBinary} binary skipped), no static external origins.`);
   console.log(`${tag} lint only — not a security boundary. Runtime egress is enforced by the CSP (APTR-99).`);
-  console.log(`${tag} not detected by design: HTML character references, CSS escapes, attribute values containing '>'.`);
+  console.log(`${tag} known limitations: HTML character references and CSS escapes are not decoded;`);
+  console.log(`${tag} an attribute value containing '>' desynchronizes the markup scanner, so an origin after it`);
+  console.log(`${tag} is reported as a garbled fragment, not as the attribute value. The runtime CSP covers these.`);
   console.log(`${tag} allowlisted namespace URIs (exact match): ${[...reasons.keys()].join(', ')}`);
   return 0;
 }

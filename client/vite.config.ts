@@ -25,8 +25,10 @@ import { applyNeutralizations, staleRules } from './scripts/vendor-url-neutraliz
 /**
  * Replace vendor-owned external URLs that ship as STRINGS rather than comments.
  * Rules, their scoping, and their reasons live in ./scripts/vendor-url-neutralization.ts so
- * they can be unit-tested — including a regression test proving React error decoding still
- * behaves after the replacement.
+ * they can be unit-tested — including a regression test proving the React error CODE, its
+ * invariant and its `&args[]` values still survive message FORMATTING after the replacement.
+ * It does not prove decoding works: no decoder route is served, so the code is preserved for
+ * manual lookup only.
  */
 function neutralizeVendorUrls() {
   const applied = new Set<string>();

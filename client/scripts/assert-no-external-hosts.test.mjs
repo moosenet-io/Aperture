@@ -22,6 +22,7 @@ import { describe, expect, it } from 'vitest';
 import {
   RECOGNISED_NAMESPACE_URIS,
   collectJsValues,
+  identifyBinaryFormat,
   loadAllowlist,
   scanDist,
   scanText,
@@ -260,7 +261,7 @@ describe('unknown extensions fail closed, matching the documented claim', () => 
       const result = scanDist(dir, allowed);
       expect(result.findings).toHaveLength(1);
       expect(result.findings[0].file).toBe('data.unknown');
-      expect(result.findings[0].value).toMatch(/unscanned textual asset/);
+      expect(result.findings[0].value).toMatch(/unscanned asset/);
     });
   });
 
@@ -270,20 +271,99 @@ describe('unknown extensions fail closed, matching the documented claim', () => 
     });
   });
 
-  it('skips a declared binary type without complaint', () => {
-    withDist({ 'f.woff2': Buffer.from([0x77, 0x4f, 0x46, 0x32, 0x00]) }, (dir) => {
+  it('skips a font that positively identifies by magic bytes', () => {
+    withDist({ 'f.woff2': Buffer.from('wOF2\u0000\u0000\u0000\u0000', 'latin1') }, (dir) => {
       const result = scanDist(dir, allowed);
       expect(result.findings).toEqual([]);
       expect(result.skippedBinary).toBe(1);
     });
   });
 
-  it('skips an unrecognised extension whose CONTENT is binary', () => {
-    withDist({ 'blob.bin': Buffer.from([0x00, 0x01, 0x02, 0xff]) }, (dir) => {
+  it('REPORTS a UTF-16 asset instead of mistaking its NUL bytes for binary', () => {
+    // The defect: "no NULs" was used to infer text, so UTF-16 (full of NULs) read as binary and
+    // was skipped. Identification is now positive — magic bytes — so this is reported.
+    withDist({ 'data.unknown': Buffer.from('https://evil.invalid/collect', 'utf16le') }, (dir) => {
       const result = scanDist(dir, allowed);
-      expect(result.findings).toEqual([]);
-      expect(result.skippedBinary).toBe(1);
+      expect(result.skippedBinary).toBe(0);
+      expect(result.findings).toHaveLength(1);
+      expect(result.findings[0].value).toMatch(/unscanned asset/);
     });
+  });
+
+  it('REPORTS an unrecognised extension whose content matches no approved binary format', () => {
+    withDist({ 'blob.bin': Buffer.from([0x13, 0x37, 0x00, 0x42]) }, (dir) => {
+      const result = scanDist(dir, allowed);
+      expect(result.skippedBinary).toBe(0);
+      expect(result.findings).toHaveLength(1);
+    });
+  });
+
+  it('REPORTS a file whose extension claims binary but whose bytes do not', () => {
+    // A mislabelled asset cannot buy silence with its name.
+    withDist({ 'fake.png': 'https://evil.invalid/collect' }, (dir) => {
+      expect(scanDist(dir, allowed).findings).toHaveLength(1);
+    });
+  });
+
+  it('identifies each approved binary format from its magic bytes', () => {
+    const samples = {
+      woff: Buffer.from('wOFF', 'latin1'),
+      woff2: Buffer.from('wOF2', 'latin1'),
+      opentype: Buffer.from('OTTO', 'latin1'),
+      truetype: Buffer.from([0x00, 0x01, 0x00, 0x00]),
+      png: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      jpeg: Buffer.from([0xff, 0xd8, 0xff, 0xe0]),
+      gif: Buffer.from('GIF89a', 'latin1'),
+      wasm: Buffer.from([0x00, 0x61, 0x73, 0x6d]),
+      pdf: Buffer.from('%PDF-1.7', 'latin1'),
+      gzip: Buffer.from([0x1f, 0x8b, 0x08, 0x00]),
+    };
+    for (const [name, bytes] of Object.entries(samples)) {
+      expect(identifyBinaryFormat(bytes), name).not.toBeNull();
+    }
+    expect(identifyBinaryFormat(Buffer.from('plain text', 'utf8'))).toBeNull();
+    expect(identifyBinaryFormat(Buffer.from('utf16 text', 'utf16le'))).toBeNull();
+  });
+});
+
+describe('multi-value attributes cannot hide a protocol-relative origin', () => {
+  it('splits srcset and flags a candidate that is not the first', () => {
+    const html = '<img src="/local.png" srcset="/local.png 1x, //localhost/collect 2x">';
+    expect(urls(scanText(html, 'markup', allowed))).toEqual(['//localhost/collect']);
+  });
+
+  it('splits imagesrcset too', () => {
+    const html = '<link rel="preload" imagesrcset="/a.png 1x, //127.0.0.1/b.png 2x">';
+    expect(scanText(html, 'markup', allowed)).toHaveLength(1);
+  });
+
+  it('routes a style attribute through the CSS scanner', () => {
+    const html = '<div style="background:url(//localhost/x); color:red"></div>';
+    expect(urls(scanText(html, 'markup', allowed))).toEqual(['//localhost/x']);
+  });
+
+  it('still catches an absolute origin in both', () => {
+    expect(scanText('<img srcset="/a.png 1x, https://cdn.example.invalid/b.png 2x">', 'markup', allowed)).toHaveLength(1);
+    expect(scanText('<div style="background:url(https://cdn.example.invalid/x)"></div>', 'markup', allowed)).toHaveLength(1);
+  });
+
+  it('does not flag clean multi-value attributes', () => {
+    expect(scanText('<img src="/a.png" srcset="/a.png 1x, /<email> 2x">', 'markup', allowed)).toEqual([]);
+    expect(scanText('<div style="background:url(/bg.png); margin:0"></div>', 'markup', allowed)).toEqual([]);
+  });
+
+  it('also catches it in the JS bundle, where a srcSet prop is just a string', () => {
+    // A React `srcSet` prop is emitted as one JavaScript string, so the markup-side splitting
+    // never sees it. The value predicate itself has to give the protocol-relative form the
+    // same reach an absolute origin already had.
+    const js = 'jsx("img",{src:"/a.png",srcSet:"/a.png 1x, //localhost/collect 2x"});';
+    expect(scanText(js, 'js', allowed)).toHaveLength(1);
+  });
+
+  it('does not flag a clean srcSet prop, prose, or a path with an embedded double slash', () => {
+    expect(scanText('jsx("img",{srcSet:"/a.png 1x, /<email> 2x"});', 'js', allowed)).toEqual([]);
+    expect(scanText('const s="see // the notes below";', 'js', allowed)).toEqual([]);
+    expect(scanText('const s="a//b.c and /x//y";', 'js', allowed)).toEqual([]);
   });
 });
 
@@ -300,20 +380,20 @@ describe('documented non-goals — recorded as accepted limitations, not silent 
     expect(scanText('@font-face{src:url(\\68 ttps://evil.invalid/i.woff2)}', 'css', allowed)).toEqual([]);
   });
 
-  it('does NOT reliably read attributes after one whose VALUE contains ">" (accepted; CSP covers it)', () => {
-    // The scanner ends a tag at the next ">", so a ">" inside a quoted value desynchronizes it.
-    // Detection after that point is unreliable in BOTH directions, which is why the claim is
-    // "unreliable", not "misses":
-
-    // (a) a protocol-relative origin in a later attribute is missed outright…
-    expect(scanText('<a href="a>b" title="//localhost/x"></a>', 'markup', allowed)).toEqual([]);
-
-    // (b) …while an absolute one is caught, but as a garbled fragment rather than the
-    //     attribute value, so the report cannot be trusted to name what was found.
-    const findings = scanText('<div data-a="a>b" data-b="https://evil.invalid"></div>', 'markup', allowed);
-    expect(findings).toHaveLength(1);
-    expect(findings[0].value).not.toBe('https://evil.invalid');
-    expect(findings[0].value).toContain('https://evil.invalid');
+  it('MIS-ATTRIBUTES attributes after one whose VALUE contains ">" (accepted; CSP covers it)', () => {
+    // The scanner ends a tag at the next ">", so a ">" inside a quoted value desynchronizes it
+    // and the rest of the tag is read as text. Origins there are still reported — but as a
+    // garbled fragment, never as the attribute value — and the scanner's behaviour in that
+    // state is not modelled, so detection there must not be relied on.
+    for (const [html, origin] of [
+      ['<div data-a="a>b" data-b="https://evil.invalid"></div>', 'https://evil.invalid'],
+      ['<a href="a>b" title="//localhost/x"></a>', '//localhost/x'],
+    ]) {
+      const findings = scanText(html, 'markup', allowed);
+      expect(findings).toHaveLength(1);
+      expect(findings[0].value).toContain(origin);
+      expect(findings[0].value).not.toBe(origin); // garbled, not the attribute value
+    }
   });
 });
 
@@ -439,7 +519,9 @@ describe('vendor URL neutralization (react-dom scoping + behaviour)', () => {
     expect(scanText(result.code, 'js', allowed)).toEqual([]);
   });
 
-  it('REGRESSION: React error decoding still behaves after the replacement', () => {
+  // Proves FORMATTING survives — the error code, invariant and args — not that decoding works.
+  // No decoder route is served, so the code is preserved for manual lookup only.
+  it('REGRESSION: the React error code, invariant and args survive message formatting', () => {
     const before = evalFmt(REACT_DOM_FIXTURE)(418, 'Foo', 'Bar');
     const after = evalFmt(applyNeutralizations(REACT_DOM_FIXTURE, [REACT_DOM_ID]).code)(418, 'Foo', 'Bar');
 

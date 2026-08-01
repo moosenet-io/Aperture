@@ -169,9 +169,10 @@ rather than skipped, so silence always means the lint looked.
 **HTML and SVG are the exception: they are scanned by a partial, hand-written scanner, not an
 HTML parser.** No HTML parser is in the dependency tree and one is not being added for a
 control that is not the security boundary. It skips comments and declarations, reads quoted and
-unquoted attribute values and text between tags, and routes `<script>` and `<style>` bodies to
-the JavaScript, JSON, or CSS scanner — so a `<script>` body is never treated as
-comment-strippable text.
+unquoted attribute values and text between tags, splits `srcset`/`imagesrcset` into their
+candidates, routes a `style` attribute through the CSS scanner, and routes `<script>` and
+`<style>` bodies to the JavaScript, JSON, or CSS scanner — so a `<script>` body is never
+treated as comment-strippable text.
 
 **Documented non-goals — accepted limitations, not silent gaps.** Each is covered by the
 runtime CSP, and each has a test recording the current behaviour so a change goes red:
@@ -179,9 +180,9 @@ runtime CSP, and each has a test recording the current behaviour so a change goe
 - **HTML character references are not decoded.** An origin written as `&#x2F;&#x2F;evil…` is
   not detected.
 - **CSS escapes are not decoded.** An origin written as `\68 ttps://evil…` is not detected.
-- **An attribute value containing `>` desynchronizes the markup scanner.** Values after that
-  point may be missed entirely, or reported as a garbled fragment rather than as the attribute
-  value — detection there is unreliable in both directions.
+- **An attribute value containing `>` desynchronizes the markup scanner.** The rest of that tag
+  is read as text, so an origin after it is reported as a **garbled fragment**, never as the
+  attribute value. Behaviour in that state is not modelled — do not rely on detection there.
 
 Candidate values are compared **whole and never truncated at a delimiter**. That is what makes
 `http://www.w3.org/2000/svg;payload` and `…/2000/svg?exfil=1` fail rather than reduce to an
