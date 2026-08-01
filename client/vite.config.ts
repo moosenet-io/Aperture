@@ -3,6 +3,8 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 
+import { applyNeutralizations, staleRules } from './scripts/vendor-url-neutralization';
+
 // Aperture client build.
 //
 // Sovereignty constraints encoded here (Module Contract clause 6):
@@ -11,59 +13,41 @@ import react from '@vitejs/plugin-react';
 //     the injectable SDK transport (APTR-07 / decision D1), never compiled in.
 //   * No CDN plugin, no `externals` pointing at a host, no runtime font or analytics fetch.
 //   * `assetsInlineLimit: 0` keeps fonts as emitted files rather than data URIs, so the
-//     egress gate can see exactly what ships.
+//     egress lint can see exactly what ships.
 //   * `esbuild.legalComments: 'inline'` KEEPS dependency licence banners in the output.
-//     That is deliberate: upstream licences must ship, and the egress gate is required to
-//     tolerate the URLs they contain (it strips comments before scanning).
+//     Upstream licences must ship, and the egress lint parses rather than greps, so the URLs
+//     they contain are inert by construction.
 //
-// `scripts/assert-no-external-hosts.mjs` runs after `vite build` and enforces the above over
-// the built output — see package.json `build`.
+// `scripts/assert-no-external-hosts.mjs` runs after `vite build` (see package.json `build`).
+// It is a defence-in-depth LINT over the emitted bundle, not a security boundary — runtime
+// egress is enforced by the CSP the BFF serves (APTR-99). Its own header says so at length.
 
 /**
- * Vendor strings that embed an external origin in the emitted bundle.
- *
- * These are not fetches — they are literals a dependency concatenates into a human-readable
- * message — but Aperture ships no external origin at all, and the allowlist takes XML/HTML
- * namespace URIs only (a vendor documentation host is not one, and adding it there would be a
- * review rejection). So they are neutralized at build time, by exact string replacement, with
- * the reason recorded here.
- *
- * A stale entry fails the build rather than rotting silently: if an entry matches nothing, the
- * dependency changed and this table must be revisited.
+ * Replace vendor-owned external URLs that ship as STRINGS rather than comments.
+ * Rules, their scoping, and their reasons live in ./scripts/vendor-url-neutralization.ts so
+ * they can be unit-tested — including a regression test proving React error decoding still
+ * behaves after the replacement.
  */
-const VENDOR_URL_NEUTRALIZATIONS = [
-  {
-    find: 'https://reactjs.org/docs/error-decoder.html?invariant=',
-    replace: 'react-error-decoder?invariant=',
-    reason:
-      'react-dom production builds concatenate this documentation URL into minified error text. '
-      + 'The invariant number is preserved, so the message stays actionable offline.',
-  },
-] as const;
-
-function sovereigntyTransform() {
-  const seen = new Set<string>();
+function neutralizeVendorUrls() {
+  const applied = new Set<string>();
   return {
     name: 'aperture:neutralize-vendor-urls',
     apply: 'build' as const,
-    renderChunk(code: string) {
-      let out = code;
-      for (const rule of VENDOR_URL_NEUTRALIZATIONS) {
-        if (out.includes(rule.find)) {
-          seen.add(rule.find);
-          out = out.split(rule.find).join(rule.replace);
-        }
-      }
-      return out === code ? null : { code: out, map: null };
+    renderChunk(code: string, chunk: { moduleIds?: readonly string[]; modules?: Record<string, unknown> }) {
+      const moduleIds = chunk.moduleIds ?? Object.keys(chunk.modules ?? {});
+      const result = applyNeutralizations(code, moduleIds);
+      for (const find of result.applied) applied.add(find);
+      return result.code === code ? null : { code: result.code, map: null };
     },
     closeBundle() {
-      const stale = VENDOR_URL_NEUTRALIZATIONS.filter((r) => !seen.has(r.find));
+      const stale = staleRules(applied);
       if (stale.length > 0) {
         throw new Error(
-          'aperture:neutralize-vendor-urls — stale entr'
-          + (stale.length === 1 ? 'y' : 'ies')
-          + ` no longer present in any chunk: ${stale.map((r) => r.find).join(', ')}. `
-          + 'Remove the entry or update it to the dependency\'s current string.',
+          'aperture:neutralize-vendor-urls — stale rule'
+          + (stale.length === 1 ? '' : 's')
+          + ` matched nothing in this build: ${stale.map((r) => r.find).join(', ')}. `
+          + "Remove the rule or update it to the dependency's current string; a rule that "
+          + 'never fires would leave a reader believing a URL is neutralized when it is not.',
         );
       }
     },
@@ -72,7 +56,7 @@ function sovereigntyTransform() {
 
 export default defineConfig({
   base: '/',
-  plugins: [react(), sovereigntyTransform()],
+  plugins: [react(), neutralizeVendorUrls()],
   esbuild: {
     legalComments: 'inline',
   },
@@ -86,10 +70,10 @@ export default defineConfig({
       // No `external` entries: nothing is resolved from outside the bundle at runtime.
       external: [],
       output: {
-        // A real licence banner carrying a real URL, in every emitted chunk. It is a comment:
-        // inert text, never fetched. It is also deliberate ballast for the egress gate — the
-        // false-positive pair (banner URL + inline-SVG xmlns) is therefore present in EVERY
-        // build, so the gate cannot silently regress to the naive grep without going red.
+        // A real licence banner carrying a real URL, in every emitted chunk. It is a comment —
+        // inert text, never fetched — and it is deliberate ballast: every build therefore
+        // carries the licence-banner-URL case, so a regression that made comments significant
+        // again would go red immediately instead of waiting for a dependency upgrade.
         banner: '/*! Aperture — MIT licence: https://opensource.org/licenses/MIT */',
       },
     },

@@ -1,12 +1,15 @@
 {
   "$schema-note": "Read by scripts/assert-no-external-hosts.mjs. DATA ONLY — no code, no logic.",
   "policy": [
-    "This file may contain XML/HTML NAMESPACE URIs and nothing else.",
+    "This file selects from a CODE-OWNED registry of XML/HTML namespace URIs; it cannot extend it.",
+    "RECOGNISED_NAMESPACE_URIS in assert-no-external-hosts.mjs is the registry. A uri that is not",
+    "in it fails the lint, so a CDN, font host, or API endpoint cannot be allowlisted here at all —",
+    "widening the registry is a source change a reviewer must approve.",
     "A namespace URI is an identifier, never an address: nothing is ever fetched from it.",
-    "Matching is exact-string. A URI that merely shares a prefix with an entry is NOT allowed.",
-    "Every entry MUST carry a non-empty 'reason'. An entry without one fails the gate.",
-    "Adding a non-namespace entry (a CDN, a font host, an API endpoint) is a review rejection,",
-    "not a configuration change. If a build needs an external origin, the build is wrong."
+    "Matching is exact-string over the COMPLETE value, never a prefix and never truncated at a",
+    "delimiter, so '...svg;payload' and '...svg?x=1' are failures.",
+    "Every entry MUST carry a non-empty 'reason'. An entry without one fails the lint, as does an",
+    "empty entries array."
   ],
   "entries": [
     {

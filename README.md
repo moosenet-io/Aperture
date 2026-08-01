@@ -43,7 +43,8 @@ egress of its own, sends no telemetry anywhere, and never talks to a model provi
 - **Not a replacement for Matrix.** Matrix remains a first-class, fully supported transport.
   Aperture is an addition, not a migration.
 - **Not a telemetry surface.** No analytics, no external CDN, no remote fonts, no phone-home.
-  The build fails if an external origin appears in the bundle.
+  A build-time lint fails the build if an external origin appears in the bundle, and the
+  runtime CSP served by the backend is what actually enforces it.
 
 ---
 
@@ -104,7 +105,7 @@ guarded agent loop, so behaviour is identical regardless of where a message arri
 ```bash
 # client workspace — Node >= 20
 npm --prefix client ci
-npm --prefix client run build      # tsc --noEmit && vite build && egress gate
+npm --prefix client run build      # tsc --noEmit && vite build && egress lint
 npm --prefix client run test
 ```
 
@@ -122,41 +123,66 @@ Tailwind: styling is the shared constellation token layer (see **Design system**
 |---|---|
 | `npm --prefix client run dev` | Vite dev server |
 | `npm --prefix client run typecheck` | `tsc --noEmit` under `strict` |
-| `npm --prefix client run build` | `tsc --noEmit` → `vite build` → the egress gate. A type error fails the build |
+| `npm --prefix client run build` | `tsc --noEmit` → `vite build` → the egress lint. A type error fails the build |
 | `npm --prefix client run test` | vitest |
-| `npm --prefix client run assert-no-external-hosts` | the egress gate, against an existing `client/dist` |
+| `npm --prefix client run assert-no-external-hosts` | the egress lint, against an existing `client/dist` |
 
 Fonts are **bundled**, not fetched: the `@fontsource/*` packages emit the woff2 files into the
 build output, so no font host is contacted at runtime. Backend addressing is never compiled in
 — no absolute URL and no default endpoint anywhere in the client. The transport's base URL is
 injected per target.
 
-### The egress gate and its allowlist policy
+### The egress lint — what it guarantees, and what it does not
 
 `client/scripts/assert-no-external-hosts.mjs` runs as the last step of every build, over the
-**built** output, and fails the build if an absolute `http(s)` origin survives in an emitted
-asset. Two properties keep it honest, and both are directly tested:
+**built** output, and fails the build if an absolute `http(s)` origin appears in an emitted
+asset.
 
-1. **Comments are stripped before scanning.** Dependency licence banners legitimately carry
-   upstream project URLs; they are inert text and must not fail a correct build. The stripper
-   is string-aware, so the `//` inside a real URL is never mistaken for a comment — that
-   mistake would delete the very violation the gate exists to catch. Stripping affects the
-   scan only; the emitted bundle is never rewritten by it.
-2. **`client/scripts/external-host-allowlist.json` holds XML/HTML namespace URIs and nothing
-   else.** Bundled inline SVG legitimately carries `xmlns="…/2000/svg"`; a namespace URI is an
-   identifier, never an address. Matching is **exact string** — a URI that merely shares a
-   prefix with an entry still fails — and every entry carries a mandatory `reason`. An entry
-   without one fails the gate.
+**It is a defence-in-depth lint. It is not a security boundary.** A static scanner over
+emitted JavaScript cannot establish "this client never fetches anything external": a URL can
+be assembled at runtime from fragments, character codes, or decoded data. **The enforcing
+control is the runtime CSP served by the BFF**, applied by the browser at request time. Do not
+read a green lint as a proof of sovereignty — an overclaimed control is worse than a modest
+one, because people stop looking past it.
 
-**Adding a non-namespace entry (a CDN, a font host, an API endpoint) is a review rejection,
-not a configuration change.** If a build needs an external origin, the build is wrong. Where a
-dependency bakes an external URL into a *string* (react-dom's minified-error documentation
-link, for example), it is neutralized at build time by an exact, reason-annotated replacement
-declared in `client/vite.config.ts` — never by widening the allowlist. A stale replacement
-entry fails the build rather than rotting silently.
+What the lint reliably catches, and why it runs on every build:
 
-The gate is static and therefore necessary but not sufficient: a URL can be assembled at
-runtime. The runtime CSP served by the BFF is the enforcing control.
+- an accidental `fetch()`, `<script src>`, or `@font-face src` pointing at a CDN or an API
+- **dependency drift** — a dependency that grows a phone-home, a beacon, or a remote font
+  between upgrades. This is the common real-world regression.
+- a font or asset host sneaking back in after being removed
+- an origin assembled by static string concatenation (`"https:" + "//host"`), which is folded
+  before comparison
+
+What it cannot catch: deliberate obfuscation, and any URL built at runtime from values not
+present in the bundle.
+
+It **parses** rather than pattern-matches. JavaScript goes through Rollup's parser
+(`rollup/parseAst`), CSS through `postcss`, and HTML/SVG through a tokenizer that extracts
+`<script>` bodies as raw text and parses them as JavaScript — both parsers are already Vite's
+own dependencies, so nothing is added to the tree. Comments, regex literals, and string
+boundaries are therefore correct **by construction**: a licence banner's URL is inert because
+comments do not exist in an AST, not because a stripping pass removed it. An asset that cannot
+be parsed **fails** — an unparseable asset is not evidence of safety.
+
+Candidate values are compared **whole and never truncated at a delimiter**. That is what makes
+`http://www.w3.org/2000/svg;payload` and `…/2000/svg?exfil=1` fail rather than reduce to an
+allowlisted URI.
+
+**The allowlist.** The set of allowlistable URIs is a **code-owned registry** of XML/HTML
+namespace URIs inside the script itself. `client/scripts/external-host-allowlist.json` can
+only say *which* of them are in use and *why* — every entry carries a mandatory `reason`, and
+an entry that is not in the registry, is a duplicate, or is missing a reason fails the lint. An
+empty allowlist fails too, rather than silently allowing everything. **A CDN, a font host, or
+an API endpoint therefore cannot be allowlisted by configuration at all** — widening the
+registry is a source change a reviewer has to approve.
+
+Where a dependency bakes an external URL into a *string* rather than a comment (react-dom's
+minified-error documentation link), it is neutralized at build time by an exact replacement,
+**scoped to the chunk containing that dependency**, declared with its reason in
+`client/scripts/vendor-url-neutralization.ts` and covered by a regression test proving the
+error message still decodes. A rule that matches nothing fails the build rather than rotting
+silently.
 
 ## Documentation
 
