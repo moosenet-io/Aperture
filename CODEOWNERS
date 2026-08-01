@@ -1,0 +1,75 @@
+# Review ownership for Aperture.
+#
+# ---------------------------------------------------------------------------------------
+# HOW TO VERIFY THIS FILE ACTUALLY DOES ANYTHING — read before editing.
+#
+# A CODEOWNERS file fails SILENTLY. An owner that cannot be resolved is not an error, not a
+# warning, and not a failed check: the rule simply assigns nobody, and the file goes on
+# looking like governance while enforcing nothing. So the owner must be verified, not
+# assumed. Two rules follow from that:
+#
+#   1. An owner must be an INDIVIDUAL ACCOUNT (`@name`) or a TEAM (`@org/team-name`).
+#      A bare organisation handle (`@org`) is NOT a valid owner on GitHub and is never
+#      assigned. If you are tempted to write one because it feels more neutral than naming
+#      an account, do not — that is the broken choice, not the conservative one.
+#   2. Never guess a team name to avoid naming an account. A team that does not exist fails
+#      exactly as silently as a bare org handle.
+#
+# To verify an owner on the forge where reviews happen, put the account on a branch
+# protection push whitelist through the sanctioned forge tool. The forge validates the
+# username and rejects an unknown one outright ("user does not exist", HTTP 422), so
+# acceptance is positive proof the account resolves. That is how `@moose` below was
+# verified: the whitelist call was accepted for it, and refused for a control name that
+# does not exist.
+#
+# STATUS ON THE PUBLIC MIRROR — an operator action is outstanding.
+# The mirror is a read-only, PII-swept derivative. No pull request is opened, reviewed, or
+# merged there, so CODEOWNERS is inert on the mirror BY DESIGN and its inertness is not a
+# defect. But it also means the owner below has NOT been confirmed to resolve on the public
+# host, and it cannot be confirmed from inside this repository. If public contribution is
+# ever opened, an operator must first create or confirm a real reviewing team there
+# (`@org/team-name` form) and update this file. Until then, treat the mirror copy of this
+# file as documentation of intent, not as an active review rule.
+#
+# ---------------------------------------------------------------------------------------
+# HONESTY NOTE: this project has exactly ONE maintainer identity. There is no review team,
+# no per-area owner group, and no rotation — inventing one here would misrepresent who is
+# actually reviewing, and would silently break the file besides. Every rule below therefore
+# resolves to the same owner. The file exists so ownership is explicit, and so per-area
+# owners can later be added by editing rules rather than by introducing the concept.
+#
+# `@moose` is a forge ROLE ACCOUNT — the maintainer and merge-queue identity. It is not a
+# person's name, and no personal name or email address appears in this file or may be added
+# to it, because this file ships publicly.
+#
+# Rules are last-match-wins: the global rule first, specific paths after it.
+#
+# ONLY PATTERNS THAT MATCH SOMETHING. A pattern matching no real path silently disables
+# review for what its author thought it covered, so a stale rule is worse than a missing
+# one. Patterns here are checked against the tree. Directories that do not exist yet — the
+# client workspace, the contract tree, the end-to-end suite, CI configuration — are covered
+# by the global rule below and get their own rules when they land, not before.
+
+# Everything, including any path added in future.
+*                        @moose
+
+# Governance and pipeline configuration. Changing what gets published, what is protected,
+# or how a vulnerability is reported is a higher-consequence edit than a feature change.
+/LICENSE                 @moose
+/SECURITY.md             @moose
+/CONTRIBUTING.md         @moose
+/CODEOWNERS              @moose
+/.moosenet-pipeline.yaml @moose
+/.gitattributes          @moose
+
+# The specs this repository is built from, and the reviews that shaped them.
+/specs/                  @moose
+/reviews/                @moose
+
+# Documentation and repo identity.
+/README.md               @moose
+/behavior-spec.md        @moose
+/docs/                   @moose
+
+# Brand assets. Anything shipped to a client bundle gets the same scrutiny as code.
+/assets/                 @moose

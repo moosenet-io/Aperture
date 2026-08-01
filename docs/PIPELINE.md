@@ -11,10 +11,20 @@ restart, a host config edit, secret rotation, disk cleanup.
 ## The stages
 
 ```
-ground → ingest → worktree → implement → test gate → review gate
-      → merge → POST-MERGE GATE → verify → docs → cleanup
-                                                   ↳ once per build: epic capstone
+ground → ingest → worktree → implement → test gate → review gate → merge
+                                                                    │
+        ┌───────────────── POST-MERGE GATE ─────────────────────────┘
+        │   (one indivisible phase — all four, in this order)
+        └── verify → docs current → mirror → KG refresh ──┐
+                                                          │
+                                                cleanup ──┘
+
+once per build, after the last item: epic capstone
 ```
+
+The post-merge gate is **one phase, not four stages.** Its four actions run in the order
+shown, as a single indivisible unit with the merge. Nothing between the merge and the end of
+that phase is a separate step you can report on, defer, or skip independently.
 
 **0. Ground.** Before scoping or writing code, consult the project's knowledge graph for the
 entities the change touches and their blast radius, and read the **learned rules** for that
@@ -50,13 +60,14 @@ Two things worth knowing when you are on the receiving end of a review:
   or a parse failure is not a finding. Do not deadlock a merge on one.
 
 **6. Merge.** Through the sanctioned forge tool. `main` is protected: force-push and deletion
-are blocked.
+are blocked, and direct push is whitelist-gated to the merge-queue identity. See
+[Branch protection](#branch-protection).
 
-**7. THE POST-MERGE GATE — not optional.**
+**7. THE POST-MERGE GATE — one phase, not optional.**
 
-> The moment a merge succeeds, the post-merge gate runs. It performs the public mirror and the
-> knowledge-graph refresh. **Treat "merged" and "mirrored + graph refreshed" as one indivisible
-> action**, the way you would a commit and its tests.
+> The moment a merge succeeds, the post-merge gate runs. **Treat "merged" and "verified +
+> documented + mirrored + graph refreshed" as one indivisible action**, the way you would a
+> commit and its tests.
 >
 > **A merge reported without the gate's outcome is an incomplete report.** Name the repo and
 > say what the gate returned. An unrun gate and a gate that reported a problem are both
@@ -67,16 +78,64 @@ got skipped: an agent merges, reports success, moves on, and the public mirror s
 behind for days before anyone notices. Anything depending on someone remembering a final step
 eventually does not happen.
 
-**8. Verify.** Tests pass on `main` after the merge. A branch that was green can still break
-on `main`; that is what this catches. Fix forward via a hotfix branch — never revert `main`.
+Inside the phase, four actions run **in this order**:
 
-**9. Docs.** The in-repo README and docs are confirmed current for what just landed. This runs
-**before** the mirror so the public repository never ships code ahead of the documentation that
-describes it.
+**First — verify.** Tests pass on `main` after the merge. A branch that was green can still
+break on `main`; that is what this catches. Fix forward via a hotfix branch — never revert
+`main`.
 
-**10. Cleanup.** Worktree removed, branches deleted. At sprint end, a sweep removes every
+**Second — docs current.** The in-repo README and docs are confirmed current for what just
+landed. This runs **before the mirror push**, so the public repository never ships code ahead
+of the documentation that describes it. It is not a later stage that happens to precede the
+mirror — it is inside the same phase, ahead of it, by construction.
+
+**Third — public mirror** (the fleet's *Stage 7d*). The PII-swept derivative is published. See
+[The public mirror](#the-public-mirror) for the two failure modes and how to diagnose a
+reported divergence.
+
+**Fourth — knowledge-graph refresh** (the fleet's *Stage 7c*). Incremental, so the graph the
+next task grounds against is never stale. Non-blocking: a failure here is logged and never
+reverts a merge.
+
+> **The fleet's stage letters are labels, not an execution order.** The knowledge graph is
+> "7c" and the mirror is "7d", but the mirror runs first. Do not infer sequence from the
+> letters — read the order above. Conflating the two is what produced the contradiction this
+> section replaced.
+
+**8. Cleanup.** Worktree removed, branches deleted. At sprint end, a sweep removes every
 merged, clean worktree and **leaves any unmerged or dirty one intact**, reported rather than
 silently destroyed.
+
+---
+
+## Branch protection
+
+`main` is protected. The posture is declared in `.moosenet-pipeline.yaml` under
+`branch_protection` and enforced by the forge:
+
+| Property | Setting |
+|---|---|
+| Force-push to `main` | **Blocked** |
+| Deletion of `main` | **Blocked** |
+| Direct push to `main` | **Whitelist-gated** — the merge-queue identity only |
+| Required signed commits | Off |
+| Block merge on outdated branch | Off |
+
+Everything else reaches `main` through a pull request merged by the sanctioned forge tool.
+This is deliberate, and it applies to agents and to the orchestrator as much as to a human:
+after protection is enabled, a direct push to `main` from an ordinary identity is refused.
+That refusal is the feature working, not an outage. Push your feature branch and merge it.
+
+**Protection is configured only through the sanctioned forge branch-protection tool** —
+never by a raw forge API call, which is a second, unaudited access path and rejectable on
+that basis alone. The call is **idempotent**: the first run creates the rule, every later run
+with the same arguments updates it to the same state. Re-running it to confirm the posture is
+safe, and is the correct way to verify.
+
+The identity on the push whitelist is deliberately **not named in the config file**. The
+config ships to the public mirror; the whitelist itself lives in the forge, which is the
+source of truth. The `branch_protection` block records the intended *shape* so that a drift
+between intent and reality is visible in review.
 
 ---
 
@@ -84,6 +143,32 @@ silently destroyed.
 
 This repository is flagged `mirror_ready`, so mirroring is **mandatory on every merge**, not
 best-effort.
+
+### Registration and how to check it
+
+The repository is registered with the mirror engine and the public lineage is **established**
+— it is not a pending bootstrap. Mirror credentials and the engine's own source/work roots are
+host configuration resolved at runtime; none of it is committed here, and changing it is an
+operations action, not a code change.
+
+Aperture is a **full-history** repository (`mirror_engine: full_history`), which matters for
+how you read its status. There are two mirror engines and they answer different questions:
+
+| Engine | Status call | What it tells you |
+|---|---|---|
+| **Full-history** (the one that publishes Aperture) | `git_public_history_status` | `lineage_established`, `commits_behind`, internal vs mirrored commit counts. **This is the authoritative read.** |
+| **Snapshot** (not used for this repo) | `git_public_mirror_status` | The snapshot work dir's own approval tags and drift |
+
+Reading the *snapshot* status for a full-history repo produces a false alarm: it will report
+outstanding commits and a `needs_prepare` state that mean nothing here, because a different
+engine is doing the publishing. This has caused real mis-escalations. **Check
+`git_public_history_status` first, and confirm against the published files themselves rather
+than comparing commit hashes** — the mirrored history is a scrubbed replay, so its hashes are
+expected to differ from internal ones.
+
+Worse than a false alarm: escalating this repo through the snapshot path
+(`prepare` → `approve` → `push`) mints a second, parallel lineage that can never fast-forward
+onto what is already published. One engine per repository. Do not mix them.
 
 What is published is not this repository's `main`. It is a **PII-swept derivative** with its
 own lineage. Internal `main` is never pushed. That is what makes mandatory mirroring safe: a
@@ -122,8 +207,8 @@ The heavyweight documentation engine is **capstone-gated**. It fires once, at th
 Epic Review capstone, and only when the capstone verdict is approve. It is **not** wired to any
 per-merge step, and adding it to one is a regression.
 
-The per-merge documentation obligations are the cheap ones: the in-repo README check and the
-knowledge-graph refresh.
+The per-merge documentation obligation is the cheap one: the in-repo README and docs check,
+which runs inside the post-merge phase ahead of the mirror push.
 
 ## The knowledge graph and Cortex
 

@@ -121,6 +121,9 @@ secret provisioning, first-run onboarding, and per-target installation — is in
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every configuration key, by name |
 | [docs/PIPELINE.md](docs/PIPELINE.md) | How changes reach `main` and the public mirror |
 | [docs/BRAND.md](docs/BRAND.md) | The Aperture mark, palette, and usage rules |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute, and the rules that are non-negotiable |
+| [SECURITY.md](SECURITY.md) | Supported versions and the private vulnerability reporting path |
+| [CODEOWNERS](CODEOWNERS) | Review ownership by path |
 | [contracts/](contracts/) | The versioned client↔BFF API contract — the source of truth |
 | [behavior-spec.md](behavior-spec.md) | Verifiable behavioural contracts |
 | [specs/](specs/) | The build specs this repo is being built from |
@@ -137,9 +140,13 @@ on inline styles, hardcoded colour literals, and stray style blocks.
 ## Contributing
 
 Every change — including a one-line fix — goes through the full pipeline: tracked work item,
-isolated worktree, implementation, test gate, independent review gate, merge, post-merge
-verification, documentation check, and public mirror. There is no informal path. See
-[docs/PIPELINE.md](docs/PIPELINE.md).
+isolated worktree, implementation, test gate, independent review gate, merge, and then the
+post-merge gate — one indivisible phase that verifies `main`, confirms the docs are current,
+publishes the public mirror, and refreshes the knowledge graph, in that order. There is no
+informal path. `main` is
+protected: force-push and deletion are blocked, and direct push is restricted to the
+merge-queue identity. Read **[CONTRIBUTING.md](CONTRIBUTING.md)** first, then
+[docs/PIPELINE.md](docs/PIPELINE.md); review ownership is in [CODEOWNERS](CODEOWNERS).
 
 Two rules worth stating up front, because they are the ones most often broken:
 
@@ -149,6 +156,12 @@ Two rules worth stating up front, because they are the ones most often broken:
 2. **One door.** All backend access goes through the client library into the kernel. A second
    access path — a direct HTTP client against a service, a raw forge or tracker API call — is
    rejected on that basis alone, however well-written it is.
+
+## Security
+
+Found a vulnerability? **Do not open a public issue.** Use the private reporting path
+described in [SECURITY.md](SECURITY.md), which also lists supported versions, the disclosure
+expectation, and the acknowledgement window.
 
 ## Licence
 

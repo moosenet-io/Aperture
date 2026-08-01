@@ -5,27 +5,52 @@
 # never embedded here.
 
 # --- git-public mirror engine (Stage 7d) ---
-# mirror_ready gates WHICH repos mirror. For a flagged repo the mirror is MANDATORY
-# and runs after EVERY merge, immediately following the post-merge gate.
+# mirror_ready gates WHICH repos mirror. For a flagged repo the mirror is MANDATORY.
+# It runs INSIDE the post-merge phase, not after it: that phase is one indivisible unit
+# with the merge, and its internal order is verify -> docs current -> mirror -> KG refresh.
+# The stage letters below are labels, NOT a sequence — the mirror (7d) runs before the
+# knowledge-graph refresh (7c). See docs/PIPELINE.md for the single authoritative ordering.
 # The public mirror receives a PII-swept derivative with its own lineage — never
 # internal main. A non-fast-forward result is surfaced as needs_operator_rebaseline
 # and left for the operator. It is NEVER force-resolved.
 mirror_ready: true
 github_remote: https://github.com/moosenet-io/aperture.git
 
+# Which of the two mirror engines owns this repo. They are NOT interchangeable: the
+# full-history engine replays and scrubs every internal commit onto a blessed baseline,
+# while the snapshot engine maintains its own linear derivative history. Escalating a
+# full-history repo through the snapshot path mints a parallel lineage that can never
+# fast-forward. Aperture is a full-history repo — one engine, no mixing.
+mirror_engine: full_history
+
+# --- branch protection (declared here, enforced by the forge) ---
+# The forge is the source of truth; this block records the intended posture so a drift
+# is visible in review. It is applied ONLY through the sanctioned forge branch-protection
+# tool, never by a raw API call, and that call is idempotent.
+branch_protection:
+  branch: main
+  force_push: blocked
+  deletion: blocked
+  direct_push: whitelist_only   # merge-queue identity only; everyone else merges via PR
+  require_signed_commits: false
+  block_on_outdated_branch: false
+
 # --- documentation engine ---
 # Capstone-gated. docgen_run fires ONCE, at the end of the Epic Review capstone, and
 # only on an APPROVE verdict. It is NOT wired to any per-merge step.
-# Stage 7c's per-merge actions remain the in-repo README check and the Atlas KG refresh.
+# The per-merge documentation obligation stays the cheap one: the in-repo README and docs
+# check, which runs inside the post-merge phase AHEAD of the mirror push, so the public
+# repo never ships code ahead of the documentation describing it.
 docgen:
   capstone_only: true
   targets:
     - readme
     - wiki
 
-# --- Atlas knowledge graph (Stage 7c, per merge) ---
-# Refreshed incrementally on every merge so the graph the next task grounds against
-# is never stale. Non-blocking: a failure is logged, never reverts a merge.
+# --- Atlas knowledge graph (Stage 7c) ---
+# The LAST action of the post-merge phase, after the mirror push. Refreshed incrementally
+# on every merge so the graph the next task grounds against is never stale. Non-blocking:
+# a failure is logged, never reverts a merge.
 knowledge_graph:
   project_id: APTR
   incremental: true
