@@ -41,7 +41,7 @@ In the agent-core repository, crate `lumina-core`:
 | `crates/lumina-core/src/aperture/routes.rs` | The `/v1/aperture` route table: `health`, `ready`, `version`, and the prefix-scoped catch-all |
 | `crates/lumina-core/src/aperture/state.rs` | Shared state; the outbound door as a module-private handle; the capability report |
 | `crates/lumina-core/src/aperture/error.rs` | The single error type and its closed RFC-9457 problem-details representation |
-| `crates/lumina-core/Cargo.toml` | The `aperture` feature (implies `http`; adds no runtime dependency) |
+| `crates/lumina-core/Cargo.toml` | The `aperture` feature (implies `http`) |
 | `crates/lumina-core/src/lib.rs`, `src/main.rs` | The feature-gated module declarations |
 | `crates/lumina-core/src/http_server.rs` | The feature-gated mount on the existing server |
 | `README.md` | The BFF and its feature flag, documented where an operator will look |
@@ -58,11 +58,12 @@ problem-details form. The `auth`, `threads`, `stream`, `attachments`, `modules`,
 ### The properties it holds, and how
 
 - **One door.** Every backend capability is reached through the agent core's in-process
-  `terminus-client` wrapper. The handle is a private field with an accessor visible only inside
-  the module, so the "exactly one transport" property is enforced by the Rust compiler (D8), not
-  by a lint in another language — and the feature adds no runtime dependency, so no new
-  HTTP-client crate enters the binary with it. A source scan additionally rejects a list of known
-  client spellings; that scan is a regression tripwire, not the proof (see "Evidence classes").
+  `terminus-client` wrapper. The handle is a private field with **no accessor at all**, so
+  nothing outside the file that declares it can obtain it, and a later item needing a backend
+  call adds a method to the `Door` trait rather than receiving the client. That much the Rust
+  compiler enforces (D8), rather than a lint in another language. A source scan additionally
+  rejects a list of known client spellings; that scan is a regression tripwire, not the proof,
+  and criterion 2 below states exactly what the compiler does and does not cover.
 - **Named proxies only.** No model id, engine name, backend tag or size suffix appears in the
   module.
 - **No secrets of its own.** The module performs no environment read of any kind; the door is
@@ -99,7 +100,7 @@ what it claims:
 |---|---|
 | **GATED** | Proved by the fleet compiler tool — pinned toolchain, capped scope, single build door. This is the only class that is evidence in the process's own sense. |
 | **LOCAL** | Proved by a run on the developer host. Real output, real pass/fail, but not the sanctioned gate: not the pinned toolchain, not reproducible on demand by a reviewer, and not recorded by the build system. |
-| **STRUCTURAL** | Proved by the language or the manifest rather than by a run — a visibility rule the compiler enforces, or a dependency the manifest does not contain. Strongest where available, because it holds for code nobody has written yet. |
+| **STRUCTURAL** | Proved by the language rather than by a run — typically a visibility rule the compiler enforces. Strongest where available, because it holds for code nobody has written yet. It is only ever as broad as the rule it rests on, so a structural claim must state its scope; see criterion 2. |
 | **TRIPWIRE** | A lexical scan over a named token list. It catches the mistake it enumerates and **nothing else**. It is not proof of a general property; it is a regression alarm for a specific known-bad spelling. |
 | **REVIEW** | Proved, if at all, by a human reading it. |
 
@@ -126,13 +127,47 @@ both passing locally, and with the feature off this change compiles no new code 
 | # | Acceptance criterion | Proving repo | Class | Evidence, and its exact limit |
 |---|---|---|---|---|
 | 1 | The BFF module compiles with and without the `aperture` feature | agent-core | Feature-off: **GATED** (partially) + **LOCAL**. Feature-on: **LOCAL only** | **GATED:** the compiler tool built and ran the default-feature (feature-**off**) suite on branch head `455bc7b`, with the four pre-existing failures noted above — this is the only part of criterion 1 a gate has touched. **LOCAL:** feature-on and feature-off builds both complete with no warning from the module; the feature-off binary contains **zero** occurrences of the route prefix and the feature-on binary contains it. **Not gated, and why:** the compiler tool cannot select a cargo feature at all (`TERM #593`), so no gate can currently observe the feature-on state; the gate is additionally red for the `sccache` reason above. |
-| 2 | All backend access routes through the tool-door client; zero direct service HTTP clients | agent-core | **STRUCTURAL** (primary) + **TRIPWIRE** (secondary) | **Primary, compiler-enforced:** the egress handle is a **private field** on the module's state with an accessor visible only inside the module (`pub(in crate::aperture)`). No caller outside the module can reach it, and that holds for code not yet written. **Also structural:** the `aperture` feature adds **no runtime dependency** — the manifest change is the feature declaration plus one *dev*-dependency, so the module introduces no new HTTP-client crate to the shipped binary. **Secondary tripwire:** a source scan rejects a named list of client spellings. **Its limit, stated:** a name list is an enumeration. An alias, a re-export, a differently-named client, a raw socket, or a crate nobody thought of all pass it. It proves those specific spellings are absent — **not** that all backend access goes through the tool door. The structural evidence is what carries this criterion; the scan is a regression alarm. |
+| 2 | All backend access routes through the tool-door client; zero direct service HTTP clients | agent-core | **STRUCTURAL** (primary, narrow) + **TRIPWIRE** (secondary) | **What the compiler strictly guarantees:** *nothing outside `state.rs` can obtain this state's door handle.* It is a private field with **no accessor at all** — not even a module-scoped one — and a later item needing a backend call adds a method to the `Door` trait rather than receiving the client. That holds for code nobody has written yet, and it is a **stronger** claim than the `pub(in crate::aperture)` accessor it replaces. **What it does not cover — see "The two limits" below.** **Secondary tripwire:** a source scan rejects a named list of client spellings. **Its limit:** a name list is an enumeration. An alias, a re-export, a differently-named client, a raw socket, or a crate nobody thought of all pass it. It proves those specific spellings are absent — **not** that all backend access goes through the tool door. |
 | 3 | Secrets accessed via the secret manager, not environment reads | agent-core | **TRIPWIRE** + **REVIEW** | A source scan finds zero occurrences of the direct environment-read spellings anywhere in the module's shipping half, which subsumes the token-, key-, password- and secret-shaped names the rule is about. **Its limit:** the scan proves those spellings are absent; that the module reads no secret **at all** is a claim about its 4 files, established by reading them, not by the scan. |
 | 4 | Inference addressed by named proxy only; no model, engine or backend name in code | agent-core | **TRIPWIRE** | A source scan rejects a list of model ids, engine names, backend tags and size suffixes. **Its limit:** it catches the names on the list. A model name nobody enumerated would pass. The module currently issues no inference call at all, which is the substantive reason this holds. |
 | 5 | An unreachable door degrades to `unavailable`, never a crash | agent-core | **LOCAL** (behavioural tests) | State construction with no door is infallible and reports the capability `unavailable` with a reason; the readiness route answers `503` problem details naming the capability; the router builds with no door present. Exercised through the real router. **Not gated:** these tests live behind the `aperture` feature, which no gate can select (`TERM #593`). |
 | 6 | **`docs/BFF-PLACEMENT.md` carries the gate-attribution table and links the merged agent-core PR id** | **Aperture (this repo)** | **REVIEW** | **UNSATISFIED as of this commit.** The table is present; the **merged agent-core PR link is not** — see "The agent-core change this document describes" below, which carries a branch and a commit SHA and an explicit placeholder. A branch name and a commit SHA are **not** a merged-PR link. **This PR is not mergeable in this state**, by the rule in "Merge order" below. |
 | 7 | No hardcoded infrastructure value in new/modified code; all existing tests still pass | agent-core | **TRIPWIRE** + **LOCAL** | A source scan rejects a literal address, scheme, or filesystem path in the shipping half of every module file, and a behavioural test asserts no response body carries one. **The scan's limit:** it is a pattern list — a dotted quad, two URL schemes, two path prefixes. An internal hostname without a scheme, or a port on its own line, would pass it. The response-body assertion is the stronger half, because it tests what actually reaches a client. **"All existing tests still pass":** LOCAL for the feature-on suite; GATED for the default-feature suite modulo the four pre-existing failures. |
 | 8 | README documents the BFF and its feature flag | agent-core | **REVIEW** | The agent-core `README.md` gains an "Aperture BFF" section in the same change set. Nothing mechanical checks that prose is accurate; a reviewer does. |
+
+### Criterion 2 — the two limits, and one piece of evidence struck
+
+The structural claim above is narrow on purpose. Two things it does **not** cover, recorded here
+because they are the honest frame for the whole criterion rather than footnotes to it:
+
+1. **The single-door property survives; the one-chokepoint property does not.**
+   `terminus_egress::global()` is `pub` and is already called from several other modules in the
+   agent core. The compiler does not prevent a future Aperture handler from calling it directly
+   and bypassing this state entirely. Such a handler would still reach **the same single door**,
+   so "all backend access goes through the tool door" is not violated by it — but "this state is
+   the one chokepoint" is, and only the tripwire scan covers that.
+2. **Visibility is enforced as declared, not as a rule.** Anyone editing `state.rs` can widen the
+   field or add an accessor, and the compiler will happily enforce the new, weaker declaration.
+   What would detect that today is a **review of `state.rs`**, which is why the access boundary
+   and its limits are documented in that file's own module doc rather than only here. A cheap
+   mechanical backstop is available and not yet written: a source-scan assertion that the door
+   field's declaration is followed by no accessor returning it, in the same style as the existing
+   scans — a tripwire, with a tripwire's limits, but one that fails the build on the most likely
+   accidental widening. It belongs with the module, so it is noted here and filed there, not
+   claimed as evidence this document already has.
+
+**One piece of evidence is struck from this criterion.** An earlier revision offered "the
+`aperture` feature adds no new runtime dependency" as structural support, and the reviewing
+coordinator endorsed it as "closer to the property than any name list". **It is not, and it is
+withdrawn.** The agent core already carries a general-purpose HTTP client for reasons predating
+Aperture, so the absence of a *new* dependency proves nothing about a second door: the capability
+was already present, a second client is one `use` away, and only the lexical tripwire stands
+against it. The statement was true and very nearly vacuous, which is the most dangerous kind of
+evidence to leave in a table — it reads as load-bearing.
+
+That correction came from the implementer re-deriving the claim on request rather than from the
+review that asserted it, and is recorded here in those terms, because a table that quietly drops
+a discredited row teaches nobody anything.
 
 ### What this PR cannot prove — stated plainly
 
