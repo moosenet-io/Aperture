@@ -20,6 +20,17 @@ client), `${APERTURE_HEALTH_URL}`, `${APERTURE_READY_URL}`, `${APERTURE_METRICS_
 `${APERTURE_SERVICE_PROCESS}`, `${APERTURE_SESSION_SIGNING_KEY}`,
 `${APERTURE_VAPID_PUBLIC_KEY}`.
 
+**These placeholder and state-file names are authoritative for the behaviour contract.** A sprint
+that has adopted a different name for the same thing reconciles **toward** these names, not away
+from them — a behaviour contract whose identifiers have drifted from the implementation is worse
+than no contract at all, because it fails silently rather than loudly, and it is always cheaper to
+rename in code than to re-derive the contract.
+
+**Verification harness:** the `aperture-verify` subcommands invoked by the `command_exit_code` and
+`command_output_contains` checks below are built in **APTR-94**. Exit semantics are uniform:
+`0` = assertion held, `1` = assertion violated, `2` = could not run. **`2` is a failure of the
+verify run, never a skip and never a pass.**
+
 ---
 
 ## States

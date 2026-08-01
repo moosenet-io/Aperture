@@ -72,7 +72,14 @@ spec_id: S128-aperture-client
 - New config keys introduced here (names only, no values, documented in `docs/CONFIGURATION.md`):
   `APERTURE_CONTEXT_RETENTION_EVENTS`, `APERTURE_CONTEXT_RETENTION_TTL_SECONDS`,
   `APERTURE_CONTEXT_PUBLISH_RATE_LIMIT`, `APERTURE_CONTEXT_MAX_PAYLOAD_BYTES`,
-  `APERTURE_MEDIA_STREAM_TICKET_TTL_SECONDS`, `APERTURE_SPEC_DRAFT_MAX_TRANSCRIPT_CHARS`.
+  `APERTURE_MEDIA_STREAM_TICKET_TTL_SECONDS`, `APERTURE_MEDIA_READ_CHUNK_BYTES`,
+  `APERTURE_MEDIA_READ_MAX_LENGTH_BYTES`, `APERTURE_MEDIA_READ_IDLE_TIMEOUT_SECONDS`,
+  `APERTURE_SPEC_DRAFT_MAX_TRANSCRIPT_CHARS`.
+- **Media byte-serving does not exist today.** The media module has no byte-serving route, and
+  the sanctioned door carries a JSON request body with no arbitrary-header parameter and no
+  caller-visible response status or headers — so HTTP range semantics cannot cross it. APTR-52
+  adds a typed ranged-read capability in the media module's own repository as a prerequisite;
+  it is a separate PR that merges before APTR-53's Aperture-side work.
 - Baseline tests: whatever Sprint C leaves green. Every item must leave them green.
 - Baseline verify: the shell renders, streams, and gates modules; Muse and Harmony currently
   render as inert descriptors only.

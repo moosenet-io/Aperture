@@ -995,3 +995,125 @@ run `cortex_scope` pre-change on those five and record a `cortex_review` risk sc
   env-var names and placeholders only; this file ships publicly. Every claim in the capability matrix
   must be traceable to a test or to detection code in this repo; if it cannot be, mark it "not
   verified" rather than asserting it.
+
+---
+
+### APTR-93: Retire the legacy PWA module in the agent core (cross-repo, merges FIRST)
+- **Priority:** Critical
+- **Labels:** aperture, mobile, pwa, agent-core, cleanup, cross-repo
+- **Agent:** claude
+- **Estimate:** 5h
+- **Description:** Remove the legacy `pwa` module from the agent core — its stub web app manifest,
+  its near-empty service worker, and its server-rendered mobile dashboard route — so that the
+  Aperture PWA is the only installable surface on the origin. Two manifests on one origin makes
+  install identity browser-dependent and can stop updates applying entirely, and a stale legacy
+  service worker can keep serving an old shell long after the server-side code is gone. This is
+  live production code in a **different repository**, so per the multi-repo rule it is its own item
+  and its own PR, reviewed on its own merits, with its own rollback story.
+
+  **Numbering:** this item is numerically out of sequence. It was split out of APTR-73 after Sprint
+  G had already been allocated APTR-83..92, so 93 was the next free number. **The number is an
+  identifier, not an ordering** — APTR-93 is the FIRST item of Sprint F to merge, and APTR-73 is
+  `Blocked by` it. Do not renumber it, and do not infer execution order from it.
+
+  ## FILES
+  - **Agent-core repo (its own PR — merges before every other item in this sprint):** delete the
+    `pwa` module (the manifest handler, the service-worker handler, the mobile dashboard route,
+    their templates/assets, and their registration in the router); remove now-dead helpers and
+    tests that existed only to serve it; update the crate's route table and any feature flag that
+    gated it
+  - **This repo:** `docs/BFF-PLACEMENT.md` — record the removal, the route disposition decision,
+    and the rollback note, so the decision is discoverable from the Aperture side
+  - **This repo:** `docs/INSTALL.md` — a short "migrating from the old mobile page" note
+
+  ## APPROACH
+  1. **Inventory before deleting.** Enumerate exactly what the legacy module serves today: the
+     manifest route, the service-worker script route, the server-rendered mobile dashboard route,
+     and any icon/asset routes hanging off it. Record the list in the PR body — a deletion PR whose
+     body does not enumerate what was served is not reviewable.
+  2. **Confirm nothing else references those routes.** Search the agent-core repo and every sibling
+     module surface for links, redirects, bookmarks in docs, tests, health checks, or reverse-proxy
+     rules that point at them. Ground the search in the Atlas KG (`kg_search` for the module,
+     `kg_neighbors` / `kg_subgraph` for inbound references) rather than grep alone, and run
+     `cortex_scope` for the remote whole-graph blast radius before writing the deletion. Record the
+     `cortex_review` risk score in the PR body.
+  3. **Route disposition — decision, with justification.** The manifest and service-worker routes
+     **404** after removal; the mobile dashboard route **redirects** to the Aperture shell.
+     Rationale: a redirected manifest or service-worker script is worse than a missing one, because
+     browsers treat a redirected service-worker script as an error but may cache a redirected
+     manifest and bind install identity to the wrong document — a clean 404 makes the browser drop
+     the registration and is the only unambiguous signal. The dashboard route, by contrast, is a
+     *human* entry point that people have bookmarked, so it redirects rather than 404s. State this
+     decision in `docs/BFF-PLACEMENT.md`, not only in the PR.
+  4. **Actively unregister the stale worker.** Removing the server-side route does not remove a
+     service worker already installed in someone's browser — it can keep serving its cached shell
+     more or less indefinitely. Before/with the deletion, serve a final **self-unregistering
+     service worker** at the legacy script path for one deploy window: a worker whose `install`
+     calls `skipWaiting`, whose `activate` calls `self.registration.unregister()`, deletes every
+     cache it owns, and reloads its clients. Only after that window does the path move to 404.
+     Document the window length in the PR body. This is the single most important step in the item
+     — skipping it converts a clean removal into a class of "some users are stuck on a page that no
+     longer exists" reports that are extremely hard to reproduce.
+  5. **Rollback note (explicit).** The change is a revert of one PR: restoring the module restores
+     all routes, and no data migration, schema change, or persisted state is involved. The one
+     asymmetry is the unregistration in step 4 — browsers that already unregistered will not
+     re-register the legacy worker on rollback; they simply fall back to the network, which is the
+     correct degraded behaviour. Write this in the PR body and in `docs/BFF-PLACEMENT.md`, and say
+     plainly that rollback restores the server but not the previously-installed clients.
+  6. **Continuity:** removing this module must not touch sessions, Engram memory, personality
+     traits, or relationship lore. The legacy surface is a rendering path, not a store — assert it.
+  7. Feature-flag hygiene: if the module sat behind a cargo feature, remove the feature and its
+     references too, so no build configuration can resurrect a second manifest later.
+
+  ## TEST PLAN
+  - Agent-core test gate through the compiler tool — full workspace tests pass after the deletion
+  - Build with every feature combination that previously existed; no dead-code or unused-import
+    warnings that would break a `-D warnings` gate
+  - Assert the manifest and service-worker routes return 404 after the unregistration window
+  - Assert the legacy dashboard route redirects to the Aperture shell and does not 404
+  - Assert the transitional self-unregistering worker unregisters itself, clears its caches, and
+    reloads clients when exercised in a headless browser
+  - Verify no hardcoded IPs, hostnames, org names, ports, or absolute paths in new/modified files
+  - **Negative (the point of the item):** crawl the origin and assert exactly **ONE** web app
+    manifest is served — the test fails if a second manifest is reachable at any path
+  - **Negative:** a browser with the legacy PWA already installed degrades predictably — it lands on
+    the Aperture shell (or a clear explanation) and never on a blank page, a raw 404 body, or an
+    indefinitely-cached stale shell
+  - **Negative:** assert no session, memory, trait, or lore state is read or written by the removal
+    path — continuity is untouched
+
+  ## EDGE CASES
+  - **A user who already installed the legacy PWA.** Their home-screen icon points at the legacy
+    start URL. After the change that URL redirects to the Aperture shell, so the installed app keeps
+    working in a degraded but coherent way; the install identity, name, and icon remain the legacy
+    ones until they reinstall. `docs/INSTALL.md` must tell them to remove and reinstall, and APTR-73's
+    install affordance should be visible to them when they land.
+  - **A cached legacy service worker still live in a browser.** The nasty one: it can serve its
+    cached shell forever with no server involvement, and the user sees an app that no longer exists
+    while every server-side test passes. The transitional self-unregistering worker in step 4 is the
+    fix; a plain 404 on the script path is *not* reliably sufficient on its own and must not be
+    treated as the whole answer.
+  - A reverse proxy or cache in front of the origin still serving the legacy manifest from its own
+    cache after the deletion — verify the origin *and* the edge, and purge if needed.
+  - The unregistration window overlapping the APTR-73 deploy — sequence them: unregister window
+    completes, then the legacy paths 404, then APTR-73's manifest ships. Overlapping produces two
+    live manifests, which is the exact bug being removed.
+  - A health check or uptime probe pointed at the legacy dashboard route — find it in step 2 and
+    repoint it, or the removal shows up as a false outage.
+  - Deep links in old chat history or documentation pointing at the legacy page — the redirect covers
+    them; that is a second reason the dashboard route redirects rather than 404s.
+
+- **Acceptance criteria:**
+  - [ ] Legacy `pwa` module fully removed from the agent core, including its feature flag and
+        now-dead helpers, in its own PR against that repository
+  - [ ] Every route the module served is inventoried in the PR body, with all inbound references
+        found (KG-grounded, plus `cortex_scope`) and repointed or removed
+  - [ ] Manifest and service-worker paths 404; the mobile dashboard path redirects to the Aperture
+        shell — with the rationale recorded in `docs/BFF-PLACEMENT.md`
+  - [ ] A transitional self-unregistering service worker is shipped for a documented window so
+        already-installed clients unregister and clear their caches
+  - [ ] Exactly ONE web app manifest is served on the origin, asserted by a crawling negative test
+  - [ ] An already-installed legacy PWA degrades predictably, never to a blank page or a permanently
+        stale shell
+  - [ ] Removal touches no session, memory, trait, or lore state, and the rollback note is recorded
+  - [ ] No hardcoded infrastructure values in new/modified code; all existing tests still pass

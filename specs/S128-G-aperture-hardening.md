@@ -9,7 +9,7 @@ spec_id: S128-aperture-client
 - **Session:** S128
 - **Date:** 2026-08-01
 - **Module version:** Aperture v0.1.0
-- **Estimated total:** ~57h
+- **Estimated total:** ~64h
 - **North-Star layer:** shell — Gate 2 justified in `specs/S128-aperture-epic.md`
 - **Module-Contract:** this sprint *verifies* §4 clauses 1–7 rather than adding surface.
   Clause 1 (single door) and clause 6 (sovereign, zero telemetry) are mechanically asserted
@@ -59,6 +59,7 @@ spec_id: S128-aperture-client
 - **Labels:** aperture, testing, e2e, ci
 - **Agent:** codex
 - **Estimate:** 8h
+- **Blocked by:** APTR-94
 - **Description:** Aperture has three shipping targets and one contract. Prove the contract
   holds on all three, without any test in the suite depending on a live model. Real inference is
   non-deterministic, slow, and contends for a shared GPU pool — an e2e suite that needs it will
@@ -74,7 +75,9 @@ spec_id: S128-aperture-client
 
   This item also lands the repo-root `behavior-spec.md` verify baseline: the behaviour contract
   is the human-readable statement of what the e2e suite mechanically checks, and the two must
-  agree.
+  agree. The `aperture-verify` CLI that the behaviour spec's `command_exit_code` checks invoke is
+  **not** built here — it is APTR-94, which must land first. This item consumes it and asserts
+  that every subcommand the behaviour spec references actually exists.
 
   ## FILES
   - `e2e/fake-bff/server.ts` — the deterministic contract fake (fixture-driven, no inference)
@@ -117,6 +120,8 @@ spec_id: S128-aperture-client
   ## TEST PLAN
   - `npm --prefix client run test:e2e` runs every journey against every target; all green
   - `node e2e/fake-bff/assert-fake-current.mjs` — clean against the current contract
+  - Every `aperture-verify` subcommand referenced in `behavior-spec.md` exists in the APTR-94
+    harness and passes against the fake — a referenced-but-missing subcommand FAILS the suite
   - The full suite completes without any network call leaving the runner (assert via a blocked
     egress fixture — any outbound attempt fails the run)
   - Verify no hardcoded IPs, hostnames, ports, or org names in new/modified files
@@ -853,7 +858,12 @@ spec_id: S128-aperture-client
 - **Agent:** claude
 - **Review:** high-assurance panel — widen the `review_run` provider list for this item; a shallow implementation here is expensive to discover later.
 - **Estimate:** 4h
-- **Blocked by:** APTR-83, APTR-84, APTR-85, APTR-86, APTR-87, APTR-88, APTR-89, APTR-90, APTR-91
+- **Blocked by:** APTR-83, APTR-84, APTR-85, APTR-86, APTR-87, APTR-88, APTR-89, APTR-90,
+  APTR-91, APTR-94
+- **Acceptance-criteria exemption (deliberate, not an oversight):** this item changes no code —
+  it runs a review, records a verdict, and files findings. The authoring contract's mandatory
+  "All existing tests still pass" line applies to **code** items and is therefore not applicable
+  here and is intentionally absent. Do not "fix" its omission in a later pass.
 - **Description:** The single review that looks at Aperture as a whole rather than as ninety
   diffs. Item-level review catches item-level defects; it structurally cannot catch "the auth
   model in Sprint B and the module runtime in Sprint D disagree about what a session is", because
@@ -926,6 +936,13 @@ spec_id: S128-aperture-client
     a dismissal with no verification note is itself a finding
 
   ## EDGE CASES
+  - **A missing `context` key silently no-ops the hook it feeds.** All six of `project`,
+    `spec_id`, `project_id`, `repo_path`, `module_path`, and `git_ref` must be present. The KG
+    refresh fires unconditionally on a completed epic and the doc engine fires only on APPROVE —
+    but with a key missing, either one simply does nothing and reports nothing. There is no error
+    to notice, so the capstone appears to have succeeded while quietly doing half its job.
+    **Assert the six keys were sent, and assert the refresh actually fired — do not infer either
+    from the absence of an error.**
   - A panelist quota-exhausted or timing out — record it honestly as a partial panel and re-run
     that panelist when available. **Do not silently declare a five-of-six panel a full royal
     panel**; the report must name who actually reviewed.
@@ -952,3 +969,156 @@ spec_id: S128-aperture-client
   - [ ] `docs/EPIC-REVIEW.md` states that the build is done only when the capstone has run and its
         findings are triaged
   - [ ] No hardcoded infrastructure values in new/modified code
+
+---
+
+### APTR-94: `aperture-verify` — the behaviour-contract verification harness
+- **Priority:** Critical
+- **Labels:** aperture, testing, verify, tooling
+- **Agent:** codex
+- **Estimate:** 7h
+- **Numbering note:** this item is out of sequence because it was split out of APTR-83 after the
+  sprint's APTR-83..92 range was already allocated (APTR-93 belongs to a Sprint F split).
+  **The number is an identifier, not an ordering.** APTR-94 must land **before** APTR-83 and
+  before the capstone; every other item in this sprint that carries a `command_exit_code` check
+  depends on it.
+- **Description:** The fleet's behaviour-verify vocabulary — `process_count`, `api_health`,
+  `api_call`, `api_latency`, `file_exists`, `json_field`, `screen_contains`, `port_listening`,
+  and the rest — cannot express the assertions Aperture's contract actually turns on. There is no
+  check type for "the session identifier was regenerated on authentication", "the resumed stream
+  delivered every missed event exactly once", "untrusted content structurally could not forge the
+  assistant's speaker chrome", "no notification reached the user outside the presence budget", or
+  "memory and traits survived a channel addition". Those are the five things most worth verifying
+  and the five the vocabulary cannot say.
+
+  `command_exit_code` and `command_output_contains` are the only escape hatches, so the correct
+  answer is a small, purpose-built CLI that carries those assertions and reports pass/fail through
+  its exit code. `behavior-spec.md` is written against it; without it the behaviour contract is
+  unverifiable prose. No equivalent harness exists in the fleet — this builds it.
+
+  ## FILES
+  - `verify/src/main.ts` — CLI entry, subcommand dispatch, exit-code contract
+  - `verify/src/env.ts` — endpoint resolution, **env-var placeholders only, no compiled-in default**
+  - `verify/src/checks/session.ts` — session rotation, cookie flags, revocation, key rotation
+  - `verify/src/checks/stream.ts` — sequence monotonicity, heartbeat, resume exactly-once,
+    backoff jitter, reconnect spread, shedding, half-open detection
+  - `verify/src/checks/render.ts` — provenance non-forgeability, hostile corpus inertness,
+    SVG never inlined, raw-HTML absence
+  - `verify/src/checks/modules.ts` — capability enum closure, fail-closed unknown states,
+    descriptor-derived navigation, shell-paints-without-probe
+  - `verify/src/checks/presence.ts` — no independent tray, push routes through the budget,
+    quiet hours honored
+  - `verify/src/checks/continuity.ts` — memory, traits, and lore across channel add and
+    revocation/re-auth cycles; channel roster state
+  - `verify/src/checks/deploy.ts` — served-bundle hash match, liveness-is-not-the-gate,
+    single-door assertion, secret/telemetry absence
+  - `verify/src/checks/a11y.ts` — live-region boundary policy, separate status region, focus rules
+  - `verify/README.md` — subcommand catalogue, exit semantics, how to add a check
+  - `verify/package.json` — build and `list-subcommands`
+
+  ## APPROACH
+  1. **This is a test/verification tool and nothing else.** It is never shipped to, bundled into,
+     or reachable from a production surface, and it is never a second access path to any backend.
+     It exercises the **public Aperture contract exactly as a client would** — same routes, same
+     session semantics, same headers. It holds no secret and constructs no privileged call. An
+     implementation that reaches around the contract to inspect internal state is a rejection: a
+     harness that cheats proves nothing about what a real client experiences.
+  2. **Exit-code contract, uniformly:** `0` = assertion held, `1` = assertion failed, `2` = could
+     not run (target unreachable, prerequisite missing, subcommand unknown). Every failure prints
+     a diagnostic to **stderr** naming what was expected and what was observed. **`2` is never
+     reported as a pass** — "could not run" is a failure of the verify run, not a skip. Because
+     pass/fail is entirely in the exit code, `command_exit_code` alone is sufficient and no output
+     parsing is needed; `command_output_contains` is used only where the behaviour spec wants a
+     specific reported *value*, and those subcommands print one stable token per line to stdout.
+  3. **Every endpoint comes from an env-var placeholder** resolved at run time —
+     `${APERTURE_API_URL}`, `${APERTURE_STREAM_URL}`, `${APERTURE_WEB_URL}`,
+     `${APERTURE_HEALTH_URL}`, `${APERTURE_READY_URL}`, `${APERTURE_METRICS_URL}`,
+     `${APERTURE_DESKTOP_UPDATE_URL}`, and the state/fixture directories. **No default address is
+     compiled in**, and an unset required variable exits `2` with a diagnostic naming the variable
+     — never a silent fallback to a guessed address.
+  4. **It runs against both the deterministic contract fake (APTR-83) and a live deployment**, on
+     the same subcommands, selected purely by which endpoints the environment resolves to. That is
+     what lets CI verify the behaviour contract with no live inference and no GPU contention,
+     while the same commands remain usable in a post-deploy or incident context. A subcommand that
+     only works against one of the two is a defect.
+  5. **Subcommand catalogue** — one per assertion `behavior-spec.md` relies on, each exiting `0`
+     on hold / `1` on violation / `2` on cannot-run:
+     - session: `session-id-rotated-on-auth`, `old-session-id-rejected`, `cookie-flags` (prints
+       flags), `revoked-stream-terminated`, `revoked-cannot-reconnect`,
+       `no-silent-acceptance-of-old-signature`, `assert-no-default-signing-key`
+     - stream: `stream-open --count` (prints count), `stream-sequence-monotonic`,
+       `stream-heartbeat-within-interval`, `heartbeat-present-when-idle`, `stream-headers`
+       (prints headers), `stream-resume-exactly-once`, `stream-no-gap`,
+       `no-silent-partial-replay`, `backoff-is-jittered`, `no-fixed-retry-interval`,
+       `reconnect-arrivals-spread`, `existing-streams-unharmed`, `shed-response` (prints headers),
+       `stall-detected-within-bound`, `half-open-detected-within-bound`, `registry-entry-reaped`,
+       `tokens-not-batched`, `suspend-resume-consumes-no-device-slot`
+     - render/security: `hostile-transcript-cannot-forge-speaker`, `hostile-corpus-inert`,
+       `svg-never-inlined`, `content-type-sniffed-server-side`, `filename-neutralized`,
+       `problem-details-shape`, `problem-details --last` (prints the URN),
+       `correlation-id-present-on-errors`, `correlation-id-echoed`, `no-internal-detail-in-body`
+     - modules/context: `capability-state --module <id>` (prints the state),
+       `descriptor-schema-valid`, `capability-enum-closed`, `unknown-capability-fails-closed`,
+       `nav-derived-from-descriptors`, `nav-entry-removed`, `module-relit-without-reload`,
+       `shell-paints-without-probe`, `context-event-observed-by-assistant`
+     - presence/continuity: `no-independent-tray`, `push-routes-through-presence-budget`,
+       `quiet-hours-honored`, `channels` (prints the roster), `continuity-preserved`,
+       `traits-present-after-revocation-cycle`, `memory-present-after-channel-add`
+     - offline: `offline-shell-renders`, `queue-bounded`, `queue-flush-ordered`,
+       `no-duplicate-send-after-flush`
+     - desktop: `update-signature-checked-before-apply`, `update-state` (prints the state),
+       `desktop-binary-unchanged`
+     - deploy/observability: `assert-single-door`, `liveness-alone-does-not-satisfy-deploy-gate`,
+       `healthz-independent-of-kernel`, `readyz-names-degraded-dependency`,
+       `metric-cardinality-bounded`, `no-user-or-thread-id-labels`, `client-log-redaction`,
+       `client-log-bounded`, `no-automatic-log-egress`, `state-file-has-no-secret`,
+       `env-example-has-no-values`, `env-example-matches-code-keys`,
+       `attachment-reaches-terminal-state`
+     - a11y/perf: `live-region-announces-at-boundaries`, `no-per-token-announcement`,
+       `status-region-separate-from-message-region`,
+       `announce-on-completion-preference-honored`, `focus-not-stolen-by-stream`,
+       `no-monotonic-heap-growth`, `handles-flat-over-soak`
+     - meta: `list-subcommands` (prints every subcommand, one per line, for the APTR-83 coverage
+       assertion)
+  6. `verify/README.md` is the catalogue of record. A subcommand referenced by `behavior-spec.md`
+     but absent from the CLI, or present but undocumented, is a build failure — the contract and
+     the harness must not drift.
+  7. Nothing in this tool holds a secret, prints a secret, or writes one anywhere. Endpoints,
+     ids, and states only.
+
+  ## TEST PLAN
+  - `verify/` builds clean; `aperture-verify list-subcommands` enumerates the full catalogue
+  - Every subcommand runs green against the deterministic fake with fixtures satisfying it
+  - Every subcommand also runs against a locally served real build — no subcommand is fake-only
+  - `aperture-verify --help` documents the `0` / `1` / `2` exit semantics explicitly
+  - Verify no hardcoded IPs, hostnames, ports, or org names in new/modified files
+  - Negative: unset a required env var; confirm exit `2` with a diagnostic naming the variable,
+    and confirm it is **not** treated as a pass
+  - Negative: point a subcommand at a fixture that violates its assertion; confirm exit `1` with
+    the expected-vs-observed diagnostic on stderr
+  - Negative: invoke an unknown subcommand; confirm exit `2`, never `0`
+  - Negative: grep the harness for any privileged or internal access path that bypasses the public
+    contract; confirm zero hits
+
+  ## EDGE CASES
+  - A subcommand that passes because the target never reached the asserted precondition — every
+    check asserts its own precondition first and exits `2` rather than `0` when it is unmet
+  - A check that is inherently timing-dependent (heartbeat, backoff spread) — drive from the
+    fake's clock or from a bounded sampled distribution, never a bare sleep
+  - Someone adding the harness to a shipped bundle or a runtime dependency — assert it is absent
+    from the built client and from the agent-core release artifact
+  - A subcommand quietly retired while `behavior-spec.md` still references it — the coverage
+    assertion in APTR-83 catches this in CI, not at incident time
+  - Output tokens changing shape and breaking a `command_output_contains` check — printed tokens
+    are treated as a stable interface and documented as such in `verify/README.md`
+
+- **Acceptance criteria:**
+  - [ ] `aperture-verify` implements every subcommand referenced by `behavior-spec.md`
+  - [ ] Uniform exit semantics: `0` hold, `1` violation, `2` cannot-run, with a stderr diagnostic;
+        `2` is never reported as a pass
+  - [ ] Every endpoint resolves from an env-var placeholder; no default address is compiled in
+  - [ ] Every subcommand runs against both the deterministic fake and a live deployment
+  - [ ] The harness uses only the public contract; no privileged or internal access path
+  - [ ] Never shipped to or reachable from a production surface; asserted absent from release artifacts
+  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] All existing tests still pass
