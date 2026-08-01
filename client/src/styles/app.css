@@ -1,13 +1,16 @@
 /* Application layout that is not a design-system primitive.
  *
- * Everything visual here comes from the token layer; the adherence lint fails the build if a
- * colour, a font stack, or an elevation literal appears in this file.
+ * Everything visual here comes from the token layer. The adherence lint fails the build if a
+ * colour, a font stack, or a raw px dimension appears in this file. It also rejects an unknown
+ * at-rule and a malformed property name — but it is NOT a CSS validator, and this comment used
+ * to imply otherwise. See the NON-GOALS section of scripts/adherence-lint.mjs for exactly what
+ * postcss acceptance does and does not prove.
  *
  * (This file replaces the scaffold's `base.css`, whose stated purpose was to hold the floor
  * until the real styling layer arrived. `constellation.css` now owns the document base.)
  */
 
-.app-placeholder { @@@ 
+.app-placeholder {
   display: flex;
   flex-direction: column;
   align-items: center;

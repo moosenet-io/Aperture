@@ -252,8 +252,12 @@ The rules, in the order they bite:
    where a colour literal or a font stack may appear.** Everything else says `var(--…)`.
 2. **Compose the primitives, not class strings.** `client/src/components/primitives/` wraps
    `.card`, `.btn-*`, `.badge-*`, `.table`, `.input` and the tracked label as typed React
-   components. Their props omit `style` and `dangerouslySetInnerHTML` entirely, so an inline
-   style is a **type error** before it is a lint error.
+   components. Their props omit `style` and `dangerouslySetInnerHTML`, so the direct case
+   (`<Card style={…} />`) is a **type error** before it is a lint error — but a JSX *spread* is
+   checked for assignability only, with no excess-property check, so `<Card {...propsBag} />`
+   slips both past the type checker whenever the bag shares any other prop. Every wrapper
+   therefore also strips the two keys **at runtime** before spreading onto the DOM. The type
+   layer is the fast, in-editor half of the guarantee; the runtime strip is what makes it hold.
 3. **Colour is semantic, never decorative.** Blue is inbound/source, green is
    outbound/endpoint/free, amber is cloud/gated/cost, rose is alert/hot, violet is the core.
    Badge and status variants are therefore named `success` / `warning` / `error` / `info` /
@@ -289,6 +293,11 @@ rejected outright by the lint, in every file including the token layer.
 - a hex, `rgb()`, `hsl()`, `hwb()`, `lab()`, `oklch()` or `color()` literal — and, in CSS and
   markup, a CSS **named** colour — anywhere outside the token layer;
 - a font-family literal outside the token layer, **including one hidden in a custom property**;
+- a raw `px` dimension outside the token layer, unless the declaration carries an inline
+  `/* dimension-literal: … */` reason — control geometry lives in the token layer with the rest
+  of the design system's constants, and a genuinely optical value has to say so where it sits;
+- **malformed CSS** — an unknown at-rule, a block-requiring at-rule with no block, or a property
+  name that is not a valid ident;
 - `el.style.x = …`, `style.setProperty(…)`, `cssText = …`, `setAttribute('style', …)` and
   `dangerouslySetInnerHTML` — the JavaScript routes to the same holes;
 - `forced-color-adjust: none`.
@@ -299,11 +308,23 @@ a stripping pass. It **fails closed**: a file that will not parse, a file whose 
 registered parser, a missing scan target, a scan that matched nothing, and a malformed allowlist
 are all errors. An unparseable file is not evidence of compliance.
 
+**"postcss parsed it" is much weaker than "it is valid CSS", and that is not theoretical.**
+`.x { @@@ display: flex; … }` shipped on this branch and passed a green build: postcss read
+`@@` as an at-rule *name* with `display: flex` as its *params*, so there was no parse error and
+the fail-closed path was never engaged — and the swallowed declaration was never walked as a
+declaration. Measured cost of a swallow: the font, dimension and forced-colours rules all walk
+declarations, so all three go blind; the colour rule survives only because at-rule params are
+separately scanned. The `malformed-css` rule closes that hole. It does **not** make this a CSS
+validator — a well-formed but wrong declaration (`color: notacolour`) still passes.
+
 **What it cannot do**, stated plainly so a green run is not mistaken for a proof:
 
 - a colour **assembled at runtime** — string concatenation, a template substitution, character
   codes, fetched data — is invisible to it. The static text of a template literal *is* scanned;
   its substitutions are not.
+- the dimension rule covers **`px` only**. `rem`, `em`, `%`, `ch`, `vh`, `fr` and unitless
+  numbers are not checked: the design system's scale is expressed in px, and a rule over every
+  unit would fire on `100%`, `1fr` and `line-height: 1.3` — noise that gets a rule switched off.
 - a colour reaching the DOM through a **CSS custom property set at runtime** is not detected as
   a colour. The routes by which this app's own code could set one are closed by the
   programmatic-style rule, but a value handed to a third-party component's colour prop is not

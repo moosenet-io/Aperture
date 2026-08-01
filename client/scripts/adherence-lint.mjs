@@ -26,6 +26,13 @@
 //   programmatic-style `el.style.foo = …`, `el.style.setProperty(…)`, `style.cssText = …`,
 //                      `setAttribute('style', …)`, and `dangerouslySetInnerHTML` — the routes
 //                      by which JavaScript reaches the same holes the rules above close
+//   dimension-literal  a raw `px` length outside the token layer. Control geometry belongs in
+//                      the token layer with the rest of the design system's constants; where a
+//                      value is genuinely optical and has no token, an inline reason comment
+//                      records why, so a mixed layer cannot form silently.
+//   malformed-css      an at-rule whose name is not a real at-rule, an at-rule that requires a
+//                      block and has none, and a property name that is not a valid CSS ident.
+//                      These exist because postcss is a LENIENT parser — see below.
 //   forced-color-none  `forced-color-adjust: none`, the one property that can defeat a user's
 //                      forced-colours mode. There is no legitimate use of it in this client.
 //
@@ -38,7 +45,9 @@
 //   * a file that cannot be read
 //   * a TypeScript file whose parse produced diagnostics — and a TypeScript version whose
 //     parse diagnostics cannot be inspected at all, which would silently turn the check off
-//   * a CSS file postcss cannot parse, or a JSON file JSON.parse cannot parse
+//   * a CSS file postcss cannot parse, or a JSON file JSON.parse cannot parse. READ THE CSS
+//     CAVEAT UNDER NON-GOALS: "postcss parsed it" is a far weaker statement than "it is valid
+//     CSS", and an earlier revision of this header implied otherwise.
 //   * a file in scope whose extension has no registered parser AND is not in the code-owned
 //     binary-asset list
 //   * a scan that matched ZERO files — a mis-specified root must never report green
@@ -54,6 +63,26 @@
 //   * A colour ASSEMBLED AT RUNTIME is not detected. `'#' + hex`, a template's `${}` parts,
 //     `String.fromCharCode(…)`, a value read from a fetch — none of it is visible statically.
 //     The static TEXT of a template literal IS scanned; its substitutions are not.
+//   * POSTCSS IS A LENIENT PARSER, SO "PARSES" DOES NOT MEAN "VALID". This is not a theoretical
+//     caveat: `.x { @@@ display: flex; ... }` shipped on this branch and passed a green build.
+//     postcss accepted `@@` as an at-rule NAME with `display: flex` as its PARAMS — so the file
+//     parsed, no error was raised, AND the swallowed declaration was never walked AS A
+//     DECLARATION. What that costs, probed rather than guessed: the font-literal,
+//     dimension-literal and forced-color-none rules all walk declarations, so all three go
+//     blind on swallowed content; the colour rule survives only because at-rule PARAMS happen
+//     to be scanned for colours as well. A lenient parse does not merely tolerate garbage; it
+//     can HIDE most of what this lint exists to read. The `malformed-css` rule above closes the
+//     observed case (unknown at-rule name, block-requiring at-rule with no block, non-ident
+//     property name). It does NOT make
+//     this a CSS validator: a WELL-FORMED but wrong declaration — `color: notacolour`,
+//     `padding: 3 4 5 6 7`, `@media (nonsense) {}` — still passes, and a well-formed at-rule
+//     with garbage params could still swallow content. Use a browser or a real validator for
+//     validity; this rule only closes the hiding hole.
+//   * The `dimension-literal` rule covers `px` ONLY. `rem`, `em`, `%`, `ch`, `vh`, `fr` and
+//     unitless numbers are not checked, because the design system's scale is expressed in px
+//     and a rule over every unit would fire on `100%`, `1fr` and `line-height: 1.3` — noise
+//     that would get the rule switched off. A dimension smuggled in as `0.5rem` is therefore
+//     not detected.
 //   * Other CSSOM routes to a stylesheet are NOT detected: `CSSStyleSheet.insertRule`,
 //     `document.adoptedStyleSheets`, and a `<style>` element obtained by any means other than a
 //     literal `createElement('style')` — an aliased tag name, for instance. `createElement` is
@@ -225,6 +254,44 @@ const GENERIC_FONT_FAMILIES = new Set([
   'math', 'emoji', 'fangsong',
 ]);
 
+/**
+ * Real at-rules. Code-owned: an at-rule outside this list is a typo or garbage, and postcss
+ * will happily accept either. Vendor-prefixed keyframes are matched by pattern below.
+ */
+const KNOWN_AT_RULES = new Set([
+  'charset', 'import', 'namespace', 'media', 'supports', 'document', 'page', 'font-face',
+  'keyframes', 'viewport', 'counter-style', 'font-feature-values', 'font-palette-values',
+  'swash', 'ornaments', 'annotation', 'stylistic', 'styleset', 'character-variant',
+  'property', 'layer', 'container', 'scope', 'starting-style', 'position-try',
+]);
+
+/** At-rules that are meaningless without a block — the shape that swallows declarations. */
+const AT_RULES_REQUIRING_A_BLOCK = new Set([
+  'media', 'supports', 'document', 'page', 'font-face', 'keyframes', 'counter-style',
+  'font-feature-values', 'font-palette-values', 'container', 'scope', 'starting-style',
+  'position-try',
+]);
+
+const VENDOR_KEYFRAMES = /^-(webkit|moz|ms|o)-keyframes$/;
+
+/** A valid CSS property name: a custom property, or an ident with an optional vendor prefix. */
+const VALID_PROPERTY_NAME = /^(--[A-Za-z0-9_-]+|-{0,2}[A-Za-z_][A-Za-z0-9_-]*)$/;
+
+/** A px length. Negative and decimal values included; `0px` too — it should just be `0`. */
+const PX_LENGTH = /(?<![\w.-])-?\d*\.?\d+px(?![\w-])/g;
+
+/**
+ * The inline escape for a genuinely optical dimension. Two accepted forms, and only two, so a
+ * reader always finds the reason next to the value:
+ *
+ *   \/* dimension-literal: a 2px lift is the smallest movement that reads as a lift *\/
+ *   transform: translateY(-2px);
+ *
+ * ...or the same comment immediately AFTER the declaration on the same line. The reason must be
+ * a real sentence, not the word "ok" — same bar as an allowlist entry.
+ */
+const DIMENSION_REASON = /dimension-literal:\s*(.{12,})/;
+
 /* ── Findings ────────────────────────────────────────────────────────────────────────────── */
 
 /**
@@ -264,6 +331,29 @@ export function findColorLiterals(value, { named }) {
     }
   }
   return found;
+}
+
+/**
+ * Does this declaration carry an inline reason for its raw dimension?
+ *
+ * Accepted: a Comment immediately BEFORE the declaration, or a Comment immediately after it on
+ * the SAME source line. Anything looser — a comment anywhere in the rule, say — would let one
+ * reason cover values it was never written about.
+ */
+function hasDimensionReason(decl) {
+  const previous = decl.prev();
+  if (previous?.type === 'comment' && DIMENSION_REASON.test(previous.text)) return true;
+
+  const next = decl.next();
+  if (
+    next?.type === 'comment'
+    && DIMENSION_REASON.test(next.text)
+    && next.source?.start?.line === decl.source?.start?.line
+  ) return true;
+
+  // A comment between the value and the semicolon lands in the declaration's own raws.
+  const raw = decl.raws?.value?.raw;
+  return typeof raw === 'string' && DIMENSION_REASON.test(raw);
 }
 
 function looksLikeFontStack(value) {
@@ -426,9 +516,32 @@ function scanCss(relPath, text, findings, errors) {
   const isTokenLayer = relPath === TOKEN_LAYER;
   const lineOf = (node) => node.source?.start?.line ?? 0;
 
+  // ── Well-formedness. postcss ACCEPTS a great deal that is not CSS, and an accepted-but-wrong
+  // at-rule can swallow the declarations that follow it, so they are never walked below. These
+  // checks close that hole; they do not make this a validator (see NON-GOALS).
+  root.walkAtRules((atRule) => {
+    const name = atRule.name.toLowerCase();
+    if (!KNOWN_AT_RULES.has(name) && !VENDOR_KEYFRAMES.test(name)) {
+      findings.push(finding(
+        'malformed-css', relPath, lineOf(atRule),
+        `\`@${atRule.name}\` is not a known at-rule. postcss accepts it, and anything after it on `
+        + 'that line becomes its params rather than a declaration this lint can read.',
+      ));
+    } else if (AT_RULES_REQUIRING_A_BLOCK.has(name) && !atRule.nodes) {
+      findings.push(finding(
+        'malformed-css', relPath, lineOf(atRule),
+        `\`@${atRule.name}\` requires a block; without one it swallows what follows.`,
+      ));
+    }
+  });
+
   root.walkDecls((decl) => {
     const prop = decl.prop.toLowerCase();
     const value = decl.value;
+
+    if (!VALID_PROPERTY_NAME.test(decl.prop)) {
+      findings.push(finding('malformed-css', relPath, lineOf(decl), `\`${decl.prop}\` is not a valid property name`));
+    }
 
     if (prop === 'forced-color-adjust' && value.trim().toLowerCase() === 'none') {
       findings.push(
@@ -443,6 +556,15 @@ function scanCss(relPath, text, findings, errors) {
       // A font stack, whether declared as `font-family:` or smuggled into a custom property.
       if (looksLikeFontStack(value)) {
         findings.push(finding('font-literal', relPath, lineOf(decl), `${decl.prop}: ${value}`));
+      }
+
+      const lengths = [...value.matchAll(PX_LENGTH)].map((m) => m[0]);
+      if (lengths.length > 0 && !hasDimensionReason(decl)) {
+        findings.push(finding(
+          'dimension-literal', relPath, lineOf(decl),
+          `${decl.prop}: ${lengths.join(', ')} — take it from the token layer, or record why it `
+          + 'is optical with a `/* dimension-literal: … */` comment on the declaration',
+        ));
       }
     }
   });

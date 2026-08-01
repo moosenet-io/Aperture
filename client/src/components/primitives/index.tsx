@@ -4,10 +4,17 @@
  * Downstream sprints compose THESE, never raw class strings and never a colour. Three
  * properties are worth stating because they are enforced, not merely intended:
  *
- *   1. **No `style` prop.** Every wrapper omits `style` from its props type, so an inline
- *      style at a call site is a TYPE ERROR — caught by `tsc --noEmit` in the build, before
- *      the adherence lint ever runs. Per decision D8, a property is enforced by the language
- *      that owns it; TypeScript owns the prop surface, so TypeScript enforces this one.
+ *   1. **No `style` prop, and no `dangerouslySetInnerHTML` — enforced TWICE, because the type
+ *      system alone does not hold.** Both are omitted from every wrapper's props type, so the
+ *      direct case (`<Card style={…} />`) is a TYPE ERROR caught by `tsc --noEmit` before the
+ *      adherence lint runs. But a JSX SPREAD is only checked for assignability — TypeScript
+ *      performs no excess-property check on one — so `<Card {...propsBagFromParent} />` slips a
+ *      `style` past the type checker whenever the bag shares any other prop with the target.
+ *      That was verified against this project's own config, not assumed. So every wrapper also
+ *      strips both keys at runtime via `withoutStyleEscapes` immediately before spreading onto
+ *      the DOM element. Per decision D8 a property is enforced by the language that owns it;
+ *      the honest reading here is that TypeScript owns only PART of it, and the runtime strip
+ *      owns the rest.
  *   2. **Variants are unions, not strings.** `variant="chartreuse"` does not compile. A caller
  *      cannot reach a colour that is not in the design system because there is no spelling for
  *      one.
@@ -30,7 +37,7 @@ import type {
   TdHTMLAttributes,
 } from 'react';
 
-import { cx } from './cx';
+import { cx, withoutStyleEscapes } from './cx';
 
 /**
  * Strip the escape hatches from an element's prop surface.
@@ -58,26 +65,26 @@ export const Card = forwardRef<HTMLDivElement, CardProps>(function Card(
     <div
       ref={ref}
       className={cx('card', tone === 'accent' && 'card-accent', interactive && 'card-interactive', className)}
-      {...rest}
+      {...withoutStyleEscapes(rest)}
     />
   );
 });
 
 export const CardHeader = forwardRef<HTMLDivElement, Styleless<HTMLAttributes<HTMLDivElement>>>(
   function CardHeader({ className, ...rest }, ref) {
-    return <div ref={ref} className={cx('card-header', className)} {...rest} />;
+    return <div ref={ref} className={cx('card-header', className)} {...withoutStyleEscapes(rest)} />;
   },
 );
 
 export const CardBody = forwardRef<HTMLDivElement, Styleless<HTMLAttributes<HTMLDivElement>>>(
   function CardBody({ className, ...rest }, ref) {
-    return <div ref={ref} className={cx('card-body', className)} {...rest} />;
+    return <div ref={ref} className={cx('card-body', className)} {...withoutStyleEscapes(rest)} />;
   },
 );
 
 export const CardFooter = forwardRef<HTMLDivElement, Styleless<HTMLAttributes<HTMLDivElement>>>(
   function CardFooter({ className, ...rest }, ref) {
-    return <div ref={ref} className={cx('card-footer', className)} {...rest} />;
+    return <div ref={ref} className={cx('card-footer', className)} {...withoutStyleEscapes(rest)} />;
   },
 );
 
@@ -102,7 +109,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       // meant to open a dialog ends up submitting the form it happens to sit in.
       type={type}
       className={cx('btn', `btn-${variant}`, `btn-${size}`, className)}
-      {...rest}
+      {...withoutStyleEscapes(rest)}
     />
   );
 });
@@ -118,7 +125,7 @@ export const ButtonLink = forwardRef<HTMLAnchorElement, ButtonLinkProps>(functio
   { variant = 'secondary', size = 'md', className, ...rest },
   ref,
 ) {
-  return <a ref={ref} className={cx('btn', `btn-${variant}`, `btn-${size}`, className)} {...rest} />;
+  return <a ref={ref} className={cx('btn', `btn-${variant}`, `btn-${size}`, className)} {...withoutStyleEscapes(rest)} />;
 });
 
 /* ── Badge ──────────────────────────────────────────────────────────────────────────────── */
@@ -140,14 +147,14 @@ export const Badge = forwardRef<HTMLSpanElement, BadgeProps>(function Badge(
   { tone = 'neutral', mono = false, className, ...rest },
   ref,
 ) {
-  return <span ref={ref} className={cx('badge', `badge-${tone}`, mono && 'badge-mono', className)} {...rest} />;
+  return <span ref={ref} className={cx('badge', `badge-${tone}`, mono && 'badge-mono', className)} {...withoutStyleEscapes(rest)} />;
 });
 
 /* ── Table ──────────────────────────────────────────────────────────────────────────────── */
 
 export const Table = forwardRef<HTMLTableElement, Styleless<TableHTMLAttributes<HTMLTableElement>>>(
   function Table({ className, ...rest }, ref) {
-    return <table ref={ref} className={cx('table', className)} {...rest} />;
+    return <table ref={ref} className={cx('table', className)} {...withoutStyleEscapes(rest)} />;
   },
 );
 
@@ -160,7 +167,7 @@ export const TableCell = forwardRef<HTMLTableCellElement, TableCellProps>(functi
   { numeric = false, className, ...rest },
   ref,
 ) {
-  return <td ref={ref} className={cx(numeric && 'table-num', className)} {...rest} />;
+  return <td ref={ref} className={cx(numeric && 'table-num', className)} {...withoutStyleEscapes(rest)} />;
 });
 
 export interface TableHeaderCellProps extends Styleless<ThHTMLAttributes<HTMLTableCellElement>> {
@@ -169,7 +176,7 @@ export interface TableHeaderCellProps extends Styleless<ThHTMLAttributes<HTMLTab
 
 export const TableHeaderCell = forwardRef<HTMLTableCellElement, TableHeaderCellProps>(
   function TableHeaderCell({ numeric = false, className, scope = 'col', ...rest }, ref) {
-    return <th ref={ref} scope={scope} className={cx(numeric && 'table-num', className)} {...rest} />;
+    return <th ref={ref} scope={scope} className={cx(numeric && 'table-num', className)} {...withoutStyleEscapes(rest)} />;
   },
 );
 
@@ -192,7 +199,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
       ref={ref}
       className={cx('input', mono && 'input-mono', className)}
       aria-invalid={invalid || undefined}
-      {...rest}
+      {...withoutStyleEscapes(rest)}
     />
   );
 });
@@ -209,7 +216,7 @@ export const TrackedLabel = forwardRef<HTMLSpanElement, TrackedLabelProps>(funct
   { className, ...rest },
   ref,
 ) {
-  return <span ref={ref} className={cx('label', className)} {...rest} />;
+  return <span ref={ref} className={cx('label', className)} {...withoutStyleEscapes(rest)} />;
 });
 
 export { cx } from './cx';

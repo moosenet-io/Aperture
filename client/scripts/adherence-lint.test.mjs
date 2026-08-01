@@ -151,7 +151,7 @@ describe('colour literals', () => {
   });
 
   it('does not flag CSS keywords that are not hues', () => {
-    fixture({ 'src/styles/x.css': '.x { border: 1px solid transparent; background: none; overflow: hidden; }\n' });
+    fixture({ 'src/styles/x.css': '.x { border: var(--border-width) solid transparent; background: none; overflow: hidden; }\n' });
     expectClean(lint());
   });
 
@@ -241,6 +241,124 @@ describe('forced colours', () => {
 
   it('permits forced-color-adjust: auto', () => {
     fixture({ 'src/styles/x.css': '.x { forced-color-adjust: auto; }\n' });
+    expectClean(lint());
+  });
+});
+
+describe('malformed CSS — the leniency of postcss is not a clean bill of health', () => {
+  it('rejects the exact garbage that shipped on this branch and passed a green build', () => {
+    // `.x { @@@ display: flex; … }`. postcss read `@@` as an AT-RULE NAME with `display: flex`
+    // as its params: no parse error, and the swallowed declaration was never walked. The
+    // fail-closed-on-unparseable claim was never engaged, because the file did parse.
+    fixture({ 'src/styles/x.css': '.app { @@@ \n  display: flex;\n  color: #ff0000;\n}\n' });
+    expect(rules(lint())).toContain('malformed-css');
+  });
+
+  it('proves the hiding half: a swallowed declaration escapes every DECL-scoped rule', () => {
+    // Precisely what is lost, probed rather than assumed. Content swallowed into at-rule
+    // params is never walked as a DECLARATION, so the font, dimension and forced-colours
+    // rules — which all walk declarations — miss it entirely. The colour rule survives, and
+    // only by luck: at-rule params are separately scanned for colour literals. Three of four
+    // rules going blind is the reason `malformed-css` exists.
+    for (const swallowed of ["font-family: 'Comic Sans', sans-serif", 'padding: 7px', 'forced-color-adjust: none']) {
+      rmSync(root, { recursive: true, force: true });
+      root = mkdtempSync(join(tmpdir(), 'aperture-adherence-'));
+      fixture({ 'src/styles/x.css': `.app { @@@ ${swallowed};\n}\n` });
+      const found = [...new Set(lint().findings.map((f) => f.rule))];
+      expect(found, swallowed).toEqual(['malformed-css']);
+    }
+  });
+
+  it('the colour rule alone survives a swallow, because at-rule params are scanned too', () => {
+    fixture({ 'src/styles/x.css': '.app { @@@ color: #ff0000;\n}\n' });
+    expect(rules(lint())).toContain('color-literal');
+  });
+
+  it('rejects an at-rule name that is merely a typo', () => {
+    fixture({ 'src/styles/x.css': '@medai (min-width: 40em) { .x { display: none; } }\n' });
+    expect(rules(lint())).toContain('malformed-css');
+  });
+
+  it('rejects a block-requiring at-rule that has no block', () => {
+    fixture({ 'src/styles/x.css': '@media (min-width: 40em);\n' });
+    expect(rules(lint())).toContain('malformed-css');
+  });
+
+  it('permits the at-rules the design system actually uses', () => {
+    fixture({
+      'src/styles/x.css':
+        '@media (prefers-reduced-motion: reduce) { .x { animation-duration: 1ms; } }\n'
+        + '@media (forced-colors: active) { .x { box-shadow: none; } }\n'
+        + '@supports (display: grid) { .x { display: grid; } }\n'
+        + '@keyframes spin { to { opacity: 1; } }\n'
+        + '@-webkit-keyframes spin { to { opacity: 1; } }\n'
+        + '@layer base;\n'
+        + '@font-face { font-weight: 400; }\n',
+    });
+    expectClean(lint());
+  });
+
+  it('rejects a property name that is not a valid ident', () => {
+    fixture({ 'src/styles/x.css': '.x { 9colour: inherit; }\n' });
+    expect(rules(lint())).toContain('malformed-css');
+  });
+
+  it('permits custom properties and vendor prefixes', () => {
+    fixture({ 'src/styles/x.css': '.x { --my-token: 1; -webkit-font-smoothing: antialiased; }\n' });
+    expectClean(lint());
+  });
+});
+
+describe('dimension literals', () => {
+  it('rejects a raw px value outside the token layer', () => {
+    fixture({ 'src/styles/x.css': '.x { padding: 7px 10px; }\n' });
+    expect(rules(lint())).toContain('dimension-literal');
+  });
+
+  it('permits a px value in the token layer, where the scale is defined', () => {
+    fixture({ 'src/styles/constellation.css': ':root { --space-3: 12px; --accent: #7c3aed; }\n' });
+    expectClean(lint());
+  });
+
+  it('permits a tokenised dimension', () => {
+    fixture({ 'src/styles/x.css': '.x { padding: var(--cell-pad-y) var(--cell-pad-x); }\n' });
+    expectClean(lint());
+  });
+
+  it('permits a literal carrying an inline reason ABOVE the declaration', () => {
+    fixture({
+      'src/styles/x.css':
+        '.x {\n  /* dimension-literal: a 2px lift is the smallest movement that reads as a lift */\n'
+        + '  transform: translateY(-2px);\n}\n',
+    });
+    expectClean(lint());
+  });
+
+  it('permits a literal carrying an inline reason on the SAME line', () => {
+    fixture({
+      'src/styles/x.css':
+        '.x { transform: translateY(-2px); /* dimension-literal: motion amplitude, not spacing */ }\n',
+    });
+    expectClean(lint());
+  });
+
+  it('does NOT accept a reason on a different line after the declaration', () => {
+    // One reason must not silently cover a value it was never written about.
+    fixture({
+      'src/styles/x.css':
+        '.x {\n  transform: translateY(-2px);\n'
+        + '  /* dimension-literal: this reason is attached to nothing in particular */\n}\n',
+    });
+    expect(rules(lint())).toContain('dimension-literal');
+  });
+
+  it('rejects a token-shaped excuse that is not a real reason', () => {
+    fixture({ 'src/styles/x.css': '.x { /* dimension-literal: ok */\n  padding: 3px; }\n' });
+    expect(rules(lint())).toContain('dimension-literal');
+  });
+
+  it('checks px only — rem, %, and unitless values are a documented non-goal', () => {
+    fixture({ 'src/styles/x.css': '.x { padding: 0.5rem; width: 50%; line-height: 1.3; flex: 1fr; }\n' });
     expectClean(lint());
   });
 });

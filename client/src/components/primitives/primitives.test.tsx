@@ -265,10 +265,14 @@ describe('both themes', () => {
 /* ── Type-level enforcement (decision D8) ────────────────────────────────────────────────── */
 
 /**
- * These are COMPILE-TIME assertions, evaluated by `tsc --noEmit` in the build. They are the
- * primary enforcement of the no-inline-style rule at a call site: the adherence lint is the
- * backstop, but the type checker rejects it first, in the editor, before anyone runs anything.
- * Per decision D8, a property of the prop surface is enforced by the language that owns it.
+ * COMPILE-TIME assertions, evaluated by `tsc --noEmit` in the build.
+ *
+ * SCOPE, stated precisely because an earlier revision of this comment overstated it: the type
+ * system rejects the DIRECT case and a spread whose type shares no property with the target.
+ * It does NOT reject a spread that shares one, because TypeScript performs no excess-property
+ * check on a JSX spread — see the runtime tests below, which pin that gap and prove the
+ * runtime strip closes it. The type layer is the fast, in-editor half of the guarantee, not
+ * the whole of it.
  *
  * `Absent<K, T>` resolves to `true` only when the key is genuinely gone from the type; if
  * `style` were ever reinstated it resolves to `never`, and the assignment below stops
@@ -296,6 +300,46 @@ describe('the prop surface', () => {
       _chartreuseIsNotAVariant,
       _primaryIsAVariant,
     ]).toEqual([true, true, true, true, true]);
+  });
+
+  it('strips a style smuggled in through a spread that the TYPE CHECKER lets past', () => {
+    // This exact shape compiles clean — verified with `tsc --noEmit` under this project's own
+    // strict config. It is also the ordinary shape: forwarding a parent's props bag. Without
+    // the runtime strip, React would have applied the inline style and the type-level claim
+    // would have been false in the one case people actually hit.
+    const smuggled = { className: 'ok', style: { color: 'red' } };
+    const card = render(<Card {...smuggled} />);
+    expect(card.hasAttribute('style')).toBe(false);
+    expect(card.className).toContain('ok');
+  });
+
+  it('strips a style smuggled in through a widened record', () => {
+    const widened: Record<string, unknown> = { style: { color: 'red' } };
+    const card = render(<Card {...widened} />);
+    expect(card.hasAttribute('style')).toBe(false);
+  });
+
+  it('strips dangerouslySetInnerHTML smuggled in through a spread', () => {
+    const smuggled = { className: 'ok', dangerouslySetInnerHTML: { __html: '<em>x</em>' } };
+    const card = render(<Card {...smuggled} />);
+    expect(card.innerHTML).toBe('');
+  });
+
+  it.each([
+    ['Button', (p: Record<string, unknown>) => <Button {...p}>x</Button>],
+    ['Badge', (p: Record<string, unknown>) => <Badge {...p}>x</Badge>],
+    ['Input', (p: Record<string, unknown>) => <Input aria-label="a" {...p} />],
+    ['TrackedLabel', (p: Record<string, unknown>) => <TrackedLabel {...p}>x</TrackedLabel>],
+    ['CardBody', (p: Record<string, unknown>) => <CardBody {...p}>x</CardBody>],
+  ])('strips a spread style on %s too — every wrapper, not just Card', (_name, build) => {
+    expect(render(build({ style: { color: 'red' } })).hasAttribute('style')).toBe(false);
+  });
+
+  it('leaves a props bag without either key untouched', () => {
+    // The strip must not become a general props filter: anything else passes through.
+    const card = render(<Card {...{ className: 'ok', id: 'thread', title: 'T' }} />);
+    expect(card.id).toBe('thread');
+    expect(card.getAttribute('title')).toBe('T');
   });
 
   it('rejects an inline style passed through createElement, not merely through JSX', () => {
