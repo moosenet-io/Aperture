@@ -45,12 +45,39 @@
 //   CSS         — parsed with `postcss` (again already Vite's own dependency). Comments are
 //                 `Comment` nodes and are never walked; declaration values and at-rule params
 //                 are read as data.
-//   HTML/SVG    — tokenized left to right, so raw-text elements and comments resolve in the
-//                 same order the HTML tokenizer resolves them: a `<script>` body is extracted
-//                 as raw text and PARSED AS JAVASCRIPT, never comment-stripped.
+//   HTML/SVG    — scanned by a PARTIAL, hand-written scanner, not an HTML parser. No HTML
+//                 parser is present in this project's dependency tree, and adding one (or
+//                 hand-building a spec-compliant tokenizer inside a build lint) is not
+//                 justified for a control that is not the security boundary. Precisely what it
+//                 does is stated under NON-GOALS below — the claim is kept narrower than the
+//                 implementation, deliberately.
 //   JSON        — parsed; every string key and value is examined.
 //
-// A file that cannot be parsed FAILS. An unparseable asset is not evidence of safety.
+// A file that is SCANNED but cannot be parsed FAILS: an unparseable asset is not evidence of
+// safety. Which files are scanned at all is stated under NON-GOALS.
+//
+// ── NON-GOALS: known, accepted, and NOT silently missing ────────────────────────────────────
+//
+// These are limitations, not bugs, and they are recorded here so nobody mistakes the scanner's
+// silence for a guarantee. Every one of them is covered by the runtime CSP (APTR-99), which is
+// the actual control; none of them would change the security posture if fixed here.
+//
+//   * HTML character references are NOT decoded. An origin written as `&#104;ttp://evil…` or
+//     `&#x2F;&#x2F;evil…` is not detected.
+//   * CSS escapes are NOT decoded. An origin written as `\68 ttp://evil…` is not detected.
+//   * The markup scanner is not a spec-compliant HTML tokenizer. It ends a tag at the next `>`,
+//     so an attribute VALUE CONTAINING `>` desynchronizes it: values after that point may be
+//     missed entirely, or reported as a garbled fragment rather than as the attribute value.
+//     Detection there is unreliable in both directions. Element nesting, implied end tags,
+//     CDATA sections, and namespace-prefixed raw-text elements are not modelled.
+//   * What the markup scanner DOES do, and all it claims: it skips `<!-- … -->` comments and
+//     `<!…>` / `<?…>` declarations; it reads quoted and unquoted attribute values and text
+//     between tags as complete values; and for `<script>` / `<style>` it extracts the body up
+//     to the matching close tag and routes it to the JavaScript, JSON, or CSS scanner — so a
+//     `<script>` body is never treated as comment-strippable text.
+//   * Only the file extensions in SCANNED are parsed. An asset with an unrecognised extension
+//     whose content is TEXTUAL is reported as a failure rather than skipped (see scanDist);
+//     recognised binary asset types are skipped by an explicit, narrow allowlist.
 //
 // ── EXACTNESS ───────────────────────────────────────────────────────────────────────────────
 //
@@ -91,7 +118,19 @@ export const RECOGNISED_NAMESPACE_URIS = Object.freeze([
   'http://www.w3.org/XML/1998/namespace',
 ]);
 
-/** Extensions worth scanning. Binary assets (fonts, images, media) are skipped. */
+/**
+ * Asset types that are binary by definition and therefore hold no scannable text. This is the
+ * NARROW, justified skip list: anything not here and not in SCANNED is reported rather than
+ * skipped, so "the lint said nothing" can never quietly mean "the lint never looked".
+ */
+const BINARY_EXTENSIONS = new Set([
+  '.woff', '.woff2', '.ttf', '.otf', '.eot', // fonts (emitted by @fontsource)
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif', '.ico', '.bmp', // raster images
+  '.mp4', '.webm', '.ogv', '.mp3', '.wav', '.ogg', '.flac', '.m4a', // media
+  '.pdf', '.zip', '.gz', '.br', '.wasm', // archives and binaries
+]);
+
+/** Extensions worth scanning, and how to parse each. */
 const SCANNED = new Map([
   ['.js', 'js'],
   ['.mjs', 'js'],
@@ -117,8 +156,22 @@ const DYNAMIC = '\u0000';
  */
 const ABSOLUTE_ORIGIN_RE = /https?:\/\/[^\u0000\s/?#]/i;
 
-/** A protocol-relative origin at the head of a value: `//host.tld/…` — a real egress shape. */
-const PROTOCOL_RELATIVE_RE = /^\/\/[a-z0-9-]+(\.[a-z0-9-]+)+(?![a-z0-9-])/i;
+/**
+ * A protocol-relative origin at the head of a value: `//host/…`, which a browser resolves
+ * against the page scheme and fetches. Validation is URL-aware rather than a dotted-host
+ * pattern, because a single-label host (`//localhost/api`), an IPv4 literal (`//127.0.0.1/api`)
+ * and an IPv6 literal (`//[::1]/api`) are all real origins and none of them is dotted-plus-TLD.
+ */
+function isProtocolRelativeOrigin(value) {
+  if (!value.startsWith('//')) return false;
+  try {
+    // The scheme is supplied only so the parser has one; the host is what matters.
+    const parsed = new URL(`https:${value}`);
+    return parsed.hostname !== '';
+  } catch {
+    return false; // `//` alone, `// text`, and other non-URLs
+  }
+}
 
 // ── allowlist ───────────────────────────────────────────────────────────────────────────────
 
@@ -194,7 +247,7 @@ function isViolation(rawValue, allowed) {
   const value = rawValue.trim(); // surrounding whitespace is not part of a URI
   if (value === '') return false;
   if (allowed.has(value)) return false; // exact match, whole value, nothing else
-  return ABSOLUTE_ORIGIN_RE.test(value) || PROTOCOL_RELATIVE_RE.test(value);
+  return ABSOLUTE_ORIGIN_RE.test(value) || isProtocolRelativeOrigin(value);
 }
 
 function lineOf(text, offset) {
@@ -371,10 +424,19 @@ function scanCss(code, allowed) {
 const RAW_TEXT_ELEMENTS = new Set(['script', 'style']);
 
 /**
- * Tokenize markup left to right. Order matters and mirrors the HTML tokenizer: whichever of a
- * comment or a raw-text element starts FIRST wins. That is what makes
- * `<script><!--\nfetch(…)\n--></script>` scan as executable JavaScript (which it is) rather
- * than as a comment (which it is not) — one of the review defects this rewrite fixes.
+ * PARTIAL markup scanner — deliberately not an HTML parser, and it must not be described as
+ * one. See NON-GOALS in the file header for the exact list of what it does not handle
+ * (character references, CSS escapes, an attribute value containing `>`, element nesting).
+ *
+ * What it does, and all it claims:
+ *   * skips `<!-- … -->` comments and `<!…>` / `<?…>` declarations
+ *   * reads quoted and unquoted attribute values, and text between tags, as complete values
+ *   * for `<script>` / `<style>`, takes the body up to the matching close tag and routes it to
+ *     the JavaScript, JSON, or CSS scanner
+ *
+ * Left-to-right order is what makes `<script><!--\nfetch(…)\n--></script>` scan as executable
+ * JavaScript (which it is) rather than as a comment (which it is not) — a reviewed defect — and
+ * keeps a `<script>` written inside a real comment inert.
  */
 function scanMarkup(code, allowed) {
   const findings = [];
@@ -521,22 +583,61 @@ function* walk(dir) {
 }
 
 /**
+ * Does this buffer look like text? A NUL byte or a UTF-8 decode failure means binary, and
+ * binary content holds no scannable text regardless of what the file is called.
+ */
+function looksTextual(buffer) {
+  if (buffer.includes(0)) return false;
+  const text = buffer.toString('utf8');
+  return !text.includes('�');
+}
+
+/**
  * Scan a built output directory.
- * @returns {{ scanned: number, findings: {file:string,line:number,value:string}[] }}
+ *
+ * Unknown extensions do NOT pass silently — that would contradict the fail-closed claim above.
+ * A file that is neither in SCANNED nor in BINARY_EXTENSIONS is content-sniffed: textual
+ * content is reported as an unscanned asset (add it to SCANNED with a parser, or to
+ * BINARY_EXTENSIONS with a reason), while genuinely binary content is skipped and counted.
+ *
+ * @returns {{ scanned: number, skippedBinary: number, findings: {file:string,line:number,value:string}[] }}
  */
 export function scanDist(distDir, allowed) {
   const findings = [];
   let scanned = 0;
+  let skippedBinary = 0;
+
   for (const file of walk(distDir)) {
+    const rel = relative(distDir, file);
     const kind = kindFor(file);
-    if (!kind) continue;
+
+    if (!kind) {
+      const ext = extname(file).toLowerCase();
+      if (BINARY_EXTENSIONS.has(ext)) {
+        skippedBinary++;
+        continue;
+      }
+      const buffer = readFileSync(file);
+      if (!looksTextual(buffer)) {
+        skippedBinary++;
+        continue;
+      }
+      findings.push({
+        file: rel,
+        line: 0,
+        value: `<unscanned textual asset: no parser is registered for '${ext || '(no extension)'}'>`,
+      });
+      continue;
+    }
+
     scanned++;
     const text = readFileSync(file, 'utf8');
     for (const f of scanText(text, kind, allowed)) {
-      findings.push({ file: relative(distDir, file), line: f.line, value: f.value });
+      findings.push({ file: rel, line: f.line, value: f.value });
     }
   }
-  return { scanned, findings };
+
+  return { scanned, skippedBinary, findings };
 }
 
 // ── CLI ─────────────────────────────────────────────────────────────────────────────────────
@@ -579,8 +680,9 @@ function main(argv) {
     return 1;
   }
 
-  console.log(`${tag} OK: ${result.scanned} asset(s) parsed in ${distDir}, no static external origins.`);
+  console.log(`${tag} OK: ${result.scanned} asset(s) parsed in ${distDir} (${result.skippedBinary} binary skipped), no static external origins.`);
   console.log(`${tag} lint only — not a security boundary. Runtime egress is enforced by the CSP (APTR-99).`);
+  console.log(`${tag} not detected by design: HTML character references, CSS escapes, attribute values containing '>'.`);
   console.log(`${tag} allowlisted namespace URIs (exact match): ${[...reasons.keys()].join(', ')}`);
   return 0;
 }

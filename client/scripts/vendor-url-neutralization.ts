@@ -29,8 +29,11 @@ export const VENDOR_URL_NEUTRALIZATIONS: readonly VendorUrlNeutralization[] = [
     reason:
       'react-dom production builds concatenate this documentation URL into minified error text '
       + '(formatProdErrorMessage). It is never fetched, but it ships an external origin in the '
-      + 'bundle. The invariant number and the &args[] suffix are preserved, so the error message '
-      + 'stays actionable offline.',
+      + 'bundle. The replacement preserves the invariant number and the &args[] suffix, so the '
+      + 'ERROR CODE survives for manual lookup. It is NOT a working link: `react-error-decoder` '
+      + 'is not a route this app serves. Making the message directly actionable would need a '
+      + 'same-origin decoder route, which is deliberately out of scope here — follow-up, not a '
+      + 'claim to make now.',
   },
 ];
 

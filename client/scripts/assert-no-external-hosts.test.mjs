@@ -209,13 +209,111 @@ describe('defect 4 — statically-concatenated origins are folded, then caught',
   });
 });
 
-describe('protocol-relative origins', () => {
-  it('flags //host.tld at the head of a value', () => {
+describe('protocol-relative origins are validated as URLs, not by a dotted-host pattern', () => {
+  it('flags a dotted host', () => {
     expect(scanText('const u="//cdn.example.invalid/x.js";', 'js', allowed)).toHaveLength(1);
   });
 
-  it('does not flag an ordinary path', () => {
+  it('flags a SINGLE-LABEL host', () => {
+    expect(urls(scanText('const u="//localhost/api";', 'js', allowed))).toEqual(['//localhost/api']);
+  });
+
+  it('flags an IPv4 literal', () => {
+    expect(urls(scanText('const u="//127.0.0.1/api";', 'js', allowed))).toEqual(['//127.0.0.1/api']);
+  });
+
+  it('flags an IPv6 literal', () => {
+    expect(urls(scanText('const u="//[::1]/api";', 'js', allowed))).toEqual(['//[::1]/api']);
+  });
+
+  it('flags a host with a port', () => {
+    expect(scanText('const u="//localhost:3000/api";', 'js', allowed)).toHaveLength(1);
+  });
+
+  it('flags one in markup and in CSS too', () => {
+    expect(scanText('<script src="//localhost/x.js"></script>', 'markup', allowed)).toHaveLength(1);
+    expect(scanText('@font-face{src:url(//127.0.0.1/i.woff2)}', 'css', allowed)).toHaveLength(1);
+  });
+
+  it('does not flag an ordinary path, a bare "//", or prose', () => {
     expect(scanText('const u="/v1/aperture/threads";', 'js', allowed)).toEqual([]);
+    expect(scanText('const u="//";', 'js', allowed)).toEqual([]);
+    expect(scanText('const u="// see the notes";', 'js', allowed)).toEqual([]);
+  });
+});
+
+describe('unknown extensions fail closed, matching the documented claim', () => {
+  const withDist = (files, fn) => {
+    const dir = mkdtempSync(join(tmpdir(), 'aptr01-unknown-'));
+    try {
+      for (const [name, content] of Object.entries(files)) {
+        writeFileSync(join(dir, name), content);
+      }
+      fn(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('reports an unrecognised TEXTUAL asset containing a URL instead of skipping it', () => {
+    withDist({ 'data.unknown': 'endpoint = https://evil.invalid/collect\n' }, (dir) => {
+      const result = scanDist(dir, allowed);
+      expect(result.findings).toHaveLength(1);
+      expect(result.findings[0].file).toBe('data.unknown');
+      expect(result.findings[0].value).toMatch(/unscanned textual asset/);
+    });
+  });
+
+  it('reports an unrecognised textual asset even when it contains no URL — silence must mean "looked"', () => {
+    withDist({ 'notes.rst': 'nothing to see here' }, (dir) => {
+      expect(scanDist(dir, allowed).findings).toHaveLength(1);
+    });
+  });
+
+  it('skips a declared binary type without complaint', () => {
+    withDist({ 'f.woff2': Buffer.from([0x77, 0x4f, 0x46, 0x32, 0x00]) }, (dir) => {
+      const result = scanDist(dir, allowed);
+      expect(result.findings).toEqual([]);
+      expect(result.skippedBinary).toBe(1);
+    });
+  });
+
+  it('skips an unrecognised extension whose CONTENT is binary', () => {
+    withDist({ 'blob.bin': Buffer.from([0x00, 0x01, 0x02, 0xff]) }, (dir) => {
+      const result = scanDist(dir, allowed);
+      expect(result.findings).toEqual([]);
+      expect(result.skippedBinary).toBe(1);
+    });
+  });
+});
+
+describe('documented non-goals — recorded as accepted limitations, not silent gaps', () => {
+  // These assertions exist so the limitation is VISIBLE in the suite. If a future change makes
+  // any of them detected, the test goes red and the NON-GOALS block must be updated to match.
+  // Every case here is covered by the runtime CSP (APTR-99), which is the actual control.
+
+  it('does NOT decode HTML character references (accepted; CSP covers it)', () => {
+    expect(scanText('<img src="&#x2F;&#x2F;evil.invalid/x.png">', 'markup', allowed)).toEqual([]);
+  });
+
+  it('does NOT decode CSS escapes (accepted; CSP covers it)', () => {
+    expect(scanText('@font-face{src:url(\\68 ttps://evil.invalid/i.woff2)}', 'css', allowed)).toEqual([]);
+  });
+
+  it('does NOT reliably read attributes after one whose VALUE contains ">" (accepted; CSP covers it)', () => {
+    // The scanner ends a tag at the next ">", so a ">" inside a quoted value desynchronizes it.
+    // Detection after that point is unreliable in BOTH directions, which is why the claim is
+    // "unreliable", not "misses":
+
+    // (a) a protocol-relative origin in a later attribute is missed outright…
+    expect(scanText('<a href="a>b" title="//localhost/x"></a>', 'markup', allowed)).toEqual([]);
+
+    // (b) …while an absolute one is caught, but as a garbled fragment rather than the
+    //     attribute value, so the report cannot be trusted to name what was found.
+    const findings = scanText('<div data-a="a>b" data-b="https://evil.invalid"></div>', 'markup', allowed);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].value).not.toBe('https://evil.invalid');
+    expect(findings[0].value).toContain('https://evil.invalid');
   });
 });
 

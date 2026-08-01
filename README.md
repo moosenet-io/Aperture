@@ -157,13 +157,31 @@ What the lint reliably catches, and why it runs on every build:
 What it cannot catch: deliberate obfuscation, and any URL built at runtime from values not
 present in the bundle.
 
-It **parses** rather than pattern-matches. JavaScript goes through Rollup's parser
-(`rollup/parseAst`), CSS through `postcss`, and HTML/SVG through a tokenizer that extracts
-`<script>` bodies as raw text and parses them as JavaScript — both parsers are already Vite's
-own dependencies, so nothing is added to the tree. Comments, regex literals, and string
-boundaries are therefore correct **by construction**: a licence banner's URL is inert because
-comments do not exist in an AST, not because a stripping pass removed it. An asset that cannot
-be parsed **fails** — an unparseable asset is not evidence of safety.
+**JavaScript, CSS and JSON are parsed** rather than pattern-matched: JavaScript through
+Rollup's parser (`rollup/parseAst`), CSS through `postcss` — both already Vite's own
+dependencies, so nothing is added to the tree — and JSON through `JSON.parse`. Comments, regex
+literals, and string boundaries are therefore correct **by construction**: a licence banner's
+URL is inert because comments do not exist in an AST, not because a stripping pass removed it.
+An asset that is scanned but cannot be parsed **fails** — an unparseable asset is not evidence
+of safety, and an asset with an unrecognised extension whose content is textual is reported
+rather than skipped, so silence always means the lint looked.
+
+**HTML and SVG are the exception: they are scanned by a partial, hand-written scanner, not an
+HTML parser.** No HTML parser is in the dependency tree and one is not being added for a
+control that is not the security boundary. It skips comments and declarations, reads quoted and
+unquoted attribute values and text between tags, and routes `<script>` and `<style>` bodies to
+the JavaScript, JSON, or CSS scanner — so a `<script>` body is never treated as
+comment-strippable text.
+
+**Documented non-goals — accepted limitations, not silent gaps.** Each is covered by the
+runtime CSP, and each has a test recording the current behaviour so a change goes red:
+
+- **HTML character references are not decoded.** An origin written as `&#x2F;&#x2F;evil…` is
+  not detected.
+- **CSS escapes are not decoded.** An origin written as `\68 ttps://evil…` is not detected.
+- **An attribute value containing `>` desynchronizes the markup scanner.** Values after that
+  point may be missed entirely, or reported as a garbled fragment rather than as the attribute
+  value — detection there is unreliable in both directions.
 
 Candidate values are compared **whole and never truncated at a delimiter**. That is what makes
 `http://www.w3.org/2000/svg;payload` and `…/2000/svg?exfil=1` fail rather than reduce to an
@@ -181,8 +199,11 @@ Where a dependency bakes an external URL into a *string* rather than a comment (
 minified-error documentation link), it is neutralized at build time by an exact replacement,
 **scoped to the chunk containing that dependency**, declared with its reason in
 `client/scripts/vendor-url-neutralization.ts` and covered by a regression test proving the
-error message still decodes. A rule that matches nothing fails the build rather than rotting
-silently.
+error **code**, its invariant and its `&args[]` all still survive the message formatting. The
+replacement is not a working link — `react-error-decoder` is not a route this app serves — so
+the code is preserved for manual lookup only; a same-origin decoder route would be needed to
+make the message directly actionable, and that is a follow-up, not part of this scaffold. A
+rule that matches nothing fails the build rather than rotting silently.
 
 ## Documentation
 
