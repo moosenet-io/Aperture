@@ -105,7 +105,7 @@ guarded agent loop, so behaviour is identical regardless of where a message arri
 ```bash
 # client workspace — Node >= 20
 npm --prefix client ci
-npm --prefix client run build      # tsc --noEmit && vite build && egress lint
+npm --prefix client run build      # contract-drift + SDK gates, tsc --noEmit, vite build, egress lint
 npm --prefix client run test
 ```
 
@@ -123,14 +123,72 @@ Tailwind: styling is the shared constellation token layer (see **Design system**
 |---|---|
 | `npm --prefix client run dev` | Vite dev server |
 | `npm --prefix client run typecheck` | `tsc --noEmit` under `strict` |
-| `npm --prefix client run build` | `tsc --noEmit` → `vite build` → the egress lint. A type error fails the build |
+| `npm --prefix client run build` | the drift gate → the SDK static gate → `tsc --noEmit` → `vite build` → the egress lint. Any of them failing fails the build |
 | `npm --prefix client run test` | vitest |
+| `npm --prefix client run gen:api` | regenerate the typed SDK from `contracts/aperture-api-v1.yaml` |
+| `npm --prefix client run assert-api-current` | the contract-drift gate — regenerate and diff |
+| `npm --prefix client run assert-sdk-clean` | the SDK static gate — no absolute URL, no default endpoint, one request site |
 | `npm --prefix client run assert-no-external-hosts` | the egress lint, against an existing `client/dist` |
 
 Fonts are **bundled**, not fetched: the `@fontsource/*` packages emit the woff2 files into the
 build output, so no font host is contacted at runtime. Backend addressing is never compiled in
 — no absolute URL and no default endpoint anywhere in the client. The transport's base URL is
 injected per target.
+
+### The generated API client
+
+`client/src/api/` is the only way the client talks to the backend.
+
+- **`generated/`** — types, an operation table, and the contract version, generated from
+  `contracts/aperture-api-v1.yaml` by `openapi-typescript` at an exactly pinned version and
+  **checked in**, so a build never needs the network or the generator to have run.
+- **`transport.ts`** — the injectable transport. It is the **only** file in the client that
+  constructs a request, and a gate over the parsed syntax tree proves it.
+- **`client.ts`** — `call(transport, operationId, …)`. The compiler derives the method, path,
+  parameters, request body, and success body from the generated types, so there is no
+  hand-written second copy of the contract to drift.
+
+**The base URL is a required constructor argument with no default.** There is no compiled-in
+endpoint anywhere, and the two targets differ:
+
+| Target | `baseUrl` | Auth | Cookies on the wire |
+|---|---|---|---|
+| Web, mobile PWA | `''` — every request same-origin relative | the `__Host-` session cookie | `credentials: 'same-origin'` |
+| Desktop | the operator-configured endpoint, read at runtime from OS secure storage | a bearer token | `credentials: 'omit'` |
+
+Cookie auth with a non-empty base URL **throws at construction**, and so does bearer auth with
+an empty one: a cross-origin cookie cannot be `SameSite=Strict`, and the flags are never
+loosened to make one work. **No CORS headers are served on `/v1/aperture/*`, ever** — the web
+targets are same-origin, and the desktop reaches the API as a native HTTP client (it injects
+its own `fetch`), which is not subject to the same-origin policy.
+
+Error and retry behaviour, stated exactly:
+
+- Every problem-details response becomes a typed error carrying the closed `Problem` object;
+  `auth-required` and `auth-expired` become `ApertureAuthError`, which the UI can act on. A
+  response that is **not** conforming problem details becomes `ApertureMalformedResponseError`
+  — no `Problem` is synthesized, because inventing a contract error URN for a body that never
+  carried one would put a fabricated error identity in front of a caller switching on identity.
+- Retries happen on **idempotent verbs only** (`GET`, `HEAD`, `OPTIONS`, `PUT`, `DELETE`,
+  `TRACE`), with full-jitter exponential backoff and a capped attempt count. A `POST` is not
+  retried even when it carries an `Idempotency-Key`; a caller that knows the route implements
+  the dedupe store opts in per request. `Retry-After` is honoured and never shortened — if it
+  exceeds the delay cap the transport gives up rather than retrying early.
+- A 401 on the event stream is normalized like any other response, so it surfaces as a typed
+  auth error at connect and at every reconnect. **The SDK does not parse SSE frames**, so an
+  authorization failure delivered as an event *inside* an already-200 stream body is not
+  something it can detect, and it does not claim to.
+
+#### The contract-drift gate
+
+`assert-api-current.mjs` regenerates into memory and diffs against what is checked in. A
+mismatch fails the build, so contract drift is a build failure rather than a runtime surprise.
+Because a prose-only contract edit produces byte-identical types, every generated file embeds
+`sha256` of the contract source — the gate is therefore sensitive to *any* change to the
+contract file. **Both gates are proven red on every test run** (`client/scripts/gates.test.mjs`
+edits the contract, asserts the gate fails, and restores it); a gate nobody has seen fail is a
+gate nobody has verified. Neither gate says anything about whether a running server implements
+the contract — that is the BFF's conformance suite, not this.
 
 ### The egress lint — what it guarantees, and what it does not
 
