@@ -37,9 +37,9 @@ In the agent-core repository, crate `lumina-core`:
 
 | Path | What it is |
 |---|---|
-| `crates/lumina-core/src/aperture/mod.rs` | The mount, the contract version and its response header, the correlation-id helper, and the Rust source-scan gates |
-| `crates/lumina-core/src/aperture/routes.rs` | The `/v1/aperture` route table: `health`, `ready`, `version`, and the prefix-scoped catch-all |
-| `crates/lumina-core/src/aperture/state.rs` | Shared state; the outbound door as a module-private handle; the capability report |
+| `crates/lumina-core/src/aperture/mod.rs` | The mount, the contract version and its response header, the correlation-id helper, the closed route-identity enum, the log sanitizer, and the Rust source-scan gates |
+| `crates/lumina-core/src/aperture/routes.rs` | The `/v1/aperture` route table: `health`, `ready`, `version`, the prefix-scoped catch-all, and a method-not-allowed fallback on each route |
+| `crates/lumina-core/src/aperture/state.rs` | Shared state; the outbound door as a private handle with no accessor; the bounded, single-flight reachability probe behind the capability report |
 | `crates/lumina-core/src/aperture/error.rs` | The single error type and its closed RFC-9457 problem-details representation |
 | `crates/lumina-core/Cargo.toml` | The `aperture` feature (implies `http`) |
 | `crates/lumina-core/src/lib.rs`, `src/main.rs` | The feature-gated module declarations |
@@ -51,9 +51,11 @@ In the agent-core repository, crate `lumina-core`:
 The three unauthenticated `meta` operations the contract declares with `security: []` —
 `GET /v1/aperture/health`, `GET /v1/aperture/ready`, `GET /v1/aperture/version` (the contract
 version only) — plus a catch-all so that **every other path under the prefix** answers in
-problem-details form. The `auth`, `threads`, `stream`, `attachments`, `modules`, `events`,
-`settings` and `admin` groups are later items; until they exist, those paths honestly report
-`not-found` rather than a bare 404 or a panic.
+problem-details form, and a method-not-allowed fallback so that a wrong method on a route that
+*does* exist does too, rather than the bodiless `405` a router emits by default. The `auth`,
+`threads`, `stream`, `attachments`, `modules`, `events`, `settings` and `admin` groups are later
+items; until they exist, those paths honestly report `not-found` rather than a bare 404 or a
+panic.
 
 ### The properties it holds, and how
 
@@ -68,12 +70,24 @@ problem-details form. The `auth`, `threads`, `stream`, `attachments`, `modules`,
   module.
 - **No secrets of its own.** The module performs no environment read of any kind; the door is
   *read* from the process rather than constructed, so credential handling stays in one place.
-- **Degraded, never fatal.** An unconfigured or unreachable door is a degraded start: the
-  capability reports `unavailable` with a reason and `GET /v1/aperture/ready` answers `503` in
-  problem-details form. The agent core keeps serving its other channels regardless.
-- **Redaction.** A problem-details body carries a class-level `detail` that is constant per error
-  class. The real cause goes to the server log keyed by the `correlation_id` the response echoes.
-  The problem object is closed, which is what stops an upstream string reaching a client body.
+- **Degraded, never fatal — and continuously, not just at startup.** Nothing is probed at
+  construction; readiness is answered from a **bounded-TTL reachability sample**, so a door that
+  is unconfigured, unreachable, or newly recovered is reflected as such within a bounded lag,
+  in both directions. In every degraded case the capability reports `unavailable` with a vetted
+  reason and `GET /v1/aperture/ready` answers `503` in problem-details form, while the agent core
+  keeps serving its other channels. The probe is single-flight, survives cancelled requests, and
+  cannot be wedged by a panicking probe. **The lag is real and deliberate:** a cached success can
+  hold `/ready` at `200` for up to one TTL after the door dies, so this is a bounded-staleness
+  signal and not a liveness check.
+- **Redaction, enforced by type rather than by filtering.** Every member of a problem-details body
+  is either a compile-time constant or a value this process generated: `detail` is constant per
+  error class, `instance` is a **closed route-identity enum** with no constructor that accepts a
+  string, and a capability's `reason` is a **closed enum** of vetted text. Nothing a client sent —
+  path, header — and nothing an upstream said can be serialized into a body at all; the only
+  free-form text is the operator log line, keyed by the `correlation_id` the response echoes and
+  sanitized to a bounded printable subset so a hostile path cannot forge or flood log entries.
+  The problem object is closed, and the serialization-failure fallback carries the true status and
+  the same correlation id rather than a hardcoded guess.
 - **No CORS header, ever**, on any response under the prefix.
 
 ---
@@ -111,28 +125,33 @@ Two facts constrain what could be GATED at all, and both are recorded rather tha
   therefore **structurally incapable** of exercising the `aperture` feature, and every
   feature-on result below is LOCAL by necessity, not by shortcut. This blocks every
   feature-gated item in the fleet the same way.
-- **The compiler gate is currently red for an infrastructure reason** unrelated to this change:
-  runs die in dependency compilation with `sccache: Failed to create temp dir` (exit 254), one
-  build's scratch directory being removed while another uses it as `TMPDIR`. Reproduced on
-  `main` as well as on this branch, so it is an infrastructure artifact, not a verdict.
+- **The compiler gate was intermittently red for an infrastructure reason** unrelated to this
+  change: runs died in dependency compilation with `sccache: Failed to create temp dir`
+  (exit 254), one build's scratch directory being removed while another used it as `TMPDIR`.
+  It was reproduced on `main` as well as on the item branch, so it was an infrastructure
+  artifact rather than a verdict. **That outage has since cleared** and the run cited below is
+  a clean one.
 
-The two compiler runs that **did** complete, on branch head `455bc7b`, ran the **default-feature**
-suite: 4753 passed, 4 failed. The four are two pre-existing tests counted across two test binaries
-— `engram::resurfacing::tests::ledger_save_failure_suppresses_callbacks` and
-`presence::tests::tick_budget_persist_failure_skips_send_no_consume` — both unrelated to Aperture,
-both passing locally, and with the feature off this change compiles no new code at all.
+The gate run cited in the table was taken **after the merge, against `main`**, so it describes
+the code that actually landed rather than an intermediate branch head. It ran the
+**default-feature** suite: **4753 passed, 4 failed**. The four are two pre-existing tests counted
+across two test binaries — `engram::resurfacing::tests::ledger_save_failure_suppresses_callbacks`
+and `presence::tests::tick_budget_persist_failure_skips_send_no_consume` — both unrelated to
+Aperture, both passing locally, and both failing identically on `main` before this item and after
+it. With the feature off this change compiles no new code at all, which is why that is the
+expected result rather than a concerning one.
 
 ### The table
 
 | # | Acceptance criterion | Proving repo | Class | Evidence, and its exact limit |
 |---|---|---|---|---|
-| 1 | The BFF module compiles with and without the `aperture` feature | agent-core | Feature-off: **GATED** (partially) + **LOCAL**. Feature-on: **LOCAL only** | **GATED:** the compiler tool built and ran the default-feature (feature-**off**) suite on branch head `455bc7b`, with the four pre-existing failures noted above — this is the only part of criterion 1 a gate has touched. **LOCAL:** feature-on and feature-off builds both complete with no warning from the module; the feature-off binary contains **zero** occurrences of the route prefix and the feature-on binary contains it. **Not gated, and why:** the compiler tool cannot select a cargo feature at all (`TERM #593`), so no gate can currently observe the feature-on state; the gate is additionally red for the `sccache` reason above. |
+| 1 | The BFF module compiles with and without the `aperture` feature | agent-core | Feature-off: **GATED** + **LOCAL**. Feature-on: **LOCAL only** | **GATED, on the merged commit:** the compiler tool built and ran the default-feature (feature-**off**) suite against `main` after the merge — 4753 passed, 4 failed, those four being the two pre-existing unrelated tests described above. That is the whole of what a gate has touched on this criterion. **LOCAL:** feature-on and feature-off builds both complete with no warning from the module; the feature-off binary contains **zero** occurrences of the route prefix and the feature-on binary contains it; the feature-on suite is 5304 passed, 0 failed, of which 52 are this module's own tests. **Not gated, and why:** the compiler tool cannot select a cargo feature at all (`TERM #593`), so no gate can observe the feature-on state — the 52 module tests have never run under a gate and cannot until that is fixed. |
 | 2 | All backend access routes through the tool-door client; zero direct service HTTP clients | agent-core | **STRUCTURAL** (primary, narrow) + **TRIPWIRE** (secondary) | **What the compiler strictly guarantees:** *nothing outside `state.rs` can obtain this state's door handle.* It is a private field with **no accessor at all** — not even a module-scoped one — and a later item needing a backend call adds a method to the `Door` trait rather than receiving the client. That holds for code nobody has written yet, and it is a **stronger** claim than the `pub(in crate::aperture)` accessor it replaces. **What it does not cover — see "The two limits" below.** **Secondary tripwire:** a source scan rejects a named list of client spellings. **Its limit:** a name list is an enumeration. An alias, a re-export, a differently-named client, a raw socket, or a crate nobody thought of all pass it. It proves those specific spellings are absent — **not** that all backend access goes through the tool door. |
 | 3 | Secrets accessed via the secret manager, not environment reads | agent-core | **TRIPWIRE** + **REVIEW** | A source scan finds zero occurrences of the direct environment-read spellings anywhere in the module's shipping half, which subsumes the token-, key-, password- and secret-shaped names the rule is about. **Its limit:** the scan proves those spellings are absent; that the module reads no secret **at all** is a claim about its 4 files, established by reading them, not by the scan. |
 | 4 | Inference addressed by named proxy only; no model, engine or backend name in code | agent-core | **TRIPWIRE** | A source scan rejects a list of model ids, engine names, backend tags and size suffixes. **Its limit:** it catches the names on the list. A model name nobody enumerated would pass. The module currently issues no inference call at all, which is the substantive reason this holds. |
-| 5 | An unreachable door degrades to `unavailable`, never a crash | agent-core | **LOCAL** (behavioural tests) | State construction with no door is infallible and reports the capability `unavailable` with a reason; the readiness route answers `503` problem details naming the capability; the router builds with no door present. Exercised through the real router. **Not gated:** these tests live behind the `aperture` feature, which no gate can select (`TERM #593`). |
-| 6 | **`docs/BFF-PLACEMENT.md` carries the gate-attribution table and links the merged agent-core PR id** | **Aperture (this repo)** | **REVIEW** | **UNSATISFIED as of this commit.** The table is present; the **merged agent-core PR link is not** — see "The agent-core change this document describes" below, which carries a branch and a commit SHA and an explicit placeholder. A branch name and a commit SHA are **not** a merged-PR link. **This PR is not mergeable in this state**, by the rule in "Merge order" below. |
-| 7 | No hardcoded infrastructure value in new/modified code; all existing tests still pass | agent-core | **TRIPWIRE** + **LOCAL** | A source scan rejects a literal address, scheme, or filesystem path in the shipping half of every module file, and a behavioural test asserts no response body carries one. **The scan's limit:** it is a pattern list — a dotted quad, two URL schemes, two path prefixes. An internal hostname without a scheme, or a port on its own line, would pass it. The response-body assertion is the stronger half, because it tests what actually reaches a client. **"All existing tests still pass":** LOCAL for the feature-on suite; GATED for the default-feature suite modulo the four pre-existing failures. |
+| 5 | An unreachable door degrades to `unavailable`, never a crash | agent-core | **LOCAL** (behavioural tests) | Readiness reflects a **probed** door, not a configured one: a door that is present but does not answer a bounded probe reports `unavailable`, distinguishably from one that was never activated, and `/ready` answers `503` problem details naming the capability. The reported state moves in both directions, so a door that dies degrades and one provisioned later recovers without a restart. The probe is single-flight and survives its waiters: a burst produces one probe, dropped requests do not each start another, and a **panicking** probe cannot wedge the flight slot — an RAII guard clears it on unwind, and a test asserts the capability recovers afterwards rather than merely re-probing. **Its limit, and it is deliberate:** a cached success can keep `/ready` at `200` for up to one probe-TTL after the door dies. That is inherent in bounded staleness, is documented in the module, and is not a defect to be closed by probing per request. **Not gated:** these tests live behind the `aperture` feature, which no gate can select (`TERM #593`). |
+| 6 | **`docs/BFF-PLACEMENT.md` carries the gate-attribution table and links the merged agent-core PR id** | **Aperture (this repo)** | **REVIEW** | **SATISFIED.** The table is above; the merged agent-core PR is **`moosenet/Lumina` #247**, merged before this change, with the details in "The agent-core change this document describes" below. It was deliberately held open as an explicit blocking placeholder until that PR actually merged, because a document claiming behavioural criteria are proven, before the code proving them has landed, is the precise failure this criterion exists to prevent. |
+| 7 | No hardcoded infrastructure value in new/modified code; all existing tests still pass | agent-core | **TRIPWIRE** + **LOCAL** | A source scan rejects a literal address, scheme, or filesystem path in the shipping half of every module file, and a behavioural test asserts no response body carries one. **The scan's limit:** it is a pattern list — a dotted quad, two URL schemes, two path prefixes. An internal hostname without a scheme, or a port on its own line, would pass it. The response-body assertions are the stronger half, because they test what actually reaches a client: hostile request paths and headers are fed in and asserted absent from the body. **"All existing tests still pass":** GATED for the default-feature suite on the merged `main` commit, modulo the two pre-existing unrelated failures; LOCAL for the feature-on suite. |
 | 8 | README documents the BFF and its feature flag | agent-core | **REVIEW** | The agent-core `README.md` gains an "Aperture BFF" section in the same change set. Nothing mechanical checks that prose is accurate; a reviewer does. |
 
 ### Criterion 2 — the two limits, and one piece of evidence struck
@@ -187,27 +206,28 @@ that promises a link and carries a placeholder proves the promise, not the link.
 ### Merge order
 
 1. The **agent-core** PR merges **first**. It carries the module and every behavioural criterion.
+   **Done: `moosenet/Lumina` #247, merged.**
 2. This PR merges **second**, and its body states: *"this PR proves only the documentation
-   criterion; behavioural criteria are proven by agent-core PR #N."* **An Aperture-side PR that
-   does not link a merged agent-core PR is not mergeable** — that is a review rule, and the
-   reviewer applying it is the gate.
+   criterion; behavioural criteria are proven by agent-core PR `moosenet/Lumina` #247."* **An
+   Aperture-side PR that does not link a merged agent-core PR is not mergeable** — that is a
+   review rule, and the reviewer applying it is the gate. The rule was enforced on this very
+   change: it sat blocked on an explicit placeholder until #247 landed.
 
 ### The agent-core change this document describes
 
-- Repository: the agent core (`lumina-constellation`), crate `lumina-core`
-- Branch: `APTR-05-aperture-bff`
-- Head commit: `8670bd1cbd6376bd34f7503e6ecff34451228ca6`
-- Merged PR: **NOT YET LINKED — criterion 6 is UNSATISFIED and this PR is NOT MERGEABLE.**
+- Repository: **`moosenet/Lumina`** on the internal forge, crate `lumina-core`
+- **Merged PR: `moosenet/Lumina` #247** — *APTR-05: Aperture BFF module (feature-gated) in
+  lumina-core*
+- Branch: `APTR-05-aperture-bff`, head commit `46a782c80821a65a839d3c7321bb1c19cfd7ed7a`
+- Merge commit on `main`: `8aec7ca`
+- Review: five cycles, each of which found a real defect; the final cycle approved unanimously
+- Post-merge: the public mirror serves the module (verified by fetching its content, not by
+  comparing revisions) and the code knowledge graph was rebuilt
 
-> **Blocking placeholder, deliberately left in.** The agent-core PR does not exist yet: that
-> branch has not been gated. The link is filled in **after** the agent-core PR merges, and only
-> then does criterion 6 become satisfied and this PR become mergeable. Replacing this block with
-> a branch name, a commit SHA, or an unmerged PR number does **not** satisfy it — the criterion
-> names a *merged* PR id, because the whole point of the merge order is that the behavioural
-> criteria are already proven when this document claims they are.
->
-> A reviewer who finds this paragraph still present is looking at an unmergeable PR, and that is
-> the intended reading, not an oversight.
+> **The repository is `moosenet/Lumina`, not `lumina-constellation`.** It was renamed; the old
+> name survives only as a redirect that read requests follow and write requests fail on. Use the
+> current name — this document previously carried the old one, which is the kind of detail that
+> works when you click it and breaks when you script it.
 
 ---
 
@@ -217,12 +237,24 @@ Three things were found while implementing against the merged v1 contract for th
 They are recorded here rather than fixed silently, because the contract is normative and an
 implementation that quietly diverges from it is the failure mode the contract exists to prevent.
 
-1. **A method mismatch on a known route has no error class.** The taxonomy has no `405` URN, and
-   the shared conventions say every failure is problem details without exception. As implemented,
-   an unknown path answers `not-found` for every method, but a wrong method on a *known* route
-   (say a `POST` to the health route) is answered by the web framework with a bare `405` and no
-   body. Either the contract should name the class such a request maps to, or it should say that
-   `405` is the one status served without a body. It should not be left to each implementer.
+1. **A method mismatch on a known route has no error class, and v1 needs one.** The taxonomy has
+   no `405` URN, while the shared conventions say every failure is problem details without
+   exception. Those two cannot both be satisfied with a declared URN *and* an accurate status.
+
+   **What the merged implementation does**, since the earlier revision of this note described the
+   defect rather than the fix: a wrong method on a route that exists (a `POST` to the health
+   route, say) returns **problem details** with the **`validation-failed`** class — the closest
+   *declared* class, a wrong method being a request that does not match the operation's documented
+   contract — carrying the accurate **`405`** status, and the body's `status` member agrees with
+   the response. Minting `urn:aperture:error:method-not-allowed` was rejected deliberately: it
+   would satisfy the schema's URN *pattern* while breaking the taxonomy's closure, and a class no
+   client switches on is indistinguishable from a broken server.
+
+   **The contract gap is real and remains open.** v1 should either add the class or state
+   explicitly that a method mismatch maps to `validation-failed` with a `405`. Until it does, an
+   implementer either invents a URN or reproduces this compromise by reasoning, and the two
+   implementations disagree. It should not be left to each implementer, which is the whole
+   argument for fixing it in the contract rather than in each server.
 
 2. **The catch-all needs the trailing-slash form spelled out.** `/v1/aperture/` — the prefix with
    a bare trailing slash — is a distinct path from the prefix itself and from any deeper path, and
