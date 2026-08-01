@@ -225,6 +225,7 @@ rule that matches nothing fails the build rather than rotting silently.
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every configuration key, by name |
 | [docs/PIPELINE.md](docs/PIPELINE.md) | How changes reach `main` and the public mirror |
 | [docs/BRAND.md](docs/BRAND.md) | The Aperture mark, palette, and usage rules |
+| [docs/BFF-PLACEMENT.md](docs/BFF-PLACEMENT.md) | Where the backend lives, why it is a feature-gated module in the agent core, and which repository's gate proves which criterion |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute, and the rules that are non-negotiable |
 | [SECURITY.md](SECURITY.md) | Supported versions and the private vulnerability reporting path |
 | [CODEOWNERS](CODEOWNERS) | Review ownership by path |
