@@ -213,8 +213,9 @@ and where applicable `thread_id`, `message_id`, `turn_id`.
 Each event is one SSE frame:
 
 - the SSE `event:` field carries the event `type`;
-- the SSE `id:` field carries the composite **`"{stream_id}:{seq}"`**, so the browser's native
-  `Last-Event-ID` resume works and carries enough information to be interpreted;
+- the SSE `id:` field carries the composite **`"{stream_id}:{seq}"`** — never a bare `seq` — so
+  the browser's native `Last-Event-ID` resume works and carries enough information to be
+  interpreted;
 - the SSE `data:` field carries the event object as a single JSON document.
 
 The `id:` is composite rather than a bare `seq` because a `seq` is only meaningful inside its
@@ -275,24 +276,34 @@ Four rules, cited rather than re-derived by anything that touches time:
 ### 5.1 Resume
 
 A client reconnecting sends `Last-Event-ID` with the composite `"{stream_id}:{seq}"` of the last
-event it fully processed. The server replays every buffered event for that `stream_id` after that
-`seq`, in order, and then continues live. A client that has never connected omits the header and
-receives only live events.
+event it fully processed. The server replays every buffered event for that `stream_id` **strictly
+after** that `seq` — the acknowledged event is not re-sent — in order, and then continues live. A
+client that has never connected omits the header and receives only live events.
 
 A client persists the highest `seq` it has seen **per `stream_id`** across reconnects.
 
-The three input cases are distinguished, and there is no fourth:
+**The five input cases. Every value of this header falls into exactly one of them:**
 
 | `Last-Event-ID` | Meaning | Result |
 |---|---|---|
-| **Absent** | First connection. The client is not asking to resume. | Live delivery, **no** `resync`. Lossless. |
-| **Parses, position live** | Resume from a known position. | Replay from that `seq`, then live. |
-| **Parses, position aged out or `stream_id` unknown** | Resume from a position the server cannot honour. | Fresh `stream_id` + `resync` — §5.3, §5.4. |
-| **Malformed** | The client is asking to resume from *somewhere*. | Fresh `stream_id` + `resync(reason: unparseable_position)` — §5.4. **Never treated as absent, never parse-guessed.** |
+| **Absent** | First connection. The client is not asking to resume. | Live delivery, **no** `resync`. Lossless, and the only case that reaches live without one. |
+| **Parses; `stream_id` known; `seq` within the buffer** | Resume from a position the server holds. | Replay **strictly after** that `seq`, then live. |
+| **Parses; `stream_id` known; `seq` below the buffer** | The position aged out. | Fresh `stream_id` + `resync(reason: window_aged_out)`, **with** `lost_range` — §5.3. |
+| **Parses; `stream_id` known; `seq` ABOVE the high-water mark** | The client acknowledges an event the server never emitted. | Fresh `stream_id` + `resync(reason: position_never_issued)`, **no** `lost_range` — §5.5. Fails closed. |
+| **Parses; `stream_id` unknown** | The connection is gone, or never existed here. | Fresh `stream_id` + `resync(reason: unknown_stream)`, **no** `lost_range` — §5.4. |
+| **Malformed** | The client is asking to resume from *somewhere*. | Fresh `stream_id` + `resync(reason: unparseable_position)`, **no** `lost_range` — §5.4. **Never treated as absent, never parse-guessed.** |
 
 A malformed value is **not** the same as an absent one, and the difference is the whole point:
 absent means "I have never connected", malformed means "resume me", and answering the second with
 silent live delivery loses continuity without telling the client.
+
+**The header's own schema does not enforce any of this, deliberately.** `Last-Event-ID` is typed
+as an opaque length-capped string with **no** format constraint, because a schema-level pattern
+would reject a malformed value at the edge — before any handler could emit the
+`resync(unparseable_position)` this section requires. The rejection would arrive as a problem
+response and the client would suffer exactly the silent continuity loss the rule prevents. **Every
+rule in this section is behavioural.** Anyone tempted to "tighten" the header's schema to match
+this table would thereby make half the table unreachable.
 
 ### 5.2 The window is bounded
 
@@ -315,7 +326,7 @@ only. **Resume is never unbounded**, and no client may assume otherwise.
 Whenever events could not be delivered, the server says so. It does **not** silently start from
 live and does **not** pretend the gap did not happen.
 
-**The four cases, and there are only four** — the `reason` field always names which one:
+**The five reasons, and there are only five** — the `reason` field always names which one:
 
 | `reason` | When | `lost_range` |
 |---|---|---|
@@ -323,11 +334,14 @@ live and does **not** pretend the gap did not happen.
 | `gap_detected` | The server detected a gap in its own emission. | Present |
 | `unknown_stream` | The `stream_id` is not one the server has — restart, or the connection was reaped. | **Absent** |
 | `unparseable_position` | The `Last-Event-ID` did not parse. | **Absent** |
+| `position_never_issued` | The `stream_id` is known but the `seq` is beyond its high-water mark — §5.5. | **Absent** |
 
 This table is **enforced by the schema**, not just documented: `ResyncEvent` carries an
 `if`/`then`/`else` requiring `lost_range` for the first two reasons and **forbidding** it for the
-last two. Absent means absent — a fabricated range for a position the server never had would be
-trusted by a client and cause it to under-refetch.
+rest. The conditional keys off the two reasons that require a range, so a reason added later
+without a range rule forbids it by default — fail-closed by construction. Absent means absent: a
+fabricated range for a position the server never had would be trusted by a client and cause it to
+under-refetch.
 
 #### The sequence domain of the reported range
 
@@ -356,9 +370,10 @@ This is the part two implementers would otherwise read two ways, so it is pinned
   domain; the range describes undelivered events, in a domain it names explicitly. There is no
   case in which a client should subtract the `resync` itself from the range.
 
-Where the loss cannot be expressed as a range — `unknown_stream`, `unparseable_position` — the
-server has no trustworthy prior position to subtract from, so it omits `lost_range` entirely
-rather than inventing a plausible one. The client then refetches the affected threads wholesale.
+Where the loss cannot be expressed as a range — `unknown_stream`, `unparseable_position`,
+`position_never_issued` — the server has no trustworthy prior position to subtract from, so it
+omits `lost_range` entirely rather than inventing a plausible one. The client then refetches the
+affected threads wholesale.
 
 #### What the client does
 
@@ -392,6 +407,32 @@ The only case that starts at live with no `resync` is a genuine first connection
 
 Two tabs resuming the same `stream_id` concurrently is permitted: both may replay. Emission
 remains single-writer per `stream_id`, so `seq` stays strictly increasing and gapless for each.
+
+### 5.5 A position the server never issued
+
+The `stream_id` is known and the value parsed cleanly, but the `seq` is **above that stream's
+high-water mark**: the client is acknowledging an event the server never emitted. Causes include a
+client bug, a resumed snapshot of client state from a different deployment, a replayed or crafted
+header, or a server that lost sequence state without losing the id.
+
+It is none of the other four cases — not live, not aged out, not unknown, not malformed — which is
+why it is named. Left undefined, three implementations would pick three different answers:
+
+| Tempting answer | Why it is wrong |
+|---|---|
+| Treat it as live | Accepts the client's claim to have already seen output that was never produced. Anything the server emits next is silently attributed to a history that does not exist. |
+| Replay from the nearest real position | Silently substitutes a different position for the one requested, and reports success. The client believes it resumed from `N` when it resumed from something else. |
+| Reject the connection | Leaves the client with no path forward and no explanation. |
+
+**The rule: fail closed.** The server issues a fresh `stream_id` and emits
+`resync(reason: position_never_issued)` with **no** `lost_range` — there is no honest range to
+report, because the interval the client believes in never existed. The client refetches the
+affected threads wholesale.
+
+**A position the server never issued is not evidence of continuity.** It is the one input in this
+section that carries *negative* information: it tells the server the client's view of the stream is
+wrong in a way neither side can reconcile from the header alone, so the only safe move is to
+resynchronize from authoritative state.
 
 The term "gap marker" does not appear in this contract. The event is `resync`.
 
@@ -480,9 +521,10 @@ gap in this contract is named as one, in those words, and given a test id here.
 | **T-ORIGIN-6** | A `tool.result` whose `result` contains SSE-frame-shaped or assistant-event-shaped bytes is delivered as a `tool.result` and rendered as a tool result. The §2.2 negative test. | Partly — the rest is behavioural |
 | **T-ORIGIN-7** | `message.end.message_origin` equals the value declared at `message.start`; a mismatch is rejected and the client keeps the recorded value. | **No — spans two events.** |
 | **T-ORIGIN-8** | **The REST representation obeys the same provenance rule as the stream.** Round-trip: content that arrived as a `tool.result` is stored `origin: tool` and served over REST as `origin: tool`; no code path re-parents stored content from one origin to another; and a stored message's `origin` agrees with the `message_origin` its `message.start` declared. | **Partly.** The `origin` ↔ `tool_call_id` binding is schema-enforced; **byte provenance is not checkable by any schema** and this test is its only enforcement. |
-| **T-RESYNC-1** | `resync` round-trips with `reason`, `lost_range` (including its own `stream_id` domain), and affected ids; `from_seq`/`to_seq` are honoured as **inclusive**; `lost_range` is absent exactly for `unknown_stream` and `unparseable_position`. | Partly |
+| **T-RESYNC-1** | `resync` round-trips with `reason`, `lost_range` (including its own `stream_id` domain), and affected ids; `from_seq`/`to_seq` are honoured as **inclusive**; `lost_range` is present exactly for `window_aged_out` and `gap_detected` and absent for the other three reasons. | Partly |
 | **T-RESYNC-3** | `from_seq <= to_seq` on every emitted `resync`, and a client **rejects** an inverted range rather than normalizing it by swapping the ends. | **No — cross-property comparison.** The `reason` ↔ `lost_range` relationship beside it *is* schema-enforced. |
-| **T-RESYNC-2** | An **unparseable** `Last-Event-ID` produces a fresh stream plus a `resync` with `reason: unparseable_position` — **never** silent live delivery. An unknown `stream_id` likewise, with `reason: unknown_stream`. A genuine first connection produces neither. | No — behavioural |
+| **T-RESYNC-2** | An **unparseable** `Last-Event-ID` produces a fresh stream plus a `resync` with `reason: unparseable_position` — **never** silent live delivery. An unknown `stream_id` likewise, with `reason: unknown_stream`. A genuine first connection produces neither. **Additionally asserts the malformed value actually REACHES the handler** — that the header's schema is an opaque bounded string and a pattern has not been reintroduced, since a pattern would make this test unsatisfiable. | No — behavioural, plus a contract lint for the schema half |
+| **T-RESYNC-4** | A `seq` **above** a known stream's high-water mark yields `resync(reason: position_never_issued)` with no `lost_range` — never live delivery, never a replay from the nearest real position, never a bare rejection. §5.5. | No — behavioural |
 | **T-CLOCK-2** | Every timestamp field `$ref`s `Timestamp` or `TimestampOrNull`; no field re-declares `format: date-time` inline; and the UTC pattern rejects a non-zero offset such as `+02:00`. | Yes — pattern + contract lint |
 | **T-CLOCK-1** | No code path compares two `ts` values to decide ordering, replay, or eviction. | No — static/grep gate |
 | **T-LIFECYCLE-1** | Every opened message receives exactly one `message.end`, including on cancellation and failure. | No — behavioural |

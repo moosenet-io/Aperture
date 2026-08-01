@@ -846,7 +846,8 @@ paths:
 
         **Resume.** A client reconnects with `Last-Event-ID` set to the composite
         `"{stream_id}:{seq}"` of the last event it fully processed. Within the bounded replay
-        window the server replays from that position. Beyond it — and equally for an unknown
+        window the server replays **strictly after** that position — the acknowledged event is
+        not re-sent. Beyond it — and equally for an unknown
         `stream_id` or a malformed value — the server issues a fresh `stream_id` and emits a
         `resync` naming the reason, and the client refetches over REST. Resume is never
         unbounded, and the only case that starts at live with no `resync` is a genuine first
@@ -882,9 +883,34 @@ paths:
             The server issues a fresh `stream_id` and immediately emits a `resync` with
             `reason: unparseable_position` and no `lost_range`, and the client refetches. Enforced
             by conformance test **T-RESYNC-2**.
+
+            ## The schema here is deliberately an OPAQUE BOUNDED STRING. Do not "tighten" it.
+
+            This header carries **no format constraint** — only a length cap — and that is a
+            correctness requirement, not an oversight. Someone will eventually notice that the
+            value has a known shape and add
+            `pattern: '^[A-Za-z0-9_-]+:[0-9]+$'`. **That change breaks the contract**, as follows:
+
+            a malformed `Last-Event-ID` would then fail *schema* validation at the edge, before
+            any handler runs. A generated server or a validating gateway would legitimately reject
+            the request with a problem response — so the `resync(reason: unparseable_position)`
+            this contract mandates for exactly that input **could never be emitted**, and the
+            client would be left with the silent continuity loss the rule exists to prevent. The
+            constraint intended to enforce the behaviour is what makes the behaviour unreachable.
+
+            **Parsing and rejection of this header are BEHAVIOURAL, specified in
+            `contracts/aperture-events-v1.md` §5, not structural.** The general rule, which
+            applies to any fail-closed handling of malformed input anywhere in this contract:
+            **when a contract specifies a behaviour for malformed input, the malformed input must
+            be able to reach the handler.** A schema that rejects it first replaces the specified
+            behaviour with a different one.
+
+            The length cap is retained because an unbounded header is a resource-exhaustion
+            surface; an over-long value is rejected as malformed, which is a behaviour this
+            contract already defines.
           schema:
             type: string
-            pattern: '^[A-Za-z0-9_-]+:[0-9]+$'
+            maxLength: 256
         - name: thread_id
           in: query
           required: false
@@ -905,7 +931,8 @@ paths:
         "200":
           description: |
             The event stream. Each frame is one `StreamEvent` serialized as JSON in the SSE
-            `data:` field, with the SSE `id:` field carrying `seq` and the SSE `event:` field
+            `data:` field, with the SSE `id:` field carrying the composite `"{stream_id}:{seq}"`
+            and the SSE `event:` field
             carrying the event `type`.
           headers:
             X-Aperture-Contract-Version:
@@ -2477,9 +2504,11 @@ components:
           description: |
             The monotonic sequence number. **One sequence per connection, covering all event
             types** — not one per thread, not one per turn, not one per type. It is strictly
-            increasing with no gaps within a connection, it is the SSE `id:` field, and it is the
-            only thing used to decide ordering, replay position, and eviction. Timestamps are
-            never used for that.
+            increasing with no gaps within a connection, and it is the only thing used to decide
+            ordering, replay position, and eviction — timestamps are never used for that.
+
+            `seq` is the **numeric half** of the SSE `id:` field, which carries the composite
+            `"{stream_id}:{seq}"`. It is not the whole `id:` on its own.
         origin:
           $ref: "#/components/schemas/Origin"
         ts:
@@ -2818,12 +2847,29 @@ components:
             reason:
               type: string
               description: |
-                Why the resync was issued. `window_aged_out` — the position was valid but has
-                fallen out of the bounded replay buffer. `unknown_stream` — the `stream_id` is not
-                one the server has (restart, or the connection was reaped). `unparseable_position`
-                — the `Last-Event-ID` did not parse and was not guessed at.
-                `gap_detected` — the server detected a gap in its own emission.
-              enum: [window_aged_out, unknown_stream, unparseable_position, gap_detected]
+                Why the resync was issued.
+
+                - `window_aged_out` — the position was valid but has fallen out of the bounded
+                  replay buffer.
+                - `unknown_stream` — the `stream_id` is not one the server has (restart, or the
+                  connection was reaped).
+                - `unparseable_position` — the `Last-Event-ID` did not parse and was not guessed
+                  at.
+                - `position_never_issued` — the `stream_id` is known, but the `seq` is **beyond
+                  that stream's high-water mark**: the client is acknowledging an event the server
+                  never emitted. There is no honest way to resume from a position that never
+                  existed, so this **fails closed** — a fresh `stream_id` and a wholesale refetch.
+                  Treating it as live would accept a client's claim to have seen output that was
+                  never produced; replaying from the nearest real position would silently
+                  substitute a different position for the requested one. **A position the server
+                  never issued is not evidence of continuity.**
+                - `gap_detected` — the server detected a gap in its own emission.
+              enum:
+                - window_aged_out
+                - unknown_stream
+                - unparseable_position
+                - position_never_issued
+                - gap_detected
             lost_range:
               type: object
               additionalProperties: false
@@ -2831,7 +2877,9 @@ components:
               description: |
                 The undelivered range, in the sequence domain of `stream_id`. Present only when a
                 trustworthy prior position exists — that is, for `window_aged_out` and
-                `gap_detected`. Absent for `unknown_stream` and `unparseable_position`.
+                `gap_detected`. Absent for `unknown_stream`, `unparseable_position`, and
+                `position_never_issued` — in each of those the server has no trustworthy prior
+                position to subtract from.
               properties:
                 stream_id:
                   allOf:
@@ -2865,10 +2913,14 @@ components:
 
             - `window_aged_out` and `gap_detected` — the server has a trustworthy prior position,
               so `lost_range` is **required**;
-            - `unknown_stream` and `unparseable_position` — there is no trustworthy prior position
-              to subtract from, so `lost_range` is **forbidden**, not merely optional. Emitting a
-              plausible-looking range for a position the server never had would be a fabricated
-              bound, and a client would reasonably trust it and under-refetch.
+            - `unknown_stream`, `unparseable_position` and `position_never_issued` — there is no
+              trustworthy prior position to subtract from, so `lost_range` is **forbidden**, not
+              merely optional. Emitting a plausible-looking range for a position the server never
+              had would be a fabricated bound, and a client would reasonably trust it and
+              under-refetch.
+
+            The `if` below keys off the two reasons that **require** a range, so a reason added to
+            the enum without a range rule defaults to forbidding it — fail-closed by construction.
 
             `from_seq <= to_seq` is a **cross-property** comparison and is genuinely not
             expressible here — no keyword can compare two sibling values. It is enforced by
