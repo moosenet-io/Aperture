@@ -1,0 +1,2601 @@
+openapi: 3.1.0
+
+info:
+  title: Aperture BFF API
+  version: "1.0"
+  summary: The versioned client-to-BFF contract for Aperture.
+  description: |
+    The Aperture backend-for-frontend (BFF) contract, version 1.
+
+    This document is **normative**. Every Aperture client target (web, mobile PWA, desktop)
+    and every later sprint codes against it. It is a contract, not an implementation: the BFF
+    is a feature-gated module inside the agent core and reaches every backend capability
+    through the sanctioned tool door.
+
+    Companion documents, all in `contracts/`:
+
+    | Document | Owns |
+    |---|---|
+    | `aperture-events-v1.md` | The SSE event taxonomy, provenance, ordering, replay, resync |
+    | `aperture-transport-v1.md` | Per-target transport, auth, and CSP rules (cookie vs bearer) |
+    | `README.md` | Versioning policy, breaking-change policy, shared conventions |
+
+    ## Rules that apply to every operation in this document
+
+    1. **Provenance is mandatory.** Every stored message object and every stream event carries an
+       `origin` discriminator of `assistant | tool | system | user`. Clients derive visual voice
+       and attribution from `origin` **only, never from content**. See `aperture-events-v1.md`.
+    2. **No CORS headers are served on `/v1/aperture/*`, ever.** See `aperture-transport-v1.md`.
+    3. **All timestamps are UTC ISO-8601 with an explicit offset.** Rendering into the viewer's
+       local zone is a client concern. A local-time string never appears on the wire.
+    4. **Every failure is RFC-9457 problem details** with a stable `type` URN. See
+       `aperture-errors-v1.md` for the full taxonomy and per-URN user-facing meaning.
+    5. **No response body, header, or error detail may carry an infrastructure identifier** — no
+       host, address, port, internal path, build hash, upstream component version, stack frame,
+       or token. `GET /version` returns the contract version and nothing else.
+    6. **Limits are declared here, never discovered at runtime.** Each operation carries an
+       `x-aperture-limits` block naming the configuration keys that bound it. Values live in
+       `docs/CONFIGURATION.md` as operator-tunable configuration; this contract names keys only.
+  license:
+    name: MIT
+    identifier: MIT
+  x-contract-version: "1.0"
+
+servers:
+  - url: /v1/aperture
+    description: |
+      The API is always mounted at the path prefix `/v1/aperture`.
+
+      **Web and mobile PWA targets** address it same-origin relative — the base URL is the empty
+      string and this path prefix is the whole URL.
+
+      **The desktop target** prefixes this path with the operator-configured endpoint, read at
+      runtime from OS secure storage. There is no compiled-in default endpoint, and no endpoint
+      literal appears anywhere in this contract or in any client bundle. The endpoint is supplied
+      by configuration under the key named in `docs/CONFIGURATION.md`.
+
+tags:
+  - name: meta
+    description: Liveness, readiness, and contract version. Unauthenticated, and deliberately dull.
+  - name: auth
+    description: |
+      Session establishment, refresh, teardown, and device management. The security half of this
+      group — cookie flags, session-id rotation, fail-closed `Origin`/`Sec-Fetch-Site` checking,
+      first-account bootstrap, and deep-link reservation — is specified in
+      `contracts/aperture-auth-v1.md`, which extends this group.
+  - name: threads
+    description: Workspaces, threads, and messages.
+  - name: stream
+    description: The single Server-Sent Events connection. Taxonomy in `aperture-events-v1.md`.
+  - name: attachments
+    description: |
+      Attachment upload, status, delete, and serving. Serving isolation — server-side MIME
+      sniffing, a fail-closed allowlist, `Content-Disposition: attachment`, sandbox CSP, and the
+      rule that SVG and HTML are never served inline — is specified in
+      `contracts/aperture-attachments-v1.md`, which extends this group.
+  - name: modules
+    description: Module capability descriptors. The shell renders a module only when its
+      capability is actually present.
+  - name: events
+    description: Context-bus publication from a client into the shared context stream.
+  - name: settings
+    description: User and workspace settings, under optimistic concurrency.
+  - name: admin
+    description: Administrative surfaces. Every operation here is authorization-gated and audited.
+
+security:
+  - sessionCookie: []
+  - bearerToken: []
+
+paths:
+
+  # ---------------------------------------------------------------------------
+  # meta
+  # ---------------------------------------------------------------------------
+
+  /health:
+    get:
+      tags: [meta]
+      operationId: getHealth
+      summary: Liveness probe.
+      description: |
+        Reports only whether this process is alive. It deliberately reveals nothing else: no
+        host, no build identifier, no upstream component version, no dependency status. The
+        infrastructure-leak rule applies to health endpoints exactly as it applies everywhere else.
+      security: []
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+      responses:
+        "200":
+          description: The process is alive.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  /ready:
+    get:
+      tags: [meta]
+      operationId: getReady
+      summary: Readiness probe.
+      description: |
+        Reports whether this process is ready to serve requests. Where a dependency is not ready
+        the response names the **capability** by its stable identifier and a human-readable
+        reason. It never names a host, an address, or an upstream product version.
+      security: []
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+      responses:
+        "200":
+          description: Ready to serve.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Readiness"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          description: Not ready. The body names the unready capabilities and why.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Readiness"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  /version:
+    get:
+      tags: [meta]
+      operationId: getVersion
+      summary: The contract version, and nothing else.
+      description: |
+        Returns the version of **this contract** that the server implements, in `major.minor`
+        form. It MUST NOT return a build hash, a commit id, a host name, a container identifier,
+        an operating-system string, or the version of any upstream component. Those are
+        infrastructure leaks, and a conformance test asserts their absence.
+
+        Clients compare this value — and the `X-Aperture-Contract-Version` header, which carries
+        the same value on every response — against the contract version they were generated
+        against. Skew classification and client behaviour are specified in `contracts/README.md`.
+      security: []
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+      responses:
+        "200":
+          description: The contract version.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [contract_version]
+                properties:
+                  contract_version:
+                    type: string
+                    pattern: '^[0-9]+\.[0-9]+$'
+                    description: The `major.minor` version of the Aperture API contract.
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  # ---------------------------------------------------------------------------
+  # auth
+  # ---------------------------------------------------------------------------
+
+  /auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: Establish a session.
+      description: |
+        Establishes a session for the calling target.
+
+        **Web and mobile PWA:** the response sets the session cookie — `__Host-` prefixed,
+        `HttpOnly`, `Secure`, `SameSite=Strict`, path `/`, no `Domain` attribute. The session id
+        is **rotated** on every successful login and on any privilege change; the previous id is
+        invalidated server-side, not merely unset on the client.
+
+        **Desktop:** the response returns a bearer token in the body and sets **no cookie**. A
+        cross-origin cookie cannot be `SameSite=Strict` and the flags are never loosened to make
+        one work.
+
+        The target is declared by the client and is not negotiable per request: a bearer session
+        is never accepted from a browser-origin request that also carries cookies.
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/OriginHeader"
+        - $ref: "#/components/parameters/SecFetchSiteHeader"
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+        max_json_depth: APERTURE_MAX_JSON_DEPTH
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Session established.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+            Set-Cookie:
+              description: |
+                Present for the web and PWA targets only. `__Host-` prefixed, `HttpOnly`,
+                `Secure`, `SameSite=Strict`, `Path=/`, and no `Domain` attribute. Absent for the
+                desktop target, which receives a bearer token in the body instead.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      operationId: refreshSession
+      summary: Refresh the current session.
+      description: |
+        Extends the current session. On the web target this rotates the cookie; on the desktop
+        target it mints a replacement bearer token and invalidates the previous one. A refresh
+        never widens privilege and never converts a bearer session into a cookie session or the
+        reverse.
+      parameters:
+        - $ref: "#/components/parameters/OriginHeader"
+        - $ref: "#/components/parameters/SecFetchSiteHeader"
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+      responses:
+        "200":
+          description: Session refreshed.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401":
+          $ref: "#/components/responses/AuthExpired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: End the current session.
+      description: |
+        Invalidates the current session **server-side**, not merely on the client, and clears the
+        session cookie where one exists.
+
+        Ending a session obliges the client to purge every local copy of the user's data for that
+        session: cached threads, the outbox, drafts, and any cached attachment content. A logged
+        out or revoked device must not remain a readable copy of the user's conversations.
+      parameters:
+        - $ref: "#/components/parameters/OriginHeader"
+        - $ref: "#/components/parameters/SecFetchSiteHeader"
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+      responses:
+        "204":
+          description: Session ended. Idempotent — ending an already-ended session also returns 204.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  /auth/session:
+    get:
+      tags: [auth]
+      operationId: getSession
+      summary: Introspect the current session.
+      description: |
+        Describes the current session to its own holder: the principal, the device record it is
+        bound to, and its expiry. It returns no token material, no signing key, and no
+        infrastructure identifier.
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+      responses:
+        "200":
+          description: The current session.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  /auth/devices:
+    get:
+      tags: [auth]
+      operationId: listDevices
+      summary: List the principal's devices.
+      description: Cursor-paginated. A device record names a label, a platform family, and
+        first/last seen timestamps — never an address, and never a network identifier.
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Sort"
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+        max_array_items: APERTURE_MAX_PAGE_ITEMS
+      responses:
+        "200":
+          description: A page of devices.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items, page]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Device"
+                  page:
+                    $ref: "#/components/schemas/PageInfo"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  /auth/devices/{deviceId}:
+    parameters:
+      - $ref: "#/components/parameters/DeviceId"
+    delete:
+      tags: [auth]
+      operationId: revokeDevice
+      summary: Revoke a device.
+      description: |
+        Invalidates every session bound to the device **immediately and server-side**. Revocation
+        is the hook a client's offline purge fires on: a revoked device must clear its cached
+        threads, outbox, drafts, and cached attachment content.
+
+        Revoking a device that does not exist, or that belongs to another principal, returns
+        `not-found` — never `forbidden`. An error code must not become an existence oracle.
+      parameters:
+        - $ref: "#/components/parameters/OriginHeader"
+        - $ref: "#/components/parameters/SecFetchSiteHeader"
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+      responses:
+        "204":
+          description: Device revoked.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  # ---------------------------------------------------------------------------
+  # threads
+  # ---------------------------------------------------------------------------
+
+  /workspaces:
+    get:
+      tags: [threads]
+      operationId: listWorkspaces
+      summary: List the principal's workspaces.
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Sort"
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+        max_array_items: APERTURE_MAX_PAGE_ITEMS
+      responses:
+        "200":
+          description: A page of workspaces.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items, page]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Workspace"
+                  page:
+                    $ref: "#/components/schemas/PageInfo"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  /threads:
+    get:
+      tags: [threads]
+      operationId: listThreads
+      summary: List threads.
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceIdQuery"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Sort"
+        - $ref: "#/components/parameters/Filter"
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+        max_array_items: APERTURE_MAX_PAGE_ITEMS
+      responses:
+        "200":
+          description: A page of threads.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items, page]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Thread"
+                  page:
+                    $ref: "#/components/schemas/PageInfo"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        default:
+          $ref: "#/components/responses/Problem"
+    post:
+      tags: [threads]
+      operationId: createThread
+      summary: Create a thread.
+      parameters:
+        - $ref: "#/components/parameters/OriginHeader"
+        - $ref: "#/components/parameters/SecFetchSiteHeader"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+        max_json_depth: APERTURE_MAX_JSON_DEPTH
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ThreadCreate"
+      responses:
+        "201":
+          description: Thread created.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Thread"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  /threads/{threadId}:
+    parameters:
+      - $ref: "#/components/parameters/ThreadId"
+    get:
+      tags: [threads]
+      operationId: getThread
+      summary: Fetch a thread.
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+      responses:
+        "200":
+          description: The thread.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Thread"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Problem"
+    patch:
+      tags: [threads]
+      operationId: updateThread
+      summary: Update a thread under optimistic concurrency.
+      description: |
+        `If-Match` is **required**. A request without it is rejected with `validation-failed`; a
+        request whose `If-Match` does not match the current representation is rejected with
+        `precondition-failed`. Last-write-wins is not available on this route.
+      parameters:
+        - $ref: "#/components/parameters/OriginHeader"
+        - $ref: "#/components/parameters/SecFetchSiteHeader"
+        - $ref: "#/components/parameters/IfMatchRequired"
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+        max_json_depth: APERTURE_MAX_JSON_DEPTH
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ThreadUpdate"
+      responses:
+        "200":
+          description: Thread updated.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Thread"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        default:
+          $ref: "#/components/responses/Problem"
+    delete:
+      tags: [threads]
+      operationId: deleteThread
+      summary: Delete a thread.
+      description: |
+        Deletes the thread and its messages. Attachments are workspace-owned and reference
+        counted: deleting a thread decrements the references its messages held and never deletes
+        attachment bytes directly.
+      parameters:
+        - $ref: "#/components/parameters/OriginHeader"
+        - $ref: "#/components/parameters/SecFetchSiteHeader"
+        - $ref: "#/components/parameters/IfMatchOptional"
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+      responses:
+        "204":
+          description: Thread deleted.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  /threads/{threadId}/messages:
+    parameters:
+      - $ref: "#/components/parameters/ThreadId"
+    get:
+      tags: [threads]
+      operationId: listMessages
+      summary: List messages in a thread.
+      description: |
+        Cursor-paginated. Every message object carries the mandatory `origin` discriminator. A
+        client renders attribution from `origin` alone; it never infers a speaker from the
+        content of a message.
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Sort"
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+        max_array_items: APERTURE_MAX_PAGE_ITEMS
+      responses:
+        "200":
+          description: A page of messages.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items, page]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Message"
+                  page:
+                    $ref: "#/components/schemas/PageInfo"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Problem"
+    post:
+      tags: [threads]
+      operationId: createMessage
+      summary: Send a message, starting a turn.
+      description: |
+        Creates a user message and starts a turn. The generated output arrives on the stream
+        (see `aperture-events-v1.md`), not in this response body: this route returns the created
+        message and the ids the client uses to demultiplex the turn's events.
+
+        `Idempotency-Key` is **required**. The client generates one opaque, high-entropy key per
+        **logical** send — not per HTTP attempt — and replays the same key on transport retry. A
+        repeat within the retention window replays the original recorded response; a repeat with
+        the same key and a different body is a `conflict`, never a second message. Detailed
+        dedupe semantics are specified in `contracts/aperture-idempotency-v1.md`.
+      parameters:
+        - $ref: "#/components/parameters/OriginHeader"
+        - $ref: "#/components/parameters/SecFetchSiteHeader"
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+        max_json_depth: APERTURE_MAX_JSON_DEPTH
+        max_array_items: APERTURE_MAX_MESSAGE_ATTACHMENTS
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageCreate"
+      responses:
+        "201":
+          description: Message accepted and a turn started.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageCreated"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/CapabilityUnavailable"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  /threads/{threadId}/turns/{turnId}:
+    parameters:
+      - $ref: "#/components/parameters/ThreadId"
+      - $ref: "#/components/parameters/TurnId"
+    get:
+      tags: [threads]
+      operationId: getTurn
+      summary: Fetch one turn's authoritative state.
+      description: |
+        The REST refetch a client performs after a `resync` event. It returns the turn's current
+        state and its messages in their authoritative form, so a client whose replay position
+        aged out can reconcile without reloading the whole thread.
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+      responses:
+        "200":
+          description: The turn.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Turn"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  /threads/{threadId}/turns/{turnId}/stop:
+    parameters:
+      - $ref: "#/components/parameters/ThreadId"
+      - $ref: "#/components/parameters/TurnId"
+    post:
+      tags: [threads]
+      operationId: stopTurn
+      summary: Explicit user stop — cancel a turn immediately and unconditionally.
+      description: |
+        An explicit user "stop generation". It cancels the turn **immediately and
+        unconditionally, regardless of subscriber refcount**.
+
+        This is a different action from a transport drop, and the two must never be conflated. A
+        client disconnecting does **not** cancel a turn: turns are refcounted by their
+        subscribers and are cancelled only when the refcount reaches zero and a grace window
+        elapses, so a second device watching the same turn keeps it alive. Only this route
+        cancels on the user's behalf.
+
+        The resulting stream event is a `message.end` whose terminal reason distinguishes an
+        explicit user stop from every other ending. See `aperture-events-v1.md`.
+      parameters:
+        - $ref: "#/components/parameters/OriginHeader"
+        - $ref: "#/components/parameters/SecFetchSiteHeader"
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+      responses:
+        "202":
+          description: Cancellation accepted. The terminal event arrives on the stream.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  # ---------------------------------------------------------------------------
+  # stream
+  # ---------------------------------------------------------------------------
+
+  /stream:
+    get:
+      tags: [stream]
+      operationId: openStream
+      summary: Open the Server-Sent Events connection.
+      description: |
+        Opens **the** stream. A stream is **one connection** — not one thread and not one turn.
+        `thread_id` and the message id demultiplex many threads and many turns inside a single
+        connection, and `seq` is a single monotonic sequence per connection covering **all**
+        event types.
+
+        Server-Sent Events are not naturally expressible in OpenAPI: only the media type and the
+        parameters can be described here. The **normative** event taxonomy, ordering guarantees,
+        provenance rules, replay bounds, and resume semantics live in
+        `contracts/aperture-events-v1.md`, and the two documents are the same contract read from
+        two directions. `#/components/schemas/StreamEvent` is the machine-readable form of that
+        taxonomy and is what a conformance test validates event frames against.
+
+        **Resume.** A client reconnects with `Last-Event-ID` set to the last `seq` it processed.
+        Within the bounded replay window the server replays from that position. Beyond it the
+        server emits a `resync` event naming the lost range, and the client refetches over REST.
+        Resume is never unbounded.
+
+        **Anti-buffering headers are mandatory on this route**, because a buffering reverse proxy
+        turns a token stream into a wall of text delivered at the end:
+        `Content-Type: text/event-stream; charset=utf-8`, `Cache-Control: no-cache, no-store,
+        no-transform`, `Connection: keep-alive`, and `X-Accel-Buffering: no`. A deployment that
+        cannot honour `no-transform` end-to-end is misconfigured, and that is an operator
+        problem, not a reason to relax the contract. The server additionally emits a `heartbeat`
+        event on an interval named by `APERTURE_STREAM_HEARTBEAT_SECONDS` so that an idle
+        connection is distinguishable from a dead one.
+      parameters:
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: |
+            The last `seq` the client processed on a previous connection. Standard SSE resume.
+            Absent on a first connection.
+          schema:
+            type: string
+        - name: thread_id
+          in: query
+          required: false
+          description: |
+            An optional server-side filter narrowing the connection to one thread. It is a
+            **filter, not a scope**: it does not make the stream per-thread, does not change the
+            sequence domain, and does not create a second connection model. Omitting it is the
+            normal case.
+          schema:
+            $ref: "#/components/schemas/Id"
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+        max_connections_per_user: APERTURE_STREAM_MAX_CONNECTIONS_PER_USER
+        replay_window_events: APERTURE_STREAM_REPLAY_MAX_EVENTS
+        replay_window_seconds: APERTURE_STREAM_REPLAY_MAX_SECONDS
+        heartbeat_seconds: APERTURE_STREAM_HEARTBEAT_SECONDS
+      responses:
+        "200":
+          description: |
+            The event stream. Each frame is one `StreamEvent` serialized as JSON in the SSE
+            `data:` field, with the SSE `id:` field carrying `seq` and the SSE `event:` field
+            carrying the event `type`.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+            Cache-Control:
+              description: MUST be `no-cache, no-store, no-transform`.
+              schema:
+                type: string
+            Connection:
+              description: MUST be `keep-alive`.
+              schema:
+                type: string
+            X-Accel-Buffering:
+              description: MUST be `no`, to defeat reverse-proxy response buffering.
+              schema:
+                type: string
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/StreamEvent"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/CapabilityUnavailable"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  # ---------------------------------------------------------------------------
+  # attachments
+  # ---------------------------------------------------------------------------
+
+  /attachments:
+    post:
+      tags: [attachments]
+      operationId: createAttachment
+      summary: Upload an attachment.
+      description: |
+        Uploads an attachment into the workspace. Attachments are **workspace-owned** objects
+        whose lifetime is governed by a reference count, never by any single referring message or
+        thread.
+
+        The client-supplied `Content-Type` and filename are recorded as **untrusted metadata**.
+        The stored content type is determined by server-side byte sniffing on ingest and is the
+        only thing that ever selects a response type on the serve route.
+
+        Size and count limits are declared here, not discovered at runtime: a request exceeding
+        them is rejected with `payload-too-large` before the body is consumed.
+      parameters:
+        - $ref: "#/components/parameters/OriginHeader"
+        - $ref: "#/components/parameters/SecFetchSiteHeader"
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      x-aperture-limits:
+        max_body_bytes: APERTURE_ATTACHMENT_MAX_BYTES
+        max_attachments_per_workspace: APERTURE_ATTACHMENT_MAX_PER_WORKSPACE
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                workspace_id:
+                  $ref: "#/components/schemas/Id"
+                filename:
+                  type: string
+                  description: Untrusted client metadata. Recorded, sanitized, never trusted to
+                    select a response type.
+                  maxLength: 255
+            encoding:
+              file:
+                contentType: application/octet-stream
+      responses:
+        "201":
+          description: Attachment stored.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Attachment"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  /attachments/{attachmentId}:
+    parameters:
+      - $ref: "#/components/parameters/AttachmentId"
+    get:
+      tags: [attachments]
+      operationId: getAttachment
+      summary: Fetch attachment metadata and processing status.
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+      responses:
+        "200":
+          description: Attachment metadata.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Attachment"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Problem"
+    delete:
+      tags: [attachments]
+      operationId: deleteAttachment
+      summary: Drop this principal's reference to an attachment.
+      description: Decrements the reference count. Bytes are reclaimed only when the count
+        reaches zero.
+      parameters:
+        - $ref: "#/components/parameters/OriginHeader"
+        - $ref: "#/components/parameters/SecFetchSiteHeader"
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+      responses:
+        "204":
+          description: Reference dropped.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  /attachments/{attachmentId}/content:
+    parameters:
+      - $ref: "#/components/parameters/AttachmentId"
+    get:
+      tags: [attachments]
+      operationId: getAttachmentContent
+      summary: Serve attachment bytes under isolation.
+      description: |
+        Serves the stored bytes. This is where stored cross-site scripting lives, so the rules
+        are fail-closed and stated in the contract rather than left to an implementation:
+
+        - The response type is chosen from the **sniffed** content type only. The client-declared
+          `Content-Type` and the filename extension never influence it.
+        - Only allowlisted types are ever served with their real type. Anything unrecognized is
+          served as a generic binary download. Denylists are forbidden.
+        - **SVG and HTML are never served inline, under any condition.** There is no trusted
+          uploader exception and no query parameter that re-enables inline rendering.
+        - Every response carries `Content-Disposition: attachment` (except allowlisted
+          inline-safe raster types), `Content-Security-Policy: sandbox; default-src 'none'`,
+          `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and
+          `Cache-Control: private, no-store`.
+        - Filenames in `Content-Disposition` are sanitized and encoded: no CRLF, no directory
+          separators, no unencoded non-ASCII.
+        - An attachment id is not a capability. Ids are unguessable, access is authorized per
+          attachment, and a cross-principal fetch returns `not-found`, never `forbidden`.
+
+        The full serving model is specified in `contracts/aperture-attachments-v1.md`.
+      x-aperture-limits:
+        max_body_bytes: APERTURE_ATTACHMENT_MAX_BYTES
+      responses:
+        "200":
+          description: The attachment bytes, served under the isolation header set.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+            Content-Disposition:
+              description: |
+                `attachment; filename*=UTF-8''<sanitized>` for everything except allowlisted
+                inline-safe raster image types. Always `attachment` for SVG and HTML.
+              schema:
+                type: string
+            Content-Security-Policy:
+              description: MUST be `sandbox; default-src 'none'`.
+              schema:
+                type: string
+            X-Content-Type-Options:
+              description: MUST be `nosniff`.
+              schema:
+                type: string
+            Referrer-Policy:
+              description: MUST be `no-referrer`.
+              schema:
+                type: string
+            Cache-Control:
+              description: MUST be `private, no-store` for authenticated content.
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "416":
+          description: The requested range is not satisfiable. The isolation header set is
+            unchanged on this response.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  # ---------------------------------------------------------------------------
+  # modules
+  # ---------------------------------------------------------------------------
+
+  /modules:
+    get:
+      tags: [modules]
+      operationId: listModules
+      summary: List module capability descriptors.
+      description: |
+        Returns one descriptor per module. The shell's navigation derives entirely from these
+        descriptors — no module is hardcoded into the client — and a module renders only when its
+        capability is actually `available`. An unknown capability state fails **closed** to
+        `unavailable`.
+
+        Capability is probed through the sanctioned backend door, never by the client and never
+        by pinging a service address. A descriptor names capabilities and reasons; it never names
+        a host, an address, or an upstream component version.
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+        max_array_items: APERTURE_MAX_PAGE_ITEMS
+        revalidate_ttl_seconds: APERTURE_MODULE_PROBE_TTL_SECONDS
+      responses:
+        "200":
+          description: The module descriptors.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ModuleDescriptor"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  /modules/{moduleId}:
+    parameters:
+      - $ref: "#/components/parameters/ModuleId"
+    get:
+      tags: [modules]
+      operationId: getModule
+      summary: Fetch one module descriptor.
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+      responses:
+        "200":
+          description: The descriptor.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModuleDescriptor"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  # ---------------------------------------------------------------------------
+  # events
+  # ---------------------------------------------------------------------------
+
+  /events:
+    post:
+      tags: [events]
+      operationId: publishContextEvent
+      summary: Publish a context-bus event.
+      description: |
+        Publishes a client-observed context event — a selection, a focus change, a playback
+        position — onto the shared context bus. Subscribers observe it as a `context` event on
+        the stream, in the same per-connection sequence space as every other event type. There is
+        no second stream and no second sequence counter.
+
+        A client-published event is always recorded with `origin: user` or `origin: system`
+        according to what produced it. A client may never publish an event claiming
+        `origin: assistant` or `origin: tool`; the server rejects such a request with
+        `validation-failed`. Provenance is a server-side determination.
+
+        The topic taxonomy and payload schemas are specified in
+        `contracts/aperture-context-bus-v1.md`.
+      parameters:
+        - $ref: "#/components/parameters/OriginHeader"
+        - $ref: "#/components/parameters/SecFetchSiteHeader"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      x-aperture-limits:
+        max_body_bytes: APERTURE_CONTEXT_MAX_PAYLOAD_BYTES
+        max_json_depth: APERTURE_MAX_JSON_DEPTH
+        publish_rate_limit: APERTURE_CONTEXT_PUBLISH_RATE_LIMIT
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContextPublish"
+      responses:
+        "202":
+          description: Accepted for publication.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  # ---------------------------------------------------------------------------
+  # settings
+  # ---------------------------------------------------------------------------
+
+  /settings:
+    get:
+      tags: [settings]
+      operationId: getSettings
+      summary: Fetch the principal's settings.
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+      responses:
+        "200":
+          description: The settings, with an `ETag` for optimistic concurrency.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Settings"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        default:
+          $ref: "#/components/responses/Problem"
+    put:
+      tags: [settings]
+      operationId: replaceSettings
+      summary: Replace settings under optimistic concurrency.
+      description: "`If-Match` is required; see `PATCH /threads/{threadId}` for the same rule."
+      parameters:
+        - $ref: "#/components/parameters/OriginHeader"
+        - $ref: "#/components/parameters/SecFetchSiteHeader"
+        - $ref: "#/components/parameters/IfMatchRequired"
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+        max_json_depth: APERTURE_MAX_JSON_DEPTH
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Settings"
+      responses:
+        "200":
+          description: Settings replaced.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Settings"
+        "400":
+          $ref: "#/components/responses/ValidationFailed"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  # ---------------------------------------------------------------------------
+  # admin
+  # ---------------------------------------------------------------------------
+
+  /admin/users:
+    get:
+      tags: [admin]
+      operationId: adminListUsers
+      summary: List users.
+      description: Administrative. Authorization-gated and audited. A non-administrator receives
+        `not-found`, never `forbidden`, so the route's existence is not an oracle.
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Sort"
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+        max_array_items: APERTURE_MAX_PAGE_ITEMS
+      responses:
+        "200":
+          description: A page of users.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items, page]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/User"
+                  page:
+                    $ref: "#/components/schemas/PageInfo"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Problem"
+
+  /admin/audit:
+    get:
+      tags: [admin]
+      operationId: adminListAuditEvents
+      summary: Read the audit log.
+      description: |
+        Cursor-paginated audit records. Arguments recorded in an audit entry are sanitized before
+        storage: keys and tokens are redacted and oversized values are truncated with an explicit
+        marker. An audit record never contains an infrastructure identifier.
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Sort"
+        - $ref: "#/components/parameters/Filter"
+      x-aperture-limits:
+        max_body_bytes: APERTURE_MAX_REQUEST_BYTES
+        max_array_items: APERTURE_MAX_PAGE_ITEMS
+      responses:
+        "200":
+          description: A page of audit records.
+          headers:
+            X-Aperture-Contract-Version:
+              $ref: "#/components/headers/ContractVersion"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items, page]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AuditRecord"
+                  page:
+                    $ref: "#/components/schemas/PageInfo"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Problem"
+
+components:
+
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: __Host-aperture_session
+      description: |
+        **Web and mobile PWA targets only.** The session cookie is `__Host-` prefixed, `HttpOnly`,
+        `Secure`, `SameSite=Strict`, `Path=/`, with no `Domain` attribute. It is not readable by
+        client JavaScript, by design. The desktop target never uses a cookie. See
+        `contracts/aperture-transport-v1.md`.
+    bearerToken:
+      type: http
+      scheme: bearer
+      description: |
+        **Desktop target only.** The bearer token is held in OS secure storage and attached by
+        the native client. A bearer session is never accepted from a browser-origin request that
+        carries cookies, and a cookie session is never accepted with a non-empty base URL. See
+        `contracts/aperture-transport-v1.md`.
+
+  headers:
+    ContractVersion:
+      description: |
+        The `major.minor` version of the API contract this server implements. It carries the
+        contract version and **nothing else** — never a build hash, commit id, host name, or
+        upstream component version. Present on every response, including error responses. Client
+        skew classification is specified in `contracts/README.md`.
+      required: true
+      schema:
+        type: string
+        pattern: '^[0-9]+\.[0-9]+$'
+    ETag:
+      description: The opaque entity tag for optimistic concurrency. Supply it back in `If-Match`
+        on the next mutation of this resource.
+      schema:
+        type: string
+    RetryAfter:
+      description: Seconds to wait before retrying. Clients honour it; they do not invent their
+        own shorter interval.
+      schema:
+        type: integer
+        minimum: 0
+
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: |
+        An opaque cursor from a previous page's `page.next_cursor`. Cursors are opaque: a client
+        never constructs, parses, decodes, or arithmetically manipulates one. Offset pagination
+        is not offered on any route.
+      schema:
+        type: string
+        maxLength: 512
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Page size. The server clamps to the maximum named by `APERTURE_MAX_PAGE_ITEMS`
+        and reports the applied value implicitly through the returned page.
+      schema:
+        type: integer
+        minimum: 1
+    Sort:
+      name: sort
+      in: query
+      required: false
+      description: |
+        A comma-separated list of fields, each optionally prefixed with `-` for descending —
+        for example `-updated_at,name`. Only fields documented as sortable for the route are
+        accepted; an unknown field is `validation-failed`, never silently ignored.
+      schema:
+        type: string
+        maxLength: 256
+    Filter:
+      name: filter
+      in: query
+      required: false
+      description: |
+        A comma-separated list of `field:value` predicates, ANDed. Only fields documented as
+        filterable for the route are accepted; an unknown field or operator is
+        `validation-failed`, never silently ignored. Filtering is fail-closed, never best-effort.
+      schema:
+        type: string
+        maxLength: 512
+    IfMatchRequired:
+      name: If-Match
+      in: header
+      required: true
+      description: |
+        The `ETag` of the representation the client believes it is modifying. **Required.** A
+        missing header is `validation-failed`; a stale one is `precondition-failed`. `If-Match: *`
+        is **not** accepted as a concurrency bypass on any route.
+      schema:
+        type: string
+    IfMatchOptional:
+      name: If-Match
+      in: header
+      required: false
+      description: Optional here. When supplied it is enforced exactly as on the required routes.
+      schema:
+        type: string
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        An opaque, high-entropy, client-generated key identifying one **logical** operation. It
+        is replayed unchanged across transport retries of that operation and regenerated for a
+        user-initiated resend, which is a new logical operation.
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 128
+        pattern: '^[A-Za-z0-9_-]+$'
+    IdempotencyKeyRequired:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        **Required on this route.** A request without it is rejected with `validation-failed` and
+        is never silently accepted. Same key plus same body within the retention window replays
+        the recorded response; same key plus a different body is `conflict`; a duplicate arriving
+        while the first is still in flight is `conflict`, never a second upstream turn.
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 128
+        pattern: '^[A-Za-z0-9_-]+$'
+    OriginHeader:
+      name: Origin
+      in: header
+      required: false
+      description: |
+        Checked on every mutating route as CSRF defence, together with `Sec-Fetch-Site`. The check
+        is a fail-closed **allowlist**: an absent, unrecognized, or unparseable value is rejected.
+        A denylist is never used. See `contracts/aperture-auth-v1.md`.
+      schema:
+        type: string
+    SecFetchSiteHeader:
+      name: Sec-Fetch-Site
+      in: header
+      required: false
+      description: |
+        The second half of the fail-closed CSRF check. A browser sending neither this nor `Origin`
+        is rejected; that is deliberate and costs a legacy-browser class Aperture does not support.
+      schema:
+        type: string
+    ThreadId:
+      name: threadId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Id"
+    TurnId:
+      name: turnId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Id"
+    DeviceId:
+      name: deviceId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Id"
+    AttachmentId:
+      name: attachmentId
+      in: path
+      required: true
+      description: An unguessable identifier. Possession of an id is not a capability; every
+        access is separately authorized.
+      schema:
+        $ref: "#/components/schemas/Id"
+    ModuleId:
+      name: moduleId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[a-z][a-z0-9-]{0,63}$'
+    WorkspaceIdQuery:
+      name: workspace_id
+      in: query
+      required: false
+      schema:
+        $ref: "#/components/schemas/Id"
+
+  responses:
+    Problem:
+      description: |
+        An RFC-9457 problem-details response. Every error in this API uses this shape and carries
+        a stable `type` URN. The full taxonomy and each URN's user-facing meaning and recovery
+        action are specified in `contracts/aperture-errors-v1.md`.
+      headers:
+        X-Aperture-Contract-Version:
+          $ref: "#/components/headers/ContractVersion"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    ValidationFailed:
+      description: "`urn:aperture:error:validation-failed` — the request was malformed or violated
+        a documented constraint."
+      headers:
+        X-Aperture-Contract-Version:
+          $ref: "#/components/headers/ContractVersion"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    AuthRequired:
+      description: "`urn:aperture:error:auth-required` — no valid session. The client
+        re-authenticates; it does not retry blindly."
+      headers:
+        X-Aperture-Contract-Version:
+          $ref: "#/components/headers/ContractVersion"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    AuthExpired:
+      description: "`urn:aperture:error:auth-expired` — the session existed and has expired.
+        Distinct from `auth-required` so the client can refresh rather than prompt."
+      headers:
+        X-Aperture-Contract-Version:
+          $ref: "#/components/headers/ContractVersion"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Forbidden:
+      description: |
+        `urn:aperture:error:forbidden` — authenticated but not permitted. Used only where the
+        resource's existence is already known to the caller. Where it is not, the API returns
+        `not-found` instead, so that an error code never becomes an existence oracle.
+      headers:
+        X-Aperture-Contract-Version:
+          $ref: "#/components/headers/ContractVersion"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    NotFound:
+      description: "`urn:aperture:error:not-found` — no such resource, or none this principal may
+        see. Deliberately indistinguishable."
+      headers:
+        X-Aperture-Contract-Version:
+          $ref: "#/components/headers/ContractVersion"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Conflict:
+      description: "`urn:aperture:error:conflict` — an idempotency-key reuse with a different
+        body, a duplicate still in flight, or a state conflict."
+      headers:
+        X-Aperture-Contract-Version:
+          $ref: "#/components/headers/ContractVersion"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    PreconditionFailed:
+      description: "`urn:aperture:error:precondition-failed` — the supplied `If-Match` does not
+        match. The client refetches and reapplies; it never retries blind."
+      headers:
+        X-Aperture-Contract-Version:
+          $ref: "#/components/headers/ContractVersion"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    PayloadTooLarge:
+      description: "`urn:aperture:error:payload-too-large` — the request exceeded a limit declared
+        in this contract."
+      headers:
+        X-Aperture-Contract-Version:
+          $ref: "#/components/headers/ContractVersion"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    RateLimited:
+      description: "`urn:aperture:error:rate-limited` — too many requests. `Retry-After` is
+        authoritative."
+      headers:
+        X-Aperture-Contract-Version:
+          $ref: "#/components/headers/ContractVersion"
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    CapabilityUnavailable:
+      description: |
+        `urn:aperture:error:capability-unavailable` — a backend capability is not currently
+        reachable. The BFF degrades rather than crashing, and the client renders an explained
+        inert state rather than a broken screen. The response names the capability and a reason,
+        never a host or an address.
+      headers:
+        X-Aperture-Contract-Version:
+          $ref: "#/components/headers/ContractVersion"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    InternalError:
+      description: |
+        `urn:aperture:error:internal` — an unexpected server-side failure. The body carries the
+        stable class, a safe message, and a `correlation_id`. It never carries a stack frame, an
+        upstream error string, a file path, or any infrastructure identifier.
+      headers:
+        X-Aperture-Contract-Version:
+          $ref: "#/components/headers/ContractVersion"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    ServiceUnavailable:
+      description: "`urn:aperture:error:capability-unavailable` — the process is not able to serve."
+      headers:
+        X-Aperture-Contract-Version:
+          $ref: "#/components/headers/ContractVersion"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+
+  schemas:
+
+    Id:
+      type: string
+      description: An opaque, unguessable identifier. Clients treat ids as opaque strings and
+        never parse, order, or derive meaning from them.
+      minLength: 1
+      maxLength: 128
+      pattern: '^[A-Za-z0-9_-]+$'
+
+    Timestamp:
+      type: string
+      format: date-time
+      description: |
+        UTC ISO-8601 with an explicit offset, for example `2026-08-01T09:41:00Z`. A local-time
+        string never appears on the wire; rendering into the viewer's local zone is a client
+        concern. Timestamps are for **display and audit only** — they are never used to decide
+        ordering, replay position, or eviction. That is what `seq` is for.
+
+    Origin:
+      type: string
+      description: |
+        **The provenance discriminator. Mandatory on every stream event and every stored
+        message.**
+
+        - `assistant` — produced by the assistant's own generation.
+        - `tool` — produced by a tool invocation, including everything a tool returned.
+        - `system` — produced by the platform: lifecycle, presence, errors, resync.
+        - `user` — produced by a human principal.
+
+        **Clients derive visual voice, framing, labelling, styling, and screen-reader
+        announcement from this field and the event variant ONLY — never from content.** No
+        sniffing, no heuristics, no "the text begins with a name so it must be the speaker".
+
+        It describes *who produced this object*, not what the object talks about: a system event
+        reporting a tool failure is `origin: system`, not `origin: tool`.
+
+        There is no default, no fallback, and no `other` escape hatch. An object whose `origin` is
+        absent or outside this set is **rejected at deserialization, never coerced** — a defaulted
+        `origin` would silently launder a tool payload into assistant attribution, which is
+        exactly the prompt-injection path this field exists to close. A fifth value requires a
+        contract amendment and an operator decision.
+      enum: [assistant, tool, system, user]
+
+    EventType:
+      type: string
+      description: |
+        The complete v1 stream event taxonomy. This enum and the taxonomy table in
+        `contracts/aperture-events-v1.md` are the same list, and a conformance test asserts they
+        match exactly — an addition on either side without the other fails the build.
+      enum:
+        - token
+        - message.start
+        - message.end
+        - tool.call
+        - tool.result
+        - thinking
+        - error
+        - context
+        - presence
+        - resync
+        - heartbeat
+
+    PageInfo:
+      type: object
+      additionalProperties: false
+      required: [has_more]
+      description: >-
+        Cursor pagination envelope. Total counts are deliberately not returned: they cost a
+        second query and go stale immediately.
+      properties:
+        next_cursor:
+          type: [string, "null"]
+          maxLength: 512
+          description: Opaque. Pass back as `cursor`. `null` when there is no next page.
+        has_more:
+          type: boolean
+
+    Problem:
+      type: object
+      description: |
+        RFC-9457 problem details.
+
+        **Redaction is mandatory.** A problem-details body must never contain an internal host,
+        address, port, file path, token, stack frame, or verbatim upstream error string. The
+        server maps the failure to a stable class and a safe message; the detail goes to the
+        server log keyed by `correlation_id`, which the response echoes so an operator can join
+        the two.
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: |
+            A stable URN of the form `urn:aperture:error:<class>`. It is part of the contract:
+            clients switch on it, so it is never reworded, re-cased, or repurposed. Full taxonomy
+            in `contracts/aperture-errors-v1.md`.
+          examples:
+            - urn:aperture:error:validation-failed
+            - urn:aperture:error:auth-required
+            - urn:aperture:error:auth-expired
+            - urn:aperture:error:forbidden
+            - urn:aperture:error:not-found
+            - urn:aperture:error:conflict
+            - urn:aperture:error:precondition-failed
+            - urn:aperture:error:payload-too-large
+            - urn:aperture:error:rate-limited
+            - urn:aperture:error:capability-unavailable
+            - urn:aperture:error:upstream-timeout
+            - urn:aperture:error:upstream-error
+            - urn:aperture:error:contract-version-unsupported
+            - urn:aperture:error:internal
+        title:
+          type: string
+          description: A short, stable, human-readable summary of the error class. Safe to log.
+          maxLength: 200
+        status:
+          type: integer
+          minimum: 100
+          maximum: 599
+        detail:
+          type: string
+          description: A safe, class-level explanation. Never a raw upstream message.
+          maxLength: 1000
+        instance:
+          type: string
+          format: uri-reference
+          description: A relative reference to the failing operation. Never an absolute URL.
+        correlation_id:
+          $ref: "#/components/schemas/Id"
+        retry_after_seconds:
+          type: integer
+          minimum: 0
+          description: Present on `rate-limited` and on retryable upstream classes.
+        capability:
+          type: string
+          description: Present on `capability-unavailable` — the capability's stable identifier,
+            never a host or an address.
+          maxLength: 128
+        errors:
+          type: array
+          description: Present on `validation-failed`. Field paths are escaped, never echoed raw.
+          maxItems: 100
+          items:
+            type: object
+            additionalProperties: false
+            required: [pointer, message]
+            properties:
+              pointer:
+                type: string
+                maxLength: 256
+              message:
+                type: string
+                maxLength: 500
+
+    Readiness:
+      type: object
+      additionalProperties: false
+      required: [ready, capabilities]
+      properties:
+        ready:
+          type: boolean
+        capabilities:
+          type: array
+          maxItems: 64
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, state]
+            properties:
+              id:
+                type: string
+                maxLength: 128
+              state:
+                $ref: "#/components/schemas/CapabilityState"
+              reason:
+                type: string
+                description: Human-readable and free of infrastructure identifiers.
+                maxLength: 300
+
+    CapabilityState:
+      type: string
+      description: |
+        A capability's state. An unrecognized value from a newer server is treated as
+        `unavailable` — capability parsing fails **closed**, never open.
+      enum: [available, degraded, unavailable]
+
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [target]
+      properties:
+        target:
+          type: string
+          description: |
+            The client target, which fixes the auth mechanism. `web` and `pwa` receive a cookie;
+            `desktop` receives a bearer token. The mechanism is never negotiated per request and
+            never mixed.
+          enum: [web, pwa, desktop]
+        credentials:
+          type: object
+          description: Credential material. Never logged, never echoed, never included in any
+            error body.
+          additionalProperties: true
+        device_label:
+          type: string
+          description: A human-chosen label for the device record. Free text; never an address.
+          maxLength: 100
+
+    LoginResponse:
+      type: object
+      additionalProperties: false
+      required: [session]
+      properties:
+        session:
+          $ref: "#/components/schemas/Session"
+        access_token:
+          type: string
+          description: |
+            Present for the `desktop` target **only**. The native client stores it in OS secure
+            storage. It is never returned to a browser target, never placed in a cookie, and never
+            written to any client-side persistent store other than the platform keystore.
+          maxLength: 4096
+        expires_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    Session:
+      type: object
+      additionalProperties: false
+      required: [id, principal_id, target, expires_at]
+      properties:
+        id:
+          $ref: "#/components/schemas/Id"
+        principal_id:
+          $ref: "#/components/schemas/Id"
+        device_id:
+          $ref: "#/components/schemas/Id"
+        target:
+          type: string
+          enum: [web, pwa, desktop]
+        roles:
+          type: array
+          maxItems: 32
+          items:
+            type: string
+            maxLength: 64
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        expires_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    Device:
+      type: object
+      additionalProperties: false
+      required: [id, label, target, created_at]
+      properties:
+        id:
+          $ref: "#/components/schemas/Id"
+        label:
+          type: string
+          maxLength: 100
+        target:
+          type: string
+          enum: [web, pwa, desktop]
+        platform_family:
+          type: string
+          description: A coarse platform family for display only. Never a device fingerprint and
+            never a network identifier.
+          maxLength: 64
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        last_seen_at:
+          $ref: "#/components/schemas/Timestamp"
+        current:
+          type: boolean
+          description: True for the device making the request.
+
+    User:
+      type: object
+      additionalProperties: false
+      required: [id, display_name]
+      properties:
+        id:
+          $ref: "#/components/schemas/Id"
+        display_name:
+          type: string
+          maxLength: 100
+        roles:
+          type: array
+          maxItems: 32
+          items:
+            type: string
+            maxLength: 64
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    Workspace:
+      type: object
+      additionalProperties: false
+      required: [id, name, created_at]
+      properties:
+        id:
+          $ref: "#/components/schemas/Id"
+        name:
+          type: string
+          maxLength: 200
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        updated_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    Thread:
+      type: object
+      additionalProperties: false
+      required: [id, workspace_id, created_at]
+      properties:
+        id:
+          $ref: "#/components/schemas/Id"
+        workspace_id:
+          $ref: "#/components/schemas/Id"
+        title:
+          type: [string, "null"]
+          maxLength: 300
+        parent_thread_id:
+          type: [string, "null"]
+          description: Set when this thread was branched from another. A branch adds references
+            to the ancestor's attachments; it never copies bytes.
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        updated_at:
+          $ref: "#/components/schemas/Timestamp"
+        message_count:
+          type: integer
+          minimum: 0
+
+    ThreadCreate:
+      type: object
+      additionalProperties: false
+      required: [workspace_id]
+      properties:
+        workspace_id:
+          $ref: "#/components/schemas/Id"
+        title:
+          type: string
+          maxLength: 300
+        parent_thread_id:
+          $ref: "#/components/schemas/Id"
+
+    ThreadUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        title:
+          type: [string, "null"]
+          maxLength: 300
+
+    Message:
+      type: object
+      additionalProperties: false
+      required: [id, thread_id, origin, created_at]
+      description: |
+        A stored message. **`origin` is mandatory**, exactly as it is on stream events, and it is
+        the sole source of attribution: a client renders who is speaking from `origin`, never from
+        the message's content. A message with `origin: tool` is rendered as a tool result no
+        matter what bytes it contains — including bytes shaped like an assistant message, an SSE
+        frame, or an event envelope. Such content stays inert data.
+      properties:
+        id:
+          $ref: "#/components/schemas/Id"
+        thread_id:
+          $ref: "#/components/schemas/Id"
+        turn_id:
+          $ref: "#/components/schemas/Id"
+        origin:
+          $ref: "#/components/schemas/Origin"
+        content:
+          type: string
+          description: The message body. Untrusted for attribution purposes under all
+            circumstances.
+        content_format:
+          type: string
+          enum: [text, markdown]
+        attachments:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/Id"
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        edited_at:
+          type: [string, "null"]
+          format: date-time
+
+    MessageCreate:
+      type: object
+      additionalProperties: false
+      required: [content]
+      properties:
+        content:
+          type: string
+          description: >-
+            The user's text. The server records it with `origin: user`; the client cannot
+            assert an origin.
+        content_format:
+          type: string
+          enum: [text, markdown]
+        attachments:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/Id"
+
+    MessageCreated:
+      type: object
+      additionalProperties: false
+      required: [message, turn_id]
+      description: The created user message plus the ids needed to demultiplex the turn's events
+        on the single stream connection.
+      properties:
+        message:
+          $ref: "#/components/schemas/Message"
+        turn_id:
+          $ref: "#/components/schemas/Id"
+        assistant_message_id:
+          $ref: "#/components/schemas/Id"
+
+    Turn:
+      type: object
+      additionalProperties: false
+      required: [id, thread_id, state]
+      properties:
+        id:
+          $ref: "#/components/schemas/Id"
+        thread_id:
+          $ref: "#/components/schemas/Id"
+        state:
+          type: string
+          enum: [running, completed, cancelled, failed]
+        terminal_reason:
+          type: [string, "null"]
+          description: |
+            Why the turn ended. `stopped_by_user` is an explicit user stop; `abandoned` is a
+            refcount-zero expiry after the grace window. The two are deliberately distinct — a
+            transport drop is not a user decision.
+          enum: [completed, stopped_by_user, abandoned, upstream_error, upstream_timeout, null]
+        messages:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/Message"
+        started_at:
+          $ref: "#/components/schemas/Timestamp"
+        ended_at:
+          type: [string, "null"]
+          format: date-time
+
+    Attachment:
+      type: object
+      additionalProperties: false
+      required: [id, workspace_id, status, byte_size, created_at]
+      properties:
+        id:
+          $ref: "#/components/schemas/Id"
+        workspace_id:
+          $ref: "#/components/schemas/Id"
+        filename:
+          type: string
+          description: Sanitized. Never used to select a response type.
+          maxLength: 255
+        sniffed_content_type:
+          type: string
+          description: The server-determined content type. The **only** thing that selects a
+            response type on the serve route.
+          maxLength: 128
+        declared_content_type:
+          type: string
+          description: What the client claimed. Recorded as untrusted metadata and never acted on.
+          maxLength: 128
+        serve_disposition:
+          type: string
+          description: How this attachment will be served. `attachment` for everything except
+            allowlisted inline-safe raster types. Always `attachment` for SVG and HTML.
+          enum: [attachment, inline]
+        byte_size:
+          type: integer
+          minimum: 0
+        status:
+          type: string
+          enum: [pending, ready, failed]
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    ModuleDescriptor:
+      type: object
+      additionalProperties: false
+      required: [id, display_name, state]
+      description: |
+        One module's capability descriptor. The shell's navigation derives from these and nothing
+        else. `state: available` renders the module; `degraded` renders it with a banner;
+        `unavailable` renders an inert tile carrying `reason` — never a broken screen and never a
+        blank route.
+      properties:
+        id:
+          type: string
+          pattern: '^[a-z][a-z0-9-]{0,63}$'
+        display_name:
+          type: string
+          maxLength: 100
+        icon_token:
+          type: string
+          description: A design-system token name, never an asset URL.
+          maxLength: 64
+        state:
+          $ref: "#/components/schemas/CapabilityState"
+        reason:
+          type: string
+          description: Required in practice whenever `state` is not `available`. Human-readable
+            and free of infrastructure identifiers.
+          maxLength: 300
+        routes:
+          type: array
+          maxItems: 64
+          items:
+            type: string
+            description: A client-side route path this module claims. Relative, never absolute.
+            maxLength: 128
+        publishes_topics:
+          type: array
+          maxItems: 64
+          items:
+            type: string
+            maxLength: 128
+        consumes_topics:
+          type: array
+          maxItems: 64
+          items:
+            type: string
+            maxLength: 128
+
+    ContextPublish:
+      type: object
+      additionalProperties: false
+      required: [topic, payload]
+      properties:
+        topic:
+          type: string
+          description: A context-bus topic from the taxonomy in
+            `contracts/aperture-context-bus-v1.md`. An unknown topic is `validation-failed`.
+          maxLength: 128
+        thread_id:
+          $ref: "#/components/schemas/Id"
+        payload:
+          type: object
+          description: Topic-specific. Bounded by `APERTURE_CONTEXT_MAX_PAYLOAD_BYTES` and
+            `APERTURE_MAX_JSON_DEPTH`.
+          additionalProperties: true
+
+    Settings:
+      type: object
+      description: |
+        The principal's settings. Mutated under `If-Match`. No settings key may hold an endpoint,
+        an address, or a credential: the desktop endpoint lives in OS secure storage and never
+        transits this API, and credentials live in the secret manager.
+      additionalProperties: true
+
+    AuditRecord:
+      type: object
+      additionalProperties: false
+      required: [id, at, actor_origin, action]
+      properties:
+        id:
+          $ref: "#/components/schemas/Id"
+        at:
+          $ref: "#/components/schemas/Timestamp"
+        actor_origin:
+          $ref: "#/components/schemas/Origin"
+        actor_id:
+          $ref: "#/components/schemas/Id"
+        action:
+          type: string
+          maxLength: 128
+        subject_id:
+          $ref: "#/components/schemas/Id"
+        arguments_digest:
+          type: string
+          description: Sanitized argument summary — keys and tokens redacted, oversized values
+            truncated with an explicit marker. Never the raw arguments.
+          maxLength: 2000
+        correlation_id:
+          $ref: "#/components/schemas/Id"
+
+    # -------------------------------------------------------------------------
+    # Stream events. Normative prose lives in contracts/aperture-events-v1.md.
+    # -------------------------------------------------------------------------
+
+    EventEnvelope:
+      type: object
+      description: |
+        Fields common to **every** stream event, without exception. There is no exempt event
+        type: `heartbeat` carries an `origin` exactly as `token` does, because an exemption is how
+        a mandatory invariant erodes.
+      required: [type, seq, origin, ts]
+      properties:
+        type:
+          $ref: "#/components/schemas/EventType"
+        seq:
+          type: integer
+          minimum: 0
+          description: |
+            The monotonic sequence number. **One sequence per connection, covering all event
+            types** — not one per thread, not one per turn, not one per type. It is strictly
+            increasing with no gaps within a connection, it is the SSE `id:` field, and it is the
+            only thing used to decide ordering, replay position, and eviction. Timestamps are
+            never used for that.
+        origin:
+          $ref: "#/components/schemas/Origin"
+        ts:
+          $ref: "#/components/schemas/Timestamp"
+        thread_id:
+          $ref: "#/components/schemas/Id"
+        message_id:
+          $ref: "#/components/schemas/Id"
+        turn_id:
+          $ref: "#/components/schemas/Id"
+
+    StreamEvent:
+      description: |
+        One event frame. `type` is the discriminator, and every variant inherits the mandatory
+        envelope — including `origin`.
+      oneOf:
+        - $ref: "#/components/schemas/TokenEvent"
+        - $ref: "#/components/schemas/MessageStartEvent"
+        - $ref: "#/components/schemas/MessageEndEvent"
+        - $ref: "#/components/schemas/ToolCallEvent"
+        - $ref: "#/components/schemas/ToolResultEvent"
+        - $ref: "#/components/schemas/ThinkingEvent"
+        - $ref: "#/components/schemas/ErrorEvent"
+        - $ref: "#/components/schemas/ContextEvent"
+        - $ref: "#/components/schemas/PresenceEvent"
+        - $ref: "#/components/schemas/ResyncEvent"
+        - $ref: "#/components/schemas/HeartbeatEvent"
+      discriminator:
+        propertyName: type
+        mapping:
+          token: "<REDACTED-SECRET>"
+          message.start: "#/components/schemas/MessageStartEvent"
+          message.end: "#/components/schemas/MessageEndEvent"
+          tool.call: "#/components/schemas/ToolCallEvent"
+          tool.result: "#/components/schemas/ToolResultEvent"
+          thinking: "#/components/schemas/ThinkingEvent"
+          error: "#/components/schemas/ErrorEvent"
+          context: "#/components/schemas/ContextEvent"
+          presence: "#/components/schemas/PresenceEvent"
+          resync: "#/components/schemas/ResyncEvent"
+          heartbeat: "#/components/schemas/HeartbeatEvent"
+
+    TokenEvent:
+      allOf:
+        - $ref: "#/components/schemas/EventEnvelope"
+        - type: object
+          required: [type, text, message_id, thread_id]
+          description: |
+            A text delta appended to the message named by `message_id`.
+
+            **A `token` event always has `origin: assistant`.** Nothing that did not come from the
+            assistant's own generation is ever emitted as a `token`, and a `tool.result` is never
+            coalesced into one regardless of what bytes the tool returned.
+          properties:
+            type:
+              const: token
+            text:
+              type: string
+            origin:
+              const: assistant
+
+    MessageStartEvent:
+      allOf:
+        - $ref: "#/components/schemas/EventEnvelope"
+        - type: object
+          required: [type, message_id, thread_id]
+          description: Opens a message. Exactly one `message.start` precedes any `token` for that
+            `message_id`.
+          properties:
+            type:
+              const: message.start
+            role_hint:
+              type: string
+              description: A display hint only. It never overrides `origin`, and a client that
+                disagrees with `origin` follows `origin`.
+              maxLength: 64
+
+    MessageEndEvent:
+      allOf:
+        - $ref: "#/components/schemas/EventEnvelope"
+        - type: object
+          required: [type, message_id, thread_id, reason]
+          description: |
+            Closes a message. **Every opened message is closed exactly once** — on success, on
+            cancellation, and on failure. A stream never simply stops mid-message without a
+            terminal event, unless the connection itself dies, which is what resume is for.
+          properties:
+            type:
+              const: message.end
+            reason:
+              type: string
+              description: |
+                `stopped_by_user` is an explicit user stop. `abandoned` is a refcount-zero expiry
+                after the grace window. A transport drop alone is never a reason, because a drop
+                does not cancel a turn.
+              enum: [completed, stopped_by_user, abandoned, upstream_error, upstream_timeout]
+
+    ToolCallEvent:
+      allOf:
+        - $ref: "#/components/schemas/EventEnvelope"
+        - type: object
+          required: [type, tool_call_id, tool_name]
+          description: A tool invocation has begun. `origin` is `tool`.
+          properties:
+            type:
+              const: tool.call
+            tool_call_id:
+              $ref: "#/components/schemas/Id"
+            tool_name:
+              type: string
+              maxLength: 128
+            arguments_digest:
+              type: string
+              description: A sanitized summary of the arguments — keys and tokens redacted,
+                oversized values truncated with an explicit marker. Never the raw arguments.
+              maxLength: 2000
+            origin:
+              const: tool
+
+    ToolResultEvent:
+      allOf:
+        - $ref: "#/components/schemas/EventEnvelope"
+        - type: object
+          required: [type, tool_call_id, status]
+          description: |
+            A tool invocation has returned.
+
+            **Normative invariant.** A `tool.result` may **never** be emitted as, or coalesced
+            into, an assistant token event, regardless of what bytes the tool returned. Its
+            `result` field is inert data: if it contains something shaped like an SSE frame, an
+            assistant message, or another event envelope, that content is still rendered as a
+            tool result, because attribution comes from `origin` and the event variant and never
+            from content. This is the transport half of prompt-injection containment.
+          properties:
+            type:
+              const: tool.result
+            tool_call_id:
+              $ref: "#/components/schemas/Id"
+            status:
+              type: string
+              enum: [ok, error]
+            result:
+              type: string
+              description: Inert data. Never re-emitted as assistant text, never merged into a
+                token stream, never parsed as an event.
+            origin:
+              const: tool
+
+    ThinkingEvent:
+      allOf:
+        - $ref: "#/components/schemas/EventEnvelope"
+        - type: object
+          required: [type]
+          description: >-
+            A reasoning-progress signal. Advisory: a client may render it, collapse it, or
+            ignore it, and dropping it never breaks message reconstruction.
+          properties:
+            type:
+              const: thinking
+            text:
+              type: string
+            origin:
+              const: assistant
+
+    ErrorEvent:
+      allOf:
+        - $ref: "#/components/schemas/EventEnvelope"
+        - type: object
+          required: [type, error]
+          description: |
+            An in-stream failure. A failure during streaming is reported **in the stream** and
+            then, where a message was open, followed by a `message.end`. The stream never simply
+            truncates. The problem-details redaction rules apply unchanged.
+          properties:
+            type:
+              const: error
+            error:
+              $ref: "#/components/schemas/Problem"
+            origin:
+              const: system
+
+    ContextEvent:
+      allOf:
+        - $ref: "#/components/schemas/EventEnvelope"
+        - type: object
+          required: [type, topic]
+          description: A context-bus event. It shares the per-connection sequence space with
+            every other event type; there is no second stream and no second sequence counter.
+          properties:
+            type:
+              const: context
+            topic:
+              type: string
+              maxLength: 128
+            payload:
+              type: object
+              additionalProperties: true
+
+    PresenceEvent:
+      allOf:
+        - $ref: "#/components/schemas/EventEnvelope"
+        - type: object
+          required: [type, state]
+          description: |
+            A presence signal — the assistant's availability or attention state. It is a
+            **transport for the assistant's existing prioritized presence budget**, not a
+            notification channel and not licence for a parallel notification tray.
+          properties:
+            type:
+              const: presence
+            state:
+              type: string
+              maxLength: 64
+            detail:
+              type: string
+              maxLength: 300
+            origin:
+              const: system
+
+    ResyncEvent:
+      allOf:
+        - $ref: "#/components/schemas/EventEnvelope"
+        - type: object
+          required: [type, from_seq, to_seq]
+          description: |
+            The client's resume position has aged out of the bounded replay window, so some
+            events can no longer be delivered. The event names the lost `seq` range and the
+            affected ids and instructs the client to refetch that state over REST — see
+            `GET /threads/{threadId}/turns/{turnId}`. Replay is bounded and this is what the
+            bound looks like from the client's side.
+          properties:
+            type:
+              const: resync
+            from_seq:
+              type: integer
+              minimum: 0
+            to_seq:
+              type: integer
+              minimum: 0
+            affected_thread_ids:
+              type: array
+              maxItems: 100
+              items:
+                $ref: "#/components/schemas/Id"
+            affected_message_ids:
+              type: array
+              maxItems: 100
+              items:
+                $ref: "#/components/schemas/Id"
+            origin:
+              const: system
+
+    HeartbeatEvent:
+      allOf:
+        - $ref: "#/components/schemas/EventEnvelope"
+        - type: object
+          required: [type]
+          description: |
+            A liveness tick on the interval named by `APERTURE_STREAM_HEARTBEAT_SECONDS`, so an
+            idle connection is distinguishable from a dead one and so intermediaries do not reap
+            a healthy stream. It consumes a `seq` like every other event — the sequence is one
+            space covering all types.
+          properties:
+            type:
+              const: heartbeat
+            origin:
+              const: system

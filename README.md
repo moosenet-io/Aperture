@@ -122,6 +122,10 @@ secret provisioning, first-run onboarding, and per-target installation — is in
 | [docs/PIPELINE.md](docs/PIPELINE.md) | How changes reach `main` and the public mirror |
 | [docs/BRAND.md](docs/BRAND.md) | The Aperture mark, palette, and usage rules |
 | [contracts/](contracts/) | The versioned client↔BFF API contract — the source of truth |
+| [contracts/aperture-api-v1.yaml](contracts/aperture-api-v1.yaml) | OpenAPI 3.1: every `/v1/aperture/*` route, schema, header, and error |
+| [contracts/aperture-events-v1.md](contracts/aperture-events-v1.md) | The SSE event taxonomy, provenance, ordering, and replay |
+| [contracts/aperture-transport-v1.md](contracts/aperture-transport-v1.md) | Per-target transport, auth, and CSP rules |
+| [contracts/README.md](contracts/README.md) | Versioning policy and the conventions shared by every route |
 | [behavior-spec.md](behavior-spec.md) | Verifiable behavioural contracts |
 | [specs/](specs/) | The build specs this repo is being built from |
 
