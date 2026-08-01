@@ -1,19 +1,22 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
   <title>Aperture</title>
   <defs>
-    <!-- Higher-contrast blade fill for tab-size rendering -->
-    <linearGradient id="fav-blade" x1="0.1" y1="0" x2="0.9" y2="1">
+    <!-- Higher-contrast facets for tab-size rendering -->
+    <linearGradient id="fav-blade-a" x1="0.1" y1="0" x2="0.9" y2="1">
       <stop offset="0%" stop-color="#DDC9FD"/>
-      <stop offset="50%" stop-color="#A855F7"/>
       <stop offset="100%" stop-color="#7C3AED"/>
     </linearGradient>
+    <linearGradient id="fav-blade-b" x1="0.1" y1="0" x2="0.9" y2="1">
+      <stop offset="0%" stop-color="#A855F7"/>
+      <stop offset="100%" stop-color="#4C1D95"/>
+    </linearGradient>
     <radialGradient id="fav-throat" cx="50%" cy="50%" r="50%">
-      <stop offset="0%" stop-color="#F4F2FB" stop-opacity="1"/>
-      <stop offset="45%" stop-color="#C4A5FB" stop-opacity="0.55"/>
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.95"/>
+      <stop offset="42%" stop-color="#C4A5FB" stop-opacity="0.42"/>
       <stop offset="100%" stop-color="#7C3AED" stop-opacity="0"/>
     </radialGradient>
     <clipPath id="fav-housing">
-      <circle cx="32" cy="32" r="22"/>
+      <circle cx="32" cy="32" r="22.4"/>
     </clipPath>
   </defs>
 
@@ -21,22 +24,25 @@
   <rect x="0" y="0" width="64" height="64" rx="13" fill="#0D0B1A"/>
   <rect x="1" y="1" width="62" height="62" rx="12.2" fill="none" stroke="#A855F7" stroke-opacity="0.35" stroke-width="2"/>
 
-  <!-- Light through the opening -->
-  <circle cx="32" cy="32" r="15" fill="url(#fav-throat)"/>
+  <circle cx="32" cy="32" r="13" fill="url(#fav-throat)"/>
 
   <!-- Six blades, wide separations so they survive 16px -->
-  <g clip-path="url(#fav-housing)" fill="url(#fav-blade)">
-    <path d="M40.2 32 L37.16 25.63 L48.93 -17.17 L80.86 14.21 Z"/>
-    <path d="M36.1 24.9 L29.06 24.34 L-2.12 -7.24 L41.03 -19.21 Z"/>
-    <path d="M27.9 24.9 L23.9 30.72 L-19.04 41.92 L-7.83 -1.42 Z"/>
-    <path d="M23.8 32 L26.84 38.37 L15.07 81.17 L-16.86 49.79 Z"/>
-    <path d="M27.9 39.1 L34.94 39.66 L66.12 71.24 L22.97 83.21 Z"/>
-    <path d="M36.1 39.1 L40.1 33.28 L83.04 22.08 L71.83 65.42 Z"/>
+  <g clip-path="url(#fav-housing)">
+    <path d="M44.4 32 L39.29 21.97 L45.06 -20.4 L82.07 11.77 Z" fill="url(#fav-blade-a)"/>
+    <path d="M38.2 21.26 L26.96 20.67 L-6.84 -5.51 L39.52 -21.47 Z" fill="url(#fav-blade-b)"/>
+    <path d="M25.8 21.26 L19.67 30.7 L-19.91 46.88 L-10.55 -1.25 Z" fill="url(#fav-blade-a)"/>
+    <path d="M19.6 32 L24.71 42.03 L18.94 84.4 L-18.07 52.23 Z" fill="url(#fav-blade-b)"/>
+    <path d="M25.8 42.74 L37.04 43.33 L70.84 69.51 L24.48 85.47 Z" fill="url(#fav-blade-a)"/>
+    <path d="M38.2 42.74 L44.33 33.3 L83.91 17.12 L74.55 65.25 Z" fill="url(#fav-blade-b)"/>
   </g>
 
+  <!-- Opening edge -->
+  <path d="M44.4 32 L38.2 21.26 L25.8 21.26 L19.6 32 L25.8 42.74 L38.2 42.74 Z"
+        fill="none" stroke="#DDC9FD" stroke-opacity="0.8" stroke-width="0.9"/>
+
   <!-- Housing ring -->
-  <circle cx="32" cy="32" r="22" fill="none" stroke="#C4A5FB" stroke-opacity="0.55" stroke-width="1.8"/>
+  <circle cx="32" cy="32" r="22.4" fill="none" stroke="#C4A5FB" stroke-opacity="0.55" stroke-width="1.6"/>
 
   <!-- Core light -->
-  <circle cx="32" cy="32" r="3.4" fill="#F4F2FB"/>
+  <circle cx="32" cy="32" r="2.2" fill="#F4F2FB"/>
 </svg>

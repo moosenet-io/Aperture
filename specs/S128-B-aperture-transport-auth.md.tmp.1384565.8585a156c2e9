@@ -1,0 +1,1354 @@
+# Aperture Sprint B — Transport & Identity
+plane_project: APTR
+module: Aperture
+prefix: APTR
+spec_id: S128-aperture-client
+
+## Metadata
+- **Author:** Operator (Moose)
+- **Session:** S128
+- **Date:** 2026-08-01
+- **Module version:** Aperture v0.1.0
+- **Estimated total:** ~86h
+- **North-Star layer:** shell — Gate 2 justified in `specs/S128-aperture-epic.md`
+- **Module-Contract:** this sprint implements clause 1 (Terminus-fronted — every stream token
+  and every auth decision resolves through `terminus-client`, never a second door), clause 3
+  (context-bus citizen — the SSE `context` and `presence` channels are stood up here), and
+  clause 6 (sovereign by construction — no external transport, no telemetry, no third-party
+  auth provider). Clauses 2, 4, 5, 7 are inherited from Sprint A and exercised in Sprints C–D.
+- **Assistant-Layer Soul Contract:** clause 2 (presence has a budget) is enforced at the
+  transport layer here — the SSE `presence` event is a *transport* for the assistant's existing
+  prioritized knock quota, and this sprint ships **no independent notification tray**.
+  Clause 4 (continuity survives every swap) is the subject of APTR-28, which carries the
+  epic-mandated negative test. Clause 1 (speak, never template) is respected: the BFF frames
+  and sequences assistant output but never authors user-facing assistant prose.
+- **Context:** Sprint A produced a repo, a design system, a BFF skeleton, and a versioned
+  contract. Nothing yet moves. Sprint B is **the unblocker for every downstream sprint**: it
+  builds the streaming transport that makes chat feel alive, the identity layer that makes
+  Aperture multi-user and multi-device, and the channel adapter that makes Aperture a
+  first-class citizen of the *existing* agent loop rather than a parallel path around it.
+  Two constraints dominate every item below and are worth stating up front:
+
+  1. **Streaming is greenfield in the emitting direction only — the consuming direction already
+     exists and is mature.** Be precise about the split, because it changes what this sprint
+     builds and what it must not rebuild:
+
+     *Already exists (reuse, do not reinvent):* `crates/lumina-core/src/chord.rs` provides
+     `ChordClient::chat_completion_streaming(...)` with an `on_delta` callback (LSTR-01), backed
+     by a real incremental SSE **frame parser** (`ChatSseState` — `push_chunk` / `push_str` /
+     `handle_frame` / `flush_tail`) that appends `choices[0].delta.content` and hands each
+     non-empty delta to `on_delta` as it arrives, correctly across chunk boundaries that split a
+     frame. It returns `StreamedCompletion { text, truncated }`, where `truncated` marks an
+     abnormal end (per-read inactivity timeout, LSTR-02, or a mid-stream transport drop) with only
+     partial text; and `ChatSseState::saw_frame` distinguishes a genuine stream from an upstream
+     that ignored `stream: true` and returned one buffered body, with a documented fallback to a
+     buffered consume. `crates/lumina-core/src/agent_loop.rs` already calls this behind the
+     `router.stream_deep` flag with `crate::config::stream_idle_timeout_secs()` — **passing a
+     no-op `|_delta| {}` closure**, with the in-code comment noting that LSTR-03 wires the
+     incremental emit through that same callback. The core also already serves an
+     OpenAI-compatible `/v1/chat/completions` route of its own.
+
+     *Genuinely absent (this sprint's real job):* there is **no `axum::Sse`, no `sse::Event`, no
+     `Body::from_stream`, no `StreamBody`** anywhere in the crate, and no server-side streaming
+     route. Every `text/event-stream` occurrence in `agent_loop.rs` and `chord.rs` is inside a
+     **test mock server**, not production response code. So there is no client-facing stream
+     endpoint at all — the *emitting* half is what Sprint B builds, to the taxonomy already frozen
+     in `contracts/aperture-events-v1.md`.
+
+     **Consequence for every item below:** do not write a second SSE frame parser, do not add a
+     new incremental-output hook to the agent loop, and do not reimplement the idle-timeout or
+     buffered-fallback semantics. Reuse them, and map their existing outcomes onto the Aperture
+     event taxonomy.
+  2. **There is already an `EDGE-08` `Channel` trait and `ChannelRegistry`** with Matrix, CLI,
+     HTTP, and (feature-gated, real, non-stub) Telegram adapters, all feeding one shared
+     `mpsc::Sender<ChannelMessage>` so every message crosses the same guarded agent loop.
+     Aperture **registers into that registry**. Any approach that builds a second inference or
+     tool path around the agent loop is a review rejection, not a design choice.
+
+## Pre-flight
+- **Blocked by Sprint A in full.** APTR-06 (`contracts/aperture-api-v1.yaml`,
+  `contracts/aperture-events-v1.md`), APTR-05 (BFF module skeleton), APTR-07 (generated SDK),
+  APTR-10 (error model) and APTR-11 (config/secrets discipline) are hard prerequisites.
+  Do not begin an item in this sprint against an unmerged Sprint A contract.
+- Repository: `moosenet/Aperture` on the internal forge; sibling PRs land in the agent-core repo
+- Vault secrets required (names only — values live in the secret store):
+  `APERTURE_SESSION_SIGNING_KEY`
+- Existing code this sprint extends (agent-core repo, repo-relative):
+  `crates/lumina-core/src/channels/mod.rs` (the `Channel` trait + `ChannelRegistry`),
+  `crates/lumina-core/src/channels/{matrix,cli,http,telegram}.rs`,
+  `crates/lumina-core/src/users/identity.rs` (`ChannelType`, `ChannelIdentity`, `UserStore`),
+  `crates/lumina-core/src/conversation/{buffer,summarizer,engram_flush}.rs`,
+  `crates/lumina-core/src/agent_loop.rs`, `crates/lumina-core/src/api/` (12 route modules),
+  `crates/lumina-core/src/chord.rs` (`chat_completion_streaming`, `ChatSseState`,
+  `StreamedCompletion`)
+- **Existing streaming flag — `router.stream_deep`.** This flag already gates whether the
+  deep-tier synthesis in `agent_loop.rs` runs through `chat_completion_streaming` (with the
+  currently no-op `on_delta`) or through a buffered consume. **Decision for this sprint: Aperture
+  streaming is *dependent on* `router.stream_deep`, not independent of it.** Justification: the
+  flag is the switch that decides whether deltas exist at all upstream, so an "independent"
+  Aperture stream would either have to open a second inference call (a parallel path around the
+  agent loop — forbidden by APTR-26) or silently degrade. Instead, Aperture subscribes to whatever
+  the loop produces: with `stream_deep` on, the user sees token-by-token output; with it off, the
+  turn arrives as a single `token` event followed by `message.end`. **The SSE contract is
+  identical either way** — same event sequence, same terminal guarantee — so no client code
+  branches on the flag, and enabling it later is a pure experience upgrade with no contract change.
+  The BFF reports the current granularity in the module descriptor (APTR-08) so the UI can
+  explain, not guess.
+- **Existing config key — `stream_idle_timeout_secs()`** governs the per-read inactivity timeout on
+  the *upstream* consume. Aperture's heartbeat and idle-reap settings (APTR-17) are **downstream**
+  and must be reconciled with it rather than contradict it; see that item.
+- Dependencies: `node` ≥ 20, `rustup` + pinned toolchain, `cargo`
+- Infrastructure: internal forge reachable, Plane reachable, Terminus door reachable,
+  Chord reachable **by named proxy only**
+- Baseline tests: the agent-core workspace suite must be green before the first item merges;
+  record the baseline count in the first PR body
+- Baseline verify: N/A (Aperture repo is new) — Sprint G establishes the behavior-verify baseline
+
+---
+
+### APTR-15: SSE stream endpoint — event framing and the full v1 event taxonomy
+- **Priority:** Critical
+- **Labels:** aperture, bff, streaming, sse, rust
+- **Agent:** claude
+- **Estimate:** 8h
+- **Description:** Implement `GET /v1/aperture/stream` in the BFF as a Server-Sent Events
+  endpoint that emits the complete event taxonomy frozen in `contracts/aperture-events-v1.md`:
+  `token`, `message.start`, `message.end`, `tool.call`, `tool.result`, `thinking`, `error`,
+  `context`, `presence`, `heartbeat`. This is the foundational transport item — every other
+  streaming item in this sprint and every chat surface in Sprint C sits on it.
+
+  **Scope boundary — read this before writing a line.** The core already *consumes* SSE from
+  upstream and does it well; what it has never done is *emit* SSE to a client. This item builds
+  only the emitting half: there is no `axum::Sse`, `sse::Event`, `Body::from_stream`, or
+  `StreamBody` in the crate today, and no server-side streaming route. **You must not write a new
+  SSE frame parser.** `ChatSseState` in `crates/lumina-core/src/chord.rs` already parses upstream
+  frames correctly across split chunk boundaries and is covered by tests; the deltas it produces
+  are the input to this endpoint, delivered through the existing `on_delta` callback (wired in
+  APTR-26). A second parser would be duplicated logic with half the test coverage.
+
+  It is a **one-way server→client** stream; the client sends messages over ordinary REST. That
+  asymmetry is deliberate: SSE survives proxies, reconnects natively, and needs no second
+  protocol. WebSocket is explicitly **not** adopted in this sprint.
+
+  ## FILES
+  - `contracts/aperture-events-v1.md` — extend only where the implementation discovers an
+    under-specified guarantee; the taxonomy itself is frozen and must not be widened silently
+  - `contracts/aperture-api-v1.yaml` — the stream endpoint's media type, query parameters, and
+    documented error responses
+  - `client/src/api/events.ts` — the TypeScript discriminated union for every event type,
+    generated-adjacent and asserted against the contract enum
+  - **Agent-core repo (sibling PR):** an `aperture/stream` module with the SSE responder built on
+    `axum::Sse` (new), an event enum with a serialization test per variant, and the emitter handle
+    the agent loop writes into. **No new frame parser** — `chord.rs`'s `ChatSseState` stays the
+    single upstream parser and is not modified beyond what APTR-26 needs
+
+  ## APPROACH
+  1. Model the event set as a **Rust enum with one variant per event type**, serialized to the
+     SSE wire format with an explicit `event:` name and a JSON `data:` payload. Adding a variant
+     without adding it to the contract enum must fail a test — the contract is the source of
+     truth, not the code.
+  2. Every event carries: `seq` (monotonic, APTR-16), `stream_id`, `thread_id`, `ts`, and a
+     type-specific payload. `token` carries the delta text only — never the accumulated
+     buffer — so a long response does not degrade to O(n²) bytes on the wire.
+  3. `message.start` opens a logical assistant turn and carries the message id the client will
+     key on; `message.end` closes it and carries the terminal reason (`complete`, `cancelled`,
+     `error`, `budget_exhausted`). **A stream may never end without a terminal event** — a
+     silently truncated stream is the single worst failure mode of this design and every
+     shutdown path must emit `message.end` or `error` first.
+  4. `tool.call` / `tool.result` render the assistant's tool use transparently. Payloads are
+     **sanitized before framing**: arguments and results have keys/tokens redacted and values
+     over 1 KB truncated with an explicit marker, reusing the APTR-10 sanitizer. A tool result
+     is never streamed raw.
+  5. `thinking` carries reasoning-visible content where the named proxy supplies it. It is
+     **opt-in per thread** and defaults off — never surfaced unless the client asked for it.
+  6. `context` and `presence` are reserved on this endpoint and stood up as pass-throughs here;
+     Sprint D fills the context bus and the presence budget wires into the assistant's existing
+     prioritized knock quota. **This item ships no notification tray and no independent
+     alerting path** (Soul Contract clause 2).
+  7. Set the anti-buffering headers the contract mandates: `Content-Type: text/event-stream`,
+     `Cache-Control: no-cache, no-transform`, `Connection: keep-alive`, and the
+     proxy-buffering-off hint. Additionally emit a short padding comment line at stream open so
+     an intermediary that buffers by byte count flushes immediately.
+  8. **Map the existing upstream outcomes onto the taxonomy — do not reinvent them.** Three
+     concrete bindings, each of which must be implemented and tested rather than left to the
+     implementer's judgment:
+     - `StreamedCompletion.truncated == true` (abnormal end: LSTR-02 per-read inactivity timeout,
+       or a mid-stream transport drop, with only partial text) ⇒ emit the already-received tokens,
+       then an in-stream `error` event of the upstream-timeout or upstream-error class, then
+       `message.end` with reason `error`. **The partial text is kept, never discarded**, and the
+       abnormality is always surfaced. A `truncated` completion silently presented as a complete
+       answer is the single most misleading failure this endpoint could produce.
+     - `ChatSseState::saw_frame == false` (upstream ignored `stream: true` and returned one
+       buffered body; the existing documented fallback consumes it whole) ⇒ the client-visible
+       behaviour is a **normal, well-formed turn** — `message.start`, exactly one `token` event
+       carrying the full text, then `message.end` with reason `complete`. The client must never
+       need to know this happened; it is a granularity difference, not an error. Surface the
+       granularity in the module descriptor (APTR-08), never as a stream error.
+     - `crate::config::stream_idle_timeout_secs()` bounds upstream inactivity. Aperture's
+       heartbeat interval (APTR-17) is downstream and independent, but the two must be *reconciled*:
+       the heartbeat must be materially shorter than the upstream idle timeout, so a client
+       distinguishes "the server is alive and waiting on a slow model" from "the connection died".
+       Assert the ordering relationship in a test rather than trusting two separately-tuned values.
+  9. Backend access is through `terminus-client` only. Chord is addressed by **named proxy**
+     (`lumina-fast`, `lumina-deep`) — no model id, engine name, backend tag, or size suffix
+     appears anywhere in BFF or client code.
+  10. No `unwrap()`/`expect()` on the stream path. A panic inside a stream task must be caught at
+      the task boundary and converted into an in-stream `error` event plus `message.end`.
+
+  ## TEST PLAN
+  - Unit: every enum variant round-trips to its contracted wire shape; a variant missing from
+    `contracts/aperture-events-v1.md` fails the test
+  - Unit: `token` payloads carry deltas, never accumulated text (assert total bytes for an
+    N-token response is linear in N)
+  - Unit: a tool result containing a secret-shaped key is redacted before framing
+  - Integration: a full turn emits `message.start` → `token`* → `message.end` in order
+  - Integration: the response carries all four anti-buffering headers
+  - Integration: `thinking` events are absent unless explicitly requested for the thread
+  - Integration: an upstream `StreamedCompletion` with `truncated == true` yields the partial
+    tokens, then an `error` event, then `message.end` with reason `error` — partial text retained
+  - Integration: an upstream that ignored `stream: true` (`saw_frame == false`) yields a normal
+    single-`token` turn ending `complete`, with no error surfaced to the client
+  - Unit: assert the heartbeat interval is materially shorter than `stream_idle_timeout_secs()`
+  - `grep` gate: the new stream module contains no SSE frame-parsing logic — `ChatSseState` in
+    `chord.rs` remains the only upstream parser in the crate
+  - Verify no hardcoded IPs, hostnames, ports, or org names in new/modified files
+  - Verify no model id, engine name, or backend tag appears in BFF or client code (grep gate)
+  - **Negative:** force a panic inside the generation task; assert the client receives an
+    `error` event followed by `message.end`, and that the stream is never silently truncated
+  - **Negative:** assert an event type not present in the contract enum is rejected at compile
+    time or by test, not serialized
+  - **Negative:** assert a `truncated` completion is never presented to the client as a normal
+    `complete` turn — the abnormal end always surfaces
+
+  ## EDGE CASES
+  - An intermediary that buffers regardless of headers — the open-padding comment plus the
+    heartbeat (APTR-17) must together defeat it; document the observed floor
+  - A `token` delta containing a lone UTF-8 surrogate half from a chunked decoder — buffer at
+    the char boundary, never emit invalid UTF-8 into a `data:` line
+  - Payload text containing a literal newline — SSE frames are newline-delimited, so JSON-encode
+    the payload and never interpolate raw text into the frame
+  - Zero-token response (the assistant declines to answer) — still emits `message.start` and
+    `message.end`; the client must render an empty turn, not hang
+  - A tool that returns megabytes — truncate at the framing boundary with a marker, and expose
+    the full result through a REST fetch rather than the stream
+  - `truncated` arriving with **zero** received text — still emit `message.start`, the `error`
+    event, and `message.end`; the client shows a failed turn, not a phantom pending one
+  - `router.stream_deep` off, so every turn arrives as one buffered `token` — the event sequence
+    and terminal guarantee are unchanged, and no client code may branch on it (see Pre-flight)
+
+- **Acceptance criteria:**
+  - [ ] All ten contracted event types implemented and round-trip-tested; `token` events carry
+        deltas only, so wire bytes are linear in response length
+  - [ ] Every stream terminates with `message.end` or `error` — no silent truncation on any path
+  - [ ] Tool call/result payloads sanitized (keys redacted, >1KB truncated) before framing
+  - [ ] `truncated` maps to a surfaced in-stream `error` with partial text retained;
+        `saw_frame == false` maps to a normal single-`token` turn; no new SSE parser is written
+  - [ ] All anti-buffering headers present; `thinking` is opt-in and off by default
+  - [ ] Chord addressed by named proxy only; zero model/engine/backend identifiers in code
+  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] All existing tests still pass
+
+---
+
+### APTR-16: Monotonic sequence numbers, replay buffer, and Last-Event-ID resume
+- **Priority:** Critical
+- **Labels:** aperture, bff, streaming, reliability
+- **Agent:** claude
+- **Estimate:** 6h
+- **Blocked by:** APTR-15
+- **Description:** A mobile client on a flaky connection will drop a stream mid-generation.
+  Without resume, the user loses the turn. Implement the sequencing and replay half of the
+  contract's resume semantics: a strictly monotonic per-stream sequence number emitted as the
+  SSE `id:` field, a bounded server-side replay buffer, and `Last-Event-ID` handling that
+  resumes exactly where the client left off.
+
+  ## FILES
+  - `contracts/aperture-events-v1.md` — pin the resume contract precisely: sequence domain,
+    replay window, and what the server does when the requested id has aged out
+  - **Agent-core repo (sibling PR):** the stream registry (`stream_id` → sequencer + ring
+    buffer), the `Last-Event-ID` request handler, and the resume path
+
+  ## APPROACH
+  1. Every emitted event gets `seq = previous + 1` within its `stream_id`. The sequence is
+     **per stream, not global** — a global counter leaks concurrency information and creates a
+     contention point. The SSE `id:` field is `"{stream_id}:{seq}"` so a resume request is
+     self-describing.
+  2. Keep a bounded ring buffer per active stream — size it by **both** event count and total
+     bytes, whichever binds first, so one enormous tool result cannot evict a whole turn's
+     tokens. The bound is a config key by name (APTR-11), never a literal in code.
+  3. On reconnect with `Last-Event-ID: {stream_id}:{seq}`, replay every buffered event with
+     `seq > n` in order, then continue live. Replay and live emission must be **serialized
+     through the same sender** so an event cannot interleave ahead of its replay.
+  4. If the requested `seq` has aged out of the buffer, do **not** silently skip. Emit a
+     `context` event marking a replay gap with the range lost, then resume live — and let the
+     client decide whether to refetch the turn via REST. Silent gaps are worse than declared ones.
+  5. If the `stream_id` is entirely unknown (server restarted, stream reaped), respond with a
+     fresh stream and an explicit gap marker rather than a 4xx — the client should recover, not
+     error out.
+  6. Resume must be **authorization-checked on every reconnect**, not trusted from the id. A
+     `Last-Event-ID` from another user's stream is a forbidden problem-details response, and
+     `stream_id` values are unguessable random ids, never sequential.
+  7. Retire buffers on `message.end` plus a short grace window, and on stream reap — an
+     unbounded map of dead streams is a memory leak with a long fuse.
+
+  ## TEST PLAN
+  - Unit: sequence is strictly monotonic per stream and independent across concurrent streams
+  - Unit: ring buffer evicts by count bound and by byte bound, whichever binds first
+  - Integration: disconnect mid-turn, reconnect with `Last-Event-ID`, assert the received event
+    set is exactly the original set with no gap and no duplicate
+  - Integration: reconnect with an aged-out id yields an explicit gap marker, then live events
+  - Integration: reconnect with an unknown `stream_id` yields a fresh stream plus a gap marker,
+    not a 4xx
+  - Verify no hardcoded IPs, hostnames, ports, or org names in new/modified files
+  - **Negative:** a `Last-Event-ID` referencing a stream owned by a different user is refused
+    with a forbidden problem-details response and replays nothing
+  - **Negative:** assert dead-stream buffers are dropped after the grace window (no unbounded
+    growth over a thousand short streams)
+
+  ## EDGE CASES
+  - Two tabs resuming the same `stream_id` concurrently — both may replay; emission stays
+    serialized and neither observes an out-of-order sequence
+  - A resume arriving *while* the turn is still generating — replay must not stall live emission
+    past the heartbeat interval
+  - Clock skew — resume keys off `seq` only, never off `ts`; assert no code path compares
+    timestamps to decide replay
+  - Server restart with in-flight streams — all buffers are lost by definition; the unknown-id
+    path is the contract for that, and it must be tested, not assumed
+  - A client sending a malformed `Last-Event-ID` — treat as absent, start fresh, never panic
+
+- **Acceptance criteria:**
+  - [ ] `seq` is strictly monotonic per stream and emitted as the SSE `id:` field
+  - [ ] Replay buffer is bounded by both event count and bytes, configured by name not literal
+  - [ ] Resume with a valid `Last-Event-ID` yields no gap and no duplicate
+  - [ ] Aged-out and unknown-stream resumes emit an explicit gap marker, never a silent skip
+  - [ ] Resume is authorization-checked per reconnect; cross-user resume is refused
+  - [ ] Dead-stream buffers are reaped; no unbounded growth
+  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] All existing tests still pass
+
+---
+
+### APTR-17: Heartbeat, backpressure, and the per-user connection budget
+- **Priority:** High
+- **Labels:** aperture, bff, streaming, reliability
+- **Agent:** claude
+- **Estimate:** 5h
+- **Blocked by:** APTR-15
+- **Description:** Keep idle streams alive through intermediaries that reap quiet connections,
+  and make a slow or malicious consumer unable to exhaust server memory. These are the two
+  failure modes that turn a working SSE implementation into an outage.
+
+  ## FILES
+  - `docs/CONFIGURATION.md` — heartbeat interval, per-user stream cap, per-stream queue depth,
+    slow-consumer eviction threshold — **names and semantics only, no values**
+  - **Agent-core repo (sibling PR):** the heartbeat ticker, the bounded per-stream send queue,
+    the slow-consumer policy, and the connection-budget guard
+
+  ## APPROACH
+  1. Emit a `heartbeat` event on a configurable interval whenever no other event has been sent
+    within that window. It carries the current `seq` so a client can detect a gap even on an
+    idle stream. Use an SSE comment line in addition to the typed event so byte-counting
+    intermediaries also see traffic.
+
+     **Reconcile with the existing upstream timeout, do not contradict it.**
+     `crate::config::stream_idle_timeout_secs()` already bounds per-read inactivity on the
+     *upstream* consume in `chord.rs`. The Aperture heartbeat is a *downstream* concern and stays
+     a separate key, but the two must hold an explicit ordering invariant:
+     `heartbeat_interval < stream_idle_timeout` by a clear margin, and the client's
+     missed-heartbeat threshold sits between them. That ordering is what lets a client correctly
+     read a slow first token as "alive and thinking" rather than "dead", and it must be **asserted
+     in a test**, not left to whoever tunes the two values next. Likewise the idle *reaper* bound
+     must exceed the upstream idle timeout, or Aperture will reap streams that upstream was still
+     legitimately working on.
+  2. Each stream has a **bounded** send queue. When the queue is full, apply an explicit policy
+     in this order: (a) coalesce adjacent `token` deltas into one larger delta — lossless and
+     the common case; (b) drop `heartbeat` and stale `presence` events — lossy but harmless;
+     (c) if the queue is still full past the eviction threshold, terminate the stream with an
+     `error` event of the rate/backpressure class and close. **Never grow the queue unbounded,
+     and never drop a `token`, `tool.call`, `tool.result`, `message.start`, or `message.end`.**
+  3. Enforce a per-user concurrent-stream cap. Exceeding it closes the **oldest** stream with a
+     typed `error`, so a user opening a seventh tab loses their first tab's stream rather than
+     being locked out of the new one. Cap is a config key by name.
+  4. Enforce a global concurrent-stream ceiling as a last line of defence; refuse over the
+     ceiling with a rate-limited problem-details response, never by degrading everyone.
+  5. Every stream registers in a registry with an owner, a created-at, and a last-activity
+     stamp, and a reaper closes streams idle past a bound. The reaper must emit `message.end`
+     before closing (APTR-15 rule: no silent truncation).
+  6. Backpressure must never propagate into the agent loop as a stall. If the consumer is slow,
+     the stream degrades or dies; **generation must not block on a socket**. Assert this — a
+     blocked writer holding the agent loop hostage is the failure this item exists to prevent.
+
+  ## TEST PLAN
+  - Unit: with no traffic, a `heartbeat` arrives within the configured interval and carries `seq`
+  - Unit: queue-full coalesces `token` deltas losslessly (concatenated text equals the original)
+  - Unit: queue-full drops `heartbeat`/`presence` but never a token or lifecycle event
+  - Integration: a deliberately stalled reader past the eviction threshold is terminated with a
+    typed `error` and the server's memory returns to baseline
+  - Integration: opening one more than the per-user cap closes the oldest stream with a typed error
+  - Integration: the idle reaper closes a stale stream and emits `message.end` first
+  - Unit: the ordering invariant holds — heartbeat interval < client missed-heartbeat threshold <
+    `stream_idle_timeout_secs()` < idle-reaper bound
+  - Verify no hardcoded IPs, hostnames, ports, or org names in new/modified files
+  - **Negative:** assert a stalled consumer does **not** block the agent loop — a second user's
+    turn completes normally while the first stream is wedged
+  - **Negative:** assert no configuration value (interval, cap, threshold) appears as a literal
+    in code
+
+  ## EDGE CASES
+  - Heartbeat racing a `message.end` — the terminal event wins; no heartbeat may follow a terminal
+  - A consumer that reads exactly slowly enough to stay just under the eviction threshold —
+    coalescing must be bounded too, or one delta grows without limit
+  - Per-user cap evaluated across devices — a user on phone and desktop must not be capped out by
+    normal use; pick a default that accommodates several devices and document it by name
+  - Reaper firing during a long tool call that legitimately produces no events — tool activity
+    must refresh the activity stamp, not just event emission
+
+- **Acceptance criteria:**
+  - [ ] `heartbeat` emitted on the configured idle interval, carrying the current `seq`, with the
+        ordering invariant against `stream_idle_timeout_secs()` asserted in a test
+  - [ ] Send queue is bounded; token deltas coalesce losslessly under pressure
+  - [ ] No lifecycle, token, or tool event is ever dropped by the backpressure policy
+  - [ ] Slow consumers are evicted with a typed error; memory returns to baseline
+  - [ ] Per-user and global stream caps enforced; oldest-closed-first on per-user overflow
+  - [ ] A stalled consumer cannot block the agent loop
+  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] All existing tests still pass
+
+---
+
+### APTR-18: Clean cancellation — client disconnect actually stops the generation
+- **Priority:** Critical
+- **Labels:** aperture, bff, streaming, reliability, cost
+- **Agent:** opus
+- **Estimate:** 5h
+- **Blocked by:** APTR-15
+- **Description:** When a user closes a tab, navigates away, or presses stop mid-generation, the
+  generation must **actually stop** — the upstream inference request cancelled, in-flight tool
+  calls abandoned at the next safe point, and the turn's partial output persisted rather than
+  lost. An orphaned generation burns GPU on a shared, arbitrated pool for output nobody will
+  ever read, and it is the classic bug of every naive SSE implementation.
+
+  ## FILES
+  - `contracts/aperture-events-v1.md` — document the `cancelled` terminal reason and the
+    partial-persistence guarantee
+  - `contracts/aperture-api-v1.yaml` — the explicit `stop` route for the deliberate case
+  - **Agent-core repo (sibling PR):** cancellation token plumbing from the SSE responder through
+    the turn executor to the `terminus-client` call, and the partial-turn persistence path
+
+  ## APPROACH
+  1. Every turn executes under a cancellation token owned by the stream. Client disconnect,
+     explicit stop, device revocation (APTR-23), and stream reap (APTR-17) all trip the **same**
+     token — one cancellation mechanism, not four.
+  2. Detect disconnect on the write path (a failed send) **and** proactively via the connection's
+     closed signal. Relying on write failure alone means an idle-but-dead connection keeps
+     generating until the next token, which for a slow first token can be many seconds.
+  3. Propagate cancellation into the upstream inference request so it is genuinely cancelled, not
+     merely ignored locally. Concretely: the deep-tier synthesis runs through
+     `ChordClient::chat_completion_streaming` in `crates/lumina-core/src/chord.rs`, so cancellation
+     must reach **that** call and stop the body read, not just drop the SSE writer downstream of
+     it. Assert with a test that observes the upstream request terminate — **a locally-dropped
+     future that leaves the backend generating is exactly the bug this item forbids**, and it is
+     especially costly here because the GPU is a shared, arbitrated, idle-reaped pool.
+     Note this is distinct from the existing LSTR-02 inactivity timeout: that fires when the
+     *upstream* goes quiet; this fires when the *client* goes away. Both must end the same call
+     cleanly, and neither may leave the other's teardown half-run.
+  4. In-flight tool calls are abandoned **at the next safe point**, never mid-write. A tool with
+     side effects must complete or roll back its current operation; cancellation is cooperative
+     for tools and pre-emptive only for pure inference. Document which is which.
+  5. Persist the partial assistant turn to the conversation buffer with an explicit
+     `cancelled` marker so the transcript reflects what actually happened. It flows through the
+     normal conversation buffer and Engram flush path — **cancellation must not bypass memory**,
+     or the assistant develops holes in its recollection of the conversation.
+  6. Cancellation is idempotent and racy-safe: cancelling an already-finished turn is a no-op,
+     and a token arriving after cancellation is discarded, not emitted.
+  7. Emit `message.end` with reason `cancelled` if the socket is still writable; if it is not,
+     still run the full server-side teardown. Teardown must never depend on the client being there.
+
+  ## TEST PLAN
+  - Integration: disconnect mid-generation; assert the upstream request is cancelled within the
+    bounded detection window
+  - Integration: explicit stop mid-generation; assert `message.end` with reason `cancelled`
+  - Integration: partial output is persisted to the conversation buffer with the cancelled marker
+    and reaches the Engram flush path
+  - Unit: cancelling twice is a no-op; a post-cancellation token is discarded, not emitted
+  - Unit: disconnect with no pending write still trips cancellation via the closed signal
+  - Verify no hardcoded IPs, hostnames, ports, or org names in new/modified files
+  - **Negative:** assert that after disconnect, **zero** further upstream inference tokens are
+    requested — the orphaned-generation regression test, and the reason this item exists
+  - **Negative:** assert a tool mid-write is not severed — it reaches a safe point before abandon
+
+  ## EDGE CASES
+  - Disconnect during the very first token, before `message.start` — teardown must still run and
+    still persist an empty cancelled turn, or the thread shows a phantom pending message forever
+  - Cancel arriving while a tool result is being framed — finish framing, then stop; a
+    half-written frame corrupts the stream for a resuming client
+  - A client that reconnects with `Last-Event-ID` **after** cancelling — resume must observe the
+    cancelled terminal, not restart generation
+  - Cancellation racing `message.end` for a naturally-complete turn — the first terminal wins and
+    the second is suppressed; exactly one terminal event per turn, always
+
+- **Acceptance criteria:**
+  - [ ] Disconnect, explicit stop, revocation, and reap all trip one shared cancellation token
+  - [ ] Cancellation propagates to the upstream inference request; zero orphaned generation
+  - [ ] Disconnect is detected proactively, not only on the next failed write
+  - [ ] Partial turns persist with a `cancelled` marker and still reach the memory flush path
+  - [ ] Exactly one terminal event per turn; post-cancellation tokens are discarded
+  - [ ] Server-side teardown completes even when the client is already gone
+  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] All existing tests still pass
+
+---
+
+### APTR-19: Client stream consumer — reconnect, resume, de-duplication, and the typed reducer
+- **Priority:** Critical
+- **Labels:** aperture, web, streaming, sdk
+- **Agent:** codex
+- **Estimate:** 8h
+- **Blocked by:** APTR-16
+- **Description:** The client half of the transport. A single, well-tested stream consumer that
+  every UI surface in Sprints C–F builds on: it connects, survives network loss with jittered
+  backoff, resumes from `Last-Event-ID`, suppresses duplicates and out-of-order arrivals, and
+  reduces the typed event union into immutable view state. Getting this right once means no UI
+  sprint ever hand-rolls stream handling — and no UI sprint gets to.
+
+  ## FILES
+  - `client/src/stream/connection.ts` — connection lifecycle, backoff, resume, teardown
+  - `client/src/stream/reducer.ts` — the pure typed reducer over `ApertureEvent`
+  - `client/src/stream/store.ts` — the subscribable stream-state store the UI binds to
+  - `client/src/stream/dedupe.ts` — sequence-window duplicate and reorder suppression
+  - `client/src/stream/index.ts` — the single public entry point
+  - `client/src/stream/__tests__/` — the test suite, including a scripted-event harness
+
+  ## APPROACH
+  1. Build on the platform `EventSource` where its semantics suffice, and fall back to a
+     `fetch`-based reader where request headers are required (auth, explicit resume control).
+     Either way the transport is constructed in **exactly one file**, consistent with the
+     APTR-07 rule that `fetch` lives in one place. No absolute URLs — same-origin relative only.
+  2. Reconnect with **exponential backoff plus full jitter**, capped, with an attempt ceiling
+     after which the store enters a `disconnected` state that the UI can surface with a manual
+     retry. Never a bare retry loop: a fleet-wide backend blip must not become a thundering herd
+     from every open tab.
+  3. Track the highest `seq` seen per `stream_id` and persist it across reconnects so
+     `Last-Event-ID` is always accurate. Drop any event with `seq <= highest` as a duplicate.
+     Hold briefly-out-of-order events in a small window keyed by `seq` and release them in order;
+     if the window's low end does not arrive within a bounded wait, declare a gap explicitly
+     rather than reordering around it.
+  4. Honour the server's explicit gap marker (APTR-16) by exposing a `gap` flag in the store so
+     the UI can refetch the turn over REST. **A gap is surfaced, never smoothed over.**
+  5. The reducer is a **pure function** `(state, event) => state` with exhaustive switching over
+     the discriminated union — a new event type added to the contract must produce a TypeScript
+     compile error here until handled. That is the mechanism that keeps client and contract from
+     drifting.
+  6. Reducer semantics: `message.start` opens a message keyed by id; `token` appends a delta;
+     `tool.call`/`tool.result` attach to the current message as ordered structured entries;
+     `thinking` accumulates into a separately-toggleable region; `message.end` finalizes with
+     its terminal reason; `error` attaches a typed error to the message and the connection;
+     `context`/`presence` route to their own slices, not into message text.
+  7. Visibility-aware: on tab hide, keep the connection but stop rendering work; on tab restore
+     after a long hide, reconnect-and-resume rather than assuming the socket is still live.
+  8. No telemetry, no analytics, no external fetch of any kind. Ever.
+
+  ## TEST PLAN
+  - Unit: scripted event sequence produces exactly the expected reduced state (golden test)
+  - Unit: a duplicate `seq` is dropped; an out-of-order `seq` inside the window is reordered;
+    a permanently missing `seq` surfaces a gap
+  - Unit: backoff is exponential with jitter, capped, and stops at the attempt ceiling
+  - Unit: reducer exhaustiveness — a synthetic unhandled event type fails typechecking
+  - Unit: `token` deltas concatenate to the exact original text under reordering and duplication
+  - Integration: simulated disconnect mid-turn resumes and yields the same final state as an
+    uninterrupted run — the core correctness property of the whole transport
+  - Verify no hardcoded IPs, hostnames, ports, or org names in new/modified files
+  - **Negative:** assert the consumer never replays a duplicated `token` into the message text
+  - **Negative:** assert no external origin is contacted (the APTR-01 external-host assertion
+    covers the bundle; add a runtime spy asserting the same for this module)
+
+  ## EDGE CASES
+  - Reconnect storm from many tabs after a backend restart — jitter plus a per-origin connection
+    guard; assert reconnects are spread, not simultaneous
+  - Browser `EventSource` auto-reconnecting on its own schedule and fighting the custom backoff —
+    own the reconnect explicitly, or disable the built-in and document which
+  - Long hide/restore on mobile where the socket is dead but not reported — treat a missed
+    heartbeat window as a dead connection and reconnect proactively
+  - A `message.end` arriving twice after a resume replay — the reducer is idempotent per message id
+  - A very long turn exceeding the browser's practical buffer — the reducer stores structured
+    deltas, and the UI virtualizes; the store must not retain a growing duplicate of the text
+
+- **Acceptance criteria:**
+  - [ ] Reconnect uses capped exponential backoff with full jitter and an attempt ceiling
+  - [ ] Resume via `Last-Event-ID` reproduces the identical final state as an uninterrupted stream
+  - [ ] Duplicates dropped, in-window reorders corrected, unrecoverable gaps surfaced explicitly
+  - [ ] Reducer is pure and exhaustive; a new contract event type fails typechecking until handled
+  - [ ] Transport constructed in exactly one file; same-origin relative URLs only
+  - [ ] No telemetry, analytics, or external fetch of any kind
+  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] All existing tests still pass
+
+---
+
+### APTR-20: First-run onboarding and admin bootstrap
+- **Priority:** Critical
+- **Labels:** aperture, bff, auth, onboarding, security
+- **Agent:** claude
+- **Estimate:** 6h
+- **Description:** Aperture today has no way to create its first account. Implement the first-run
+  flow: an unconfigured instance detects that no administrator exists, offers a one-time
+  bootstrap that creates the first admin, and then **permanently closes that door**. This is the
+  highest-consequence security surface in the sprint — a bootstrap endpoint that stays open is a
+  total compromise, so it fails closed at every ambiguity.
+
+  ## FILES
+  - `contracts/aperture-api-v1.yaml` — the bootstrap status and bootstrap-complete routes
+  - `client/src/routes/onboarding/` — the first-run screens (state detection, admin creation,
+    completion), composed from the APTR-02 primitives
+  - `docs/CONFIGURATION.md` — bootstrap-related config keys by name
+  - **Agent-core repo (sibling PR):** the bootstrap state machine, admin creation, and the
+    single-use guard, reusing the existing user store and onboarding module rather than a new one
+
+  ## APPROACH
+  1. `GET /v1/aperture/auth/bootstrap` reports one of `required`, `in_progress`, `complete`.
+     It leaks nothing else — no user count, no instance metadata, no version detail to an
+     unauthenticated caller.
+  2. Bootstrap is permitted **only** when zero administrators exist. The check and the creation
+     happen in **one transaction** against the existing user store, so two concurrent bootstrap
+     requests cannot both succeed. Test that race explicitly.
+  3. Reuse the existing identity layer — the user store, `ChannelIdentity`, and the existing
+     onboarding module. **Do not mint a parallel user table for Aperture.** An Aperture account
+     is a Lumina user reached over a new channel, which is precisely why continuity (APTR-28)
+     holds.
+  4. Credentials are stored as a modern memory-hard password hash with per-user salt and
+     parameters recorded alongside the hash so they can be raised later without invalidating
+     existing users. **No plaintext, no reversible encoding, no home-grown hashing, ever.**
+  5. Enforce a password policy: minimum length well above the legacy norm, a check against a
+     bundled list of common passwords (bundled — **no external breach-API call**, that would be
+     both a second door and a privacy leak), and rejection of the username as substring.
+  6. On success, issue a session (APTR-21) and mark bootstrap `complete` durably. Re-invoking
+     bootstrap after completion returns a forbidden problem-details response and **is rate
+     limited and audit-logged** (APTR-24).
+  7. If the session signing key is absent from the secret store, auth reports capability
+     `unavailable` per APTR-11 and bootstrap refuses to run. **Never generate a fallback key** —
+     an instance that silently self-signs with an ephemeral key is worse than one that will not start.
+  8. The onboarding UI must state plainly that this creates the instance administrator, and must
+     not offer a "skip" that leaves the instance open.
+
+  ## TEST PLAN
+  - Integration: fresh instance reports `required`; after bootstrap reports `complete`
+  - Integration: a second bootstrap attempt after completion is refused and audit-logged
+  - Unit: two concurrent bootstrap requests — exactly one succeeds, the other is refused
+  - Unit: password policy rejects short, common, and username-derived passwords
+  - Unit: stored credential is a memory-hard hash with recorded parameters; the plaintext appears
+    nowhere in the store or logs
+  - Integration: with the signing key absent, bootstrap refuses and auth reports `unavailable`
+  - Verify no hardcoded IPs, hostnames, ports, or org names in new/modified files
+  - **Negative:** assert the bootstrap status endpoint reveals no user count, version, or instance
+    detail to an unauthenticated caller
+  - **Negative:** assert no fallback/ephemeral signing key is ever generated when the secret is missing
+
+  ## EDGE CASES
+  - Instance restarted mid-bootstrap — state is derived from "does an admin exist", not from a
+    flag file, so a crash cannot strand the instance in `in_progress` forever
+  - An operator who deletes the only admin — the instance must not silently reopen bootstrap;
+    require an explicit, audited recovery path rather than an automatic reopen
+  - A pre-existing Lumina user (from Matrix) present but no Aperture admin — existing users are
+    **not** destroyed or reset; the bootstrap grants the admin role, it does not recreate the user
+  - Password containing multi-byte characters — normalize consistently before hashing, and test
+    round-trip with non-ASCII input
+
+- **Acceptance criteria:**
+  - [ ] Bootstrap runs only when zero admins exist, guarded transactionally against races
+  - [ ] Bootstrap closes permanently after completion; re-attempts are refused and audit-logged
+  - [ ] Existing user store reused — no parallel Aperture user table
+  - [ ] Credentials stored with a memory-hard hash and recorded parameters; never plaintext
+  - [ ] Password policy enforced against a bundled list; no external breach-API call
+  - [ ] Missing signing key ⇒ capability `unavailable`; no fallback key is ever generated
+  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] Secrets accessed via the secret manager, not env vars
+
+---
+
+### APTR-21: Session issuance, refresh, logout, and secure token handling
+- **Priority:** Critical
+- **Labels:** aperture, bff, auth, security, secrets
+- **Agent:** claude
+- **Estimate:** 8h
+- **Blocked by:** APTR-20
+- **Description:** The session layer every authenticated route and every stream depends on:
+  login, short-lived access tokens signed with `APERTURE_SESSION_SIGNING_KEY`, rotating refresh
+  tokens, logout that genuinely invalidates, and cookie handling that is safe in a browser and
+  workable from the desktop shell. Sessions must be **revocable server-side** — a purely
+  stateless token that cannot be killed makes device revocation (APTR-23) impossible.
+
+  ## FILES
+  - `contracts/aperture-api-v1.yaml` — login, refresh, logout, and session-introspection routes
+  - `client/src/auth/session.ts` — client session state, refresh scheduling, 401 handling
+  - `client/src/routes/auth/` — login and logout surfaces
+  - `docs/CONFIGURATION.md` — access/refresh TTL key names and semantics
+  - **Agent-core repo (sibling PR):** session signing/verification, the session record store,
+    the refresh-rotation logic, and the auth extractor used by every protected route
+
+  ## APPROACH
+  1. The signing key is read **exclusively** via `SecretManager::get()`. Any `std::env::var` of a
+     token/key/password/secret-shaped name is a review rejection (skill S7, APTR-11). The key is
+     never logged, never in an error body, and its holder type has a redacting `Debug`/`Display`.
+  2. Short-lived signed access token + longer-lived refresh token. Every access token carries a
+     `session_id` that resolves to a **server-side session record** — that record is what makes
+     revocation real. Verification checks the signature *and* the record's live status.
+  3. **Refresh tokens rotate on every use** and are single-use. Presenting an already-consumed
+     refresh token is treated as theft: invalidate the entire session family, audit-log it, and
+     force re-authentication. This is the standard reuse-detection defence and is not optional.
+  4. Browser transport: `HttpOnly`, `Secure`, `SameSite=Lax` (or `Strict` where the flow allows)
+     cookies scoped to the app path, so the token is never reachable from JavaScript. Desktop and
+     PWA use the same cookie flow where the platform allows; where a bearer header is genuinely
+     required, the token is held in memory only — **never in `localStorage`**, and a lint asserts it.
+  5. State-changing routes are CSRF-protected (double-submit token or origin check, documented in
+     the contract). The SSE stream endpoint is included — an EventSource is a GET, but session
+     binding must still be verified per connection.
+  6. Logout invalidates the session record server-side, clears the cookie, and terminates the
+     user's in-flight streams for that session (via the APTR-18 cancellation token). A logout that
+     leaves a stream alive is a real leak, not a cosmetic one.
+  7. Key rotation: sessions signed with a retired key **fail closed to re-auth**, never silently
+     accepted. Support a bounded overlap window keyed by an explicit key id in the token so a
+     rotation does not log the whole fleet out at once.
+  8. Timing discipline: credential verification is constant-time with respect to whether the user
+     exists — a login response must not distinguish "no such user" from "wrong password", by
+     content or by latency.
+
+  ## TEST PLAN
+  - Unit: token signed with the current key verifies; token signed with a retired key past the
+    overlap window is refused
+  - Unit: refresh rotates; presenting a consumed refresh token invalidates the whole family and
+    audit-logs the reuse
+  - Integration: logout invalidates the session, clears the cookie, and terminates in-flight streams
+  - Integration: an access token whose session record is revoked fails verification even though its
+    signature is valid
+  - Unit: cookies carry `HttpOnly`, `Secure`, and the documented `SameSite`
+  - Unit: unknown-user and wrong-password logins are indistinguishable in body and in timing
+  - `grep` gate: zero `std::env::var` reads of secret-shaped names in new/modified code
+  - Verify no hardcoded IPs, hostnames, ports, or org names in new/modified files
+  - **Negative:** assert the signing key value appears in no log line, error body, or debug output
+  - **Negative:** assert no token is ever written to `localStorage` or `sessionStorage` (lint + test)
+
+  ## EDGE CASES
+  - Refresh racing two tabs — both present the same refresh token near-simultaneously; a short
+    grace on the immediately-preceding token prevents a false theft alarm, but the grace must be
+    tight and tested at both edges
+  - Clock skew between issuance and verification — allow a small documented leeway, never unbounded
+  - A desktop shell without cookie support for the app origin — the in-memory bearer path covers it;
+    assert it never persists to disk
+  - Signing key rotated while a stream is open — the stream's session is re-verified on the next
+    heartbeat boundary and closed with a typed auth error if it no longer validates
+  - Session record store unavailable — **fail closed** (reject the request), never fail open to
+    signature-only verification
+
+- **Acceptance criteria:**
+  - [ ] Signing key read via the secret manager only; zero `std::env::var` of secret-shaped names
+  - [ ] Access tokens bind to a server-side session record; revocation defeats a valid signature
+  - [ ] Refresh tokens rotate and are single-use; reuse invalidates the family and is audit-logged
+  - [ ] Cookies are `HttpOnly` + `Secure` + `SameSite`; no token ever reaches web storage
+  - [ ] Logout invalidates server-side and terminates that session's in-flight streams
+  - [ ] Retired-key sessions fail closed to re-auth; session store unavailable fails closed
+  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] Secrets accessed via the secret manager, not env vars
+
+---
+
+### APTR-22: Multi-user roles and invitations
+- **Priority:** High
+- **Labels:** aperture, bff, auth, multi-user
+- **Agent:** claude
+- **Estimate:** 6h
+- **Blocked by:** APTR-20
+- **Description:** Aperture is the first surface where anyone other than the operator can
+  meaningfully use the constellation. That requires a real authorization model: two roles
+  (`admin`, `member`), an invite flow so an admin can add a member without sharing credentials,
+  and enforcement that is **centralized and default-deny** rather than sprinkled per-route.
+
+  ## FILES
+  - `contracts/aperture-api-v1.yaml` — invite create/accept/list/revoke, user list, role change
+  - `client/src/routes/admin/users/` — user list, invite management, role assignment
+  - `client/src/auth/roles.ts` — client-side role predicates for presentation only
+  - **Agent-core repo (sibling PR):** the role model, the authorization guard, and the invite
+    store, extending the existing permissions module rather than replacing it
+
+  ## APPROACH
+  1. Two roles only, deliberately: `admin` (instance configuration, user management, module
+     enablement) and `member` (their own threads, their own settings, their own devices). Resist
+     a permission matrix in v1; it is easy to add and painful to remove.
+  2. Authorization is a **single guard** applied by default to every `/v1/aperture/*` route, with
+     an explicit, reviewable allowlist of unauthenticated routes (bootstrap status, login,
+     refresh). **Default-deny:** a newly added route with no annotation is admin-only and is
+     covered by a test that enumerates routes and asserts none is accidentally public.
+  3. Client-side role predicates are **presentation only**. Every protected action is enforced
+     server-side, and a test asserts a `member` calling an admin route is refused regardless of
+     what the UI rendered. Hiding a button is not authorization.
+  4. Invites are single-use, expiring, high-entropy tokens bound to a role and optionally to an
+     email-shaped identifier the operator supplies. The invite record stores a **hash** of the
+     token, never the token itself, so a store dump does not yield usable invites.
+  5. Accepting an invite creates a Lumina user through the existing user store, with an Aperture
+     `ChannelIdentity`. Existing users linking a new channel identity keep everything — see
+     APTR-28.
+  6. An admin cannot demote or delete the last remaining admin; enforce transactionally, so a
+     concurrent double-demotion cannot lock the instance out of administration.
+  7. Every role change, invite creation, invite acceptance, and revocation is audit-logged with
+     actor, target, and timestamp — with arguments sanitized per APTR-10.
+  8. **Assistant-operable parity:** user listing, invite creation, and invite revocation are also
+     exposed as assistant-invocable operations, not admin-UI-only buttons (Module Contract
+     clause 4). The assistant's invocation passes through the identical authorization guard.
+
+  ## TEST PLAN
+  - Unit: route enumeration asserts every `/v1/aperture/*` route is authenticated unless explicitly
+    allowlisted — the default-deny regression test
+  - Integration: `member` calling every admin route is refused with a typed forbidden response
+  - Unit: invite token is stored hashed; the plaintext token exists only in the creation response
+  - Unit: an expired invite, a consumed invite, and an unknown invite are all refused identically
+  - Unit: demoting the last admin is refused, including under concurrent attempts
+  - Integration: role change and invite lifecycle events land in the audit log with sanitized args
+  - Verify no hardcoded IPs, hostnames, ports, or org names in new/modified files
+  - **Negative:** assert a member cannot read another member's threads, devices, or settings
+  - **Negative:** assert the assistant-invoked path is subject to the same guard as the HTTP path
+
+  ## EDGE CASES
+  - Invite accepted by someone who already has an account — link the Aperture channel identity to
+    the existing user; **never create a duplicate user and never reset their memory**
+  - Two people racing to accept the same single-use invite — exactly one succeeds, transactionally
+  - Role changed while the user has a live session — re-evaluate authorization per request, not
+    only at issuance, so a demotion takes effect immediately
+  - Invite created and the instance restarted before acceptance — invites are durable, not in-memory
+  - An email-shaped identifier supplied by the operator — treat as opaque data, never validate
+    against or transmit to any external service
+
+- **Acceptance criteria:**
+  - [ ] Two roles implemented with a single default-deny guard over all Aperture routes
+  - [ ] Route enumeration test proves no route is accidentally unauthenticated
+  - [ ] Server-side enforcement independent of UI; member is refused on every admin route
+  - [ ] Invites are single-use, expiring, stored hashed, and refused uniformly when invalid
+  - [ ] The last admin cannot be demoted or deleted, even under concurrency
+  - [ ] User/invite operations are assistant-invocable through the same authorization guard
+  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] All existing tests still pass
+
+---
+
+### APTR-23: Device registry, listing, and revocation that reaches in-flight streams
+- **Priority:** High
+- **Labels:** aperture, bff, auth, devices, security
+- **Agent:** claude
+- **Estimate:** 6h
+- **Blocked by:** APTR-21
+- **Description:** With web, desktop, and mobile targets, one user will routinely hold four or
+  five live sessions. They need to see them and be able to kill one — a lost phone is the
+  motivating case. Revocation must be **immediate and total**: the session dies, the refresh
+  token dies, and any stream that device is holding open is terminated within a bounded window.
+  A revocation that leaves a stream alive is a revocation that did not happen.
+
+  ## FILES
+  - `contracts/aperture-api-v1.yaml` — device list, device rename, device revoke, revoke-all-others
+  - `client/src/routes/settings/devices/` — the device list and revocation surface
+  - **Agent-core repo (sibling PR):** the device record model, the session↔device binding, the
+    revocation broadcaster, and the stream-registry hook that enforces it
+
+  ## APPROACH
+  1. Every session issued in APTR-21 binds to a device record: stable device id, user-supplied or
+     derived label, target kind (`web` / `desktop` / `mobile`), created-at, last-seen, and the
+     current session id. **Store a coarse, non-fingerprinting descriptor** — no precise client
+     fingerprint, no IP retention beyond what is operationally required and documented. Aperture
+     is sovereign and private by construction (Module Contract clause 6); a device list must not
+     become a surveillance log.
+  2. Device id is generated server-side and delivered to the client with the session; it is not
+     derived from client-supplied entropy the user cannot rotate.
+  3. Revoking a device: invalidate its session record and refresh family, then publish a
+     revocation to the stream registry so every stream owned by that session trips the shared
+     cancellation token from APTR-18 and closes with a typed auth `error`. Bound and test the
+     propagation window — "eventually" is not an acceptable answer for a lost phone.
+  4. `revoke-all-others` is a single audited operation that leaves the calling session alive.
+     Offer it prominently in the UI; it is the action a user actually wants after a device loss.
+  5. Revocation is idempotent; revoking an already-revoked device is a no-op success.
+  6. A user may revoke only their own devices. An admin may revoke another user's devices, and
+     every such cross-user action is audit-logged with actor and target.
+  7. Last-seen updates are **throttled**, not written per request — an unthrottled last-seen turns
+     the device table into a write-amplification hot spot on every streamed token.
+  8. **Assistant-operable parity:** listing and revoking devices are assistant-invocable, subject
+     to the same guard (Module Contract clause 4).
+
+  ## TEST PLAN
+  - Integration: revoke a device holding an open stream; assert the stream closes with a typed auth
+    error within the bounded propagation window — the headline test of this item
+  - Integration: revoked device's refresh token is refused and its access token fails verification
+  - Unit: revocation is idempotent; a second revoke is a no-op success
+  - Unit: a user cannot revoke another user's device; an admin can, and it is audit-logged
+  - Unit: last-seen writes are throttled (N streamed events produce at most one write per window)
+  - Unit: the device record contains no precise fingerprint and no retained network address beyond
+    the documented field set
+  - Verify no hardcoded IPs, hostnames, ports, or org names in new/modified files
+  - **Negative:** assert a revoked device cannot resume a stream via `Last-Event-ID` — resume
+    re-authorizes per APTR-16 and must refuse
+  - **Negative:** assert revoking one device does not disturb the user's other live streams
+
+  ## EDGE CASES
+  - Device revoked while it is mid-reconnect-backoff — the reconnect must fail with a typed auth
+    error and stop retrying rather than backing off forever against a dead session
+  - Same physical device reinstalled — a new device record; do **not** attempt to re-identify a
+    device across installs, which would require exactly the fingerprinting this item forbids
+  - A user revoking their own current session — treat as logout, and say so in the UI
+  - Very large device list from a user who never prunes — paginate, and offer bulk revoke-others
+  - Revocation broadcast lost due to a restart — sessions are checked against the store on
+    reconnect, so a restart closes the window rather than reopening it
+
+- **Acceptance criteria:**
+  - [ ] Every session binds to a device record with a coarse, non-fingerprinting descriptor
+  - [ ] Revocation kills session, refresh family, and in-flight streams within a bounded window
+  - [ ] A revoked device cannot resume a stream via `Last-Event-ID`
+  - [ ] `revoke-all-others` works, is audited, and preserves the calling session
+  - [ ] Cross-user revocation is admin-only and audit-logged; revocation is idempotent
+  - [ ] Last-seen updates are throttled; devices are assistant-invocable to list and revoke
+  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] All existing tests still pass
+
+---
+
+### APTR-24: Rate limiting and abuse protection on the auth surface
+- **Priority:** High
+- **Labels:** aperture, bff, auth, security, reliability
+- **Agent:** opus
+- **Estimate:** 5h
+- **Blocked by:** APTR-21
+- **Description:** The auth endpoints are the instance's only unauthenticated attack surface.
+  Without limits, login is an online password-guessing oracle and refresh is a free CPU sink.
+  Add layered, fail-closed rate limiting and abuse protection — and make the limiter itself
+  incapable of becoming a denial-of-service vector against legitimate users.
+
+  ## FILES
+  - `contracts/aperture-errors-v1.md` — the rate-limit URN, its `Retry-After` semantics, and what
+    a client should do about it
+  - `docs/CONFIGURATION.md` — limiter window, burst, and lockout key names — names only
+  - `client/src/auth/session.ts` — client-side handling of a rate-limited response (surface, back
+    off, never hammer)
+  - **Agent-core repo (sibling PR):** the limiter middleware, the per-account failure tracker, and
+    the audit hooks
+
+  ## APPROACH
+  1. Two independent dimensions, because either alone is trivially bypassed: **per-source** (a
+     coarse network identity, to stop one host brute-forcing many accounts) and **per-account**
+     (to stop a distributed attack on one account). Both must trip.
+  2. Token-bucket with a burst allowance, so a user fat-fingering a password twice is not punished
+     while a scripted attempt is throttled within a few tries.
+  3. Progressive delay then temporary lockout on repeated per-account failure. Lockout is
+     **time-bounded and self-clearing** — a permanent lockout triggered by an attacker is itself
+     the denial of service. Expose the remaining window through `Retry-After`.
+  4. Cover login, refresh, invite acceptance, bootstrap, and password change. Deliberately do
+     **not** rate-limit the SSE stream by request count — that is APTR-17's connection budget, and
+     conflating them would throttle legitimate reconnects during a network blip.
+  5. Responses are uniform: a rate-limited login must not reveal whether the account exists, and
+     must not differ in timing (pairs with APTR-21's constant-time verification).
+  6. Limiter state is in-process with a bounded, evicting map. **No external dependency is
+     introduced for this** — a new backing service would be a second door and a new failure mode.
+     Document the single-instance assumption explicitly so a future multi-instance deployment
+     revisits it deliberately rather than discovering it.
+  7. **Fail closed:** if the limiter's own state is unavailable or corrupt, deny rather than allow.
+     An open limiter is the same as no limiter.
+  8. Sustained abuse is audit-logged once per window with a counter, not once per attempt —
+     per-attempt logging is itself an amplification vector against the log.
+
+  ## TEST PLAN
+  - Unit: burst allowance permits a small number of rapid attempts, then throttles
+  - Unit: per-source and per-account limits trip independently — a distributed attack on one
+    account is caught by the account dimension
+  - Unit: lockout is time-bounded and self-clears; `Retry-After` reflects the true remaining window
+  - Unit: rate-limited responses do not distinguish existing from non-existent accounts
+  - Unit: the limiter map is bounded and evicts — a million distinct sources do not exhaust memory
+  - Integration: the client surfaces a rate-limited response and backs off rather than retrying
+  - Verify no hardcoded IPs, hostnames, ports, or org names in new/modified files
+  - **Negative:** assert a corrupt/unavailable limiter state **denies** rather than allows
+  - **Negative:** assert stream reconnects are not throttled by the auth limiter during a simulated
+    network blip
+
+  ## EDGE CASES
+  - Many legitimate users behind one shared network path — the per-source dimension must be
+    generous enough to not lock out a household or office; document the tradeoff
+  - An attacker deliberately locking out a known account — progressive delay with a bounded
+    self-clearing lockout, never an admin-unlock-required state
+  - Clock adjustment moving a lockout window — use a monotonic clock for window arithmetic
+  - Limiter contention under load becoming its own bottleneck — sharded or lock-light structure;
+    assert throughput does not collapse under concurrent attempts
+  - A legitimate scripted client (the desktop shell refreshing on wake) tripping the refresh limit —
+    refresh limits are per-session-family and sized for real device counts
+
+- **Acceptance criteria:**
+  - [ ] Per-source and per-account limiting both enforced, tripping independently
+  - [ ] Progressive delay and a time-bounded, self-clearing lockout with accurate `Retry-After`
+  - [ ] Login, refresh, invite acceptance, bootstrap, and password change all covered
+  - [ ] Rate-limited responses reveal nothing about account existence, in body or timing
+  - [ ] Limiter state is bounded and evicting; no external dependency introduced
+  - [ ] Limiter failure denies rather than allows; abuse is audit-logged per window, not per attempt
+  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] All existing tests still pass
+
+---
+
+### APTR-25: Multi-device sync — read/unread and thread position, modelled explicitly
+- **Priority:** High
+- **Labels:** aperture, bff, sync, multi-device
+- **Agent:** claude
+- **Estimate:** 6h
+- **Blocked by:** APTR-21
+- **Description:** Matrix gives read receipts and per-device read markers for free, and the moment
+  Aperture becomes a second surface that convenience disappears unless it is built. Model it
+  explicitly: per-user-per-thread read position, unread counts, and last-viewed thread state that
+  converges across devices without a server round-trip on every scroll tick.
+
+  This is a **Matrix-parity** item, not a Matrix-replacement item. Matrix keeps its own receipts
+  untouched; this state is Aperture's, and where a thread is shared across both transports the
+  two must not fight (see edge cases).
+
+  ## FILES
+  - `contracts/aperture-api-v1.yaml` — read-position read/write routes and the sync payload shape
+  - `contracts/aperture-events-v1.md` — the `context` sub-shape carrying a read-position update
+  - `client/src/sync/readState.ts` — client read-state store, debouncing, and optimistic update
+  - **Agent-core repo (sibling PR):** the read-position store, the convergence rule, and the
+    fan-out onto the user's other live streams
+
+  ## APPROACH
+  1. Model per `(user_id, thread_id)`: the highest-read message position, a last-updated stamp,
+     and the originating device. Unread counts are **derived** from that position, never stored
+     independently — two sources of truth for a counter always diverge.
+  2. Convergence rule: **monotonic maximum wins.** A device reporting an *older* position never
+     moves the marker backwards. This makes the operation idempotent, commutative, and safe to
+     replay after a reconnect — which is exactly what a flaky mobile client will do.
+  3. Provide an explicit "mark unread" that sets the position backwards deliberately, carried as a
+     distinct operation with its own stamp so it is not swallowed by the monotonic rule. A user
+     choosing to mark unread is intent, not a stale write.
+  4. Client writes are **debounced and coalesced** — scrolling emits one write per settle window,
+     not per frame. Optimistic local update, reconciled from the server's echo.
+  5. Updates fan out to the user's other live streams as a `context` event so a second device
+     updates without polling. Fan-out is scoped strictly to that user's own streams.
+  6. Last-viewed thread and thread-list ordering hints ride the same mechanism, so "open where I
+     left off" works across web, desktop, and PWA.
+  7. Presence-adjacent but **not** notifications: this item ships no tray, no badge-driven alert
+     path, and no push. Unread counts are state the shell may render; any *knock* remains the
+     assistant's prioritized presence budget with quiet hours and opt-out (Soul Contract clause 2,
+     Sprint F for transport).
+  8. All state is per-user and default-private. No cross-user read visibility in v1 — Aperture does
+     not tell another user when you read something.
+
+  ## TEST PLAN
+  - Unit: monotonic maximum convergence — out-of-order and duplicated updates yield the same result
+  - Unit: explicit mark-unread moves the position backwards and survives a subsequent stale update
+  - Unit: unread counts derive from position; no independent counter exists in the store
+  - Integration: two simulated devices converge to the same read state without a manual refresh
+  - Integration: a read-position change fans out as a `context` event to the same user's other
+    streams and to no one else's
+  - Unit: client write debouncing — a burst of scroll events produces one server write
+  - Verify no hardcoded IPs, hostnames, ports, or org names in new/modified files
+  - **Negative:** assert a stale position from a slow device never moves the marker backwards
+  - **Negative:** assert no read-state event is ever delivered to a different user's stream
+
+  ## EDGE CASES
+  - A thread carried on both Matrix and Aperture — Aperture's marker is authoritative for Aperture
+    surfaces only; **do not write to or overwrite Matrix receipts**, and document the two-marker
+    reality rather than papering over it
+  - Device offline for a long period then reconnecting with a stale position — monotonic rule
+    handles it with no special case, which is the point of choosing it
+  - Message deleted or a thread compacted below the stored position — clamp to the current head
+    rather than showing a negative or absurd unread count
+  - A very large thread list — the sync payload must paginate or delta rather than sending all
+    positions on every connect
+  - Clock skew between devices — convergence uses position ordering, not wall-clock, with the stamp
+    used only for the deliberate mark-unread case
+
+- **Acceptance criteria:**
+  - [ ] Read position stored per user-per-thread; unread counts derived, never stored separately
+  - [ ] Convergence is monotonic-maximum: idempotent, commutative, replay-safe
+  - [ ] Explicit mark-unread is honoured and not swallowed by a stale update
+  - [ ] Updates fan out as `context` events to the same user's streams only
+  - [ ] Client writes are debounced and optimistically applied, then reconciled
+  - [ ] Matrix receipts are never written to or overwritten; no cross-user read visibility
+  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] All existing tests still pass
+
+---
+
+### APTR-26: The `aperture` Channel adapter — one agent loop, not a parallel path
+- **Priority:** Critical
+- **Labels:** aperture, channels, rust, lumina-core, architecture
+- **Agent:** opus
+- **Estimate:** 8h
+- **Description:** This is the architecturally load-bearing item of the sprint. The agent core
+  already has an `EDGE-08` `Channel` trait and a `ChannelRegistry` in which Matrix, CLI, HTTP, and
+  (feature-gated) Telegram adapters all feed a single shared `mpsc::Sender<ChannelMessage>`, so
+  **every message crosses the same guarded pipeline regardless of origin** — input guard, tool
+  gate, router rules, cost caps, audit log, conversation buffer, Engram flush.
+
+  Aperture registers into that registry as the `aperture` channel. It does **not** get its own
+  inference path, its own tool dispatch, or its own memory write path. An implementation that
+  calls the model directly from the BFF, bypassing the agent loop, is rejected outright — it
+  would fork the assistant's guarding, its memory, and ultimately its personality.
+
+  ## FILES
+  - `docs/ARCHITECTURE-CHANNELS.md` (this repo) — the adapter's place in the registry, the
+    message/response flow, and an explicit statement of the no-parallel-path rule for reviewers
+  - **Agent-core repo (sibling PR):** `crates/lumina-core/src/channels/aperture.rs` implementing
+    `Channel`; registration in `crates/lumina-core/src/channels/mod.rs`; an `Aperture` variant
+    added to `ChannelType` in `crates/lumina-core/src/users/identity.rs`; the bridge between the
+    adapter's response path and the SSE emitter from APTR-15
+
+  ## APPROACH
+  1. Implement `Channel` for an `ApertureChannel`: `name()` returns `"aperture"`; `start()` wires
+     the BFF's inbound message queue into the shared `mpsc::Sender<ChannelMessage>`; `stop()`
+     drains and closes cleanly.
+  2. Inbound: a REST message post becomes a `ChannelMessage` with `source_channel: "aperture"`,
+     the resolved Lumina `user_id` as `sender_id`, and a `MessageContext` carrying `thread_id` and
+     `request_id` so the response can be routed back to the right stream. Reuse the existing
+     context fields — do not widen the struct unless genuinely required, and if widened, keep every
+     existing channel compiling and behaving identically.
+  3. Outbound: `send_response` is the aggregate path (a whole response), but Aperture's value is
+     *streaming*. Bridge these by having the adapter register a per-turn emitter handle keyed by
+     `request_id`, into which the agent loop's incremental output is written as `token` events, and
+     have `send_response` finalize the turn. **Where the agent loop does not yet expose incremental
+     output, add that hook in the loop itself rather than bypassing the loop** — this is the crux
+     of the item, and the reviewer should verify it specifically.
+  4. Add `ChannelType::Aperture` to the identity enum with its `as_str`/`from_db_str` mappings. The
+     enum already has an `Other(String)` catch-all — **do not** ship Aperture as `Other("aperture")`;
+     a first-class channel gets a first-class variant, and existing rows must continue to
+     round-trip unchanged.
+  5. An Aperture account resolves to a Lumina `user_id` via `ChannelIdentity`, exactly as Matrix and
+     Telegram do. One user, many channel identities. This is what makes APTR-28's continuity
+     property true by construction rather than by careful copying.
+  6. Registration is feature-gated consistently with the BFF's `aperture` cargo feature, so a build
+     without the feature is byte-compatible with today's binary and the Matrix path is untouched.
+  7. Failure isolation: an Aperture adapter failing to start must not prevent Matrix or CLI from
+     starting — the registry already logs and continues, and a test must assert that behaviour is
+     preserved.
+
+  ## TEST PLAN
+  - Unit: `ApertureChannel` implements `Channel`; `start`/`stop` are clean and idempotent
+  - Integration: a message posted through the BFF traverses the **same** guarded agent-loop path as
+    a Matrix message — assert the input guard, tool gate, and audit log all observe it
+  - Integration: incremental output reaches the SSE emitter as `token` events and the turn finalizes
+    through `send_response`
+  - Unit: `ChannelType::Aperture` round-trips through `as_str`/`from_db_str`; existing stored values
+    for matrix/telegram/http round-trip unchanged
+  - Unit: one user with Matrix and Aperture identities resolves to a single `user_id`
+  - Integration: feature-off build compiles and behaves identically to the pre-change binary
+  - Integration: Aperture failing to start leaves Matrix and CLI running
+  - Verify no hardcoded IPs, hostnames, ports, or org names in new/modified files
+  - **Negative — the item's central assertion:** assert the BFF constructs **no** inference or tool
+    call of its own. A grep gate plus a behavioural test proving that with the agent loop stubbed
+    out, an Aperture message produces **no** model output by any other route
+  - **Negative:** assert no existing channel's behaviour changes (Matrix regression suite green)
+
+  ## EDGE CASES
+  - Two Aperture devices sending concurrently for the same user — each turn keys off its own
+    `request_id`; responses must not cross-deliver to the wrong stream
+  - A response arriving after its stream has closed (client gone) — persist the turn and drop the
+    delivery; never panic, never block the loop (pairs with APTR-18)
+  - The `MessageContext` lacking a field Aperture needs — extend deliberately with defaults so every
+    existing channel compiles unchanged; a breaking struct change to a shared type is a review flag
+  - Backpressure from the shared `mpsc` channel under load — apply the APTR-17 policy at the BFF
+    boundary rather than blocking the loop's sender
+  - A user whose Aperture identity exists but whose Lumina user was removed — fail closed with a
+    typed auth error; **never auto-create a replacement user**, which would present as amnesia
+
+- **Acceptance criteria:**
+  - [ ] `ApertureChannel` implements `Channel` and registers in the existing `ChannelRegistry`
+  - [ ] Aperture messages traverse the identical guarded agent loop as every other channel
+  - [ ] The BFF constructs no independent inference or tool path — proven by grep gate and test
+  - [ ] `ChannelType::Aperture` is a first-class variant; existing identity rows round-trip unchanged
+  - [ ] Incremental agent-loop output bridges to the SSE emitter; turns finalize via `send_response`
+  - [ ] Feature-off build is byte-compatible; Matrix and CLI unaffected by an Aperture start failure
+  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] All existing tests still pass
+
+---
+
+### APTR-27: Channel policy realized — Matrix retained, Telegram promoted, Signal stubbed inert
+- **Priority:** High
+- **Labels:** aperture, channels, telegram, signal, matrix, docs
+- **Agent:** claude
+- **Estimate:** 6h
+- **Blocked by:** APTR-26
+- **Description:** Implement the epic's channel policy table exactly, no more and no less.
+  **Matrix stays first-class and unchanged.** **Telegram** is promoted from a bare feature gate to
+  a documented, selectable, **off-by-default** option — the adapter is already real (a substantial,
+  working implementation, not a stub), so this exposes and documents it rather than rewriting it.
+  **Signal is a stub only**: a skeleton, a capability descriptor reporting `unavailable`, config key
+  *names*, and a test asserting it stays inert.
+
+  The Signal scope boundary is absolute and is the reason this item names it in the title: **no
+  account provisioning, no phone-number registration, no credential handling, no live send or
+  receive, no linked-device flow.** An implementation that does any of those is out of scope and
+  must be rejected in review even if it works.
+
+  ## FILES
+  - `docs/CHANNELS.md` (this repo) — the policy table, how to enable Telegram, why Signal is inert,
+    and the explicit statement that Matrix is retained and not deprecated
+  - `README.md` — channel policy section updated to match
+  - **Agent-core repo (sibling PR):** promote the Telegram adapter to a runtime-selectable channel
+    with a default-off config switch; add `crates/lumina-core/src/channels/signal.rs` as an inert
+    skeleton implementing `Channel` and reporting `unavailable`; register both through the module
+    descriptor mechanism from APTR-08
+
+  ## APPROACH
+  1. **Matrix:** touch nothing functional. Add a regression assertion that the Matrix adapter starts,
+     registers, and round-trips a message exactly as before. Any diff to the Matrix adapter beyond
+     comments or shared-type accommodation is a review flag.
+  2. **Telegram — expose, do not rewrite.** Keep the cargo feature for compile-time inclusion, and
+     add a **runtime** enablement switch that defaults to **off**. Enabling it requires the operator
+     to turn it on *and* for the adapter's credential to be present in the secret store — read via
+     `SecretManager::get()`, **never** `std::env::var`, and never authored into a file. With the
+     feature compiled in but the switch off, the adapter must not start, must not connect, and must
+     report `unavailable` in its descriptor.
+  3. **Telegram documentation** is the real deliverable here: what it is for, its privacy posture
+     relative to Matrix, the config key names, how to enable it, how to disable it, and that it is
+     off by default. Written for the public mirror — key names and placeholders only.
+  4. **Signal — inert skeleton.** Implement `Channel` with `name()` returning `"signal"`, a `start()`
+     that logs once and returns without connecting to anything, a `send_response()` that returns a
+     typed capability-unavailable error, and a `stop()` that is a no-op. Declare the config key
+     **names** it will one day need, documented as reserved and non-functional. **No network client
+     is constructed. No credential is read. No number is registered.**
+  5. Signal's module descriptor reports `unavailable` with the reason "deferred by operator
+     decision", so the shell renders an inert explained tile per APTR-08 rather than a broken screen.
+  6. `ChannelType` gains a `Signal` variant only if it can be added without implying support; if in
+     doubt, leave Signal out of the identity enum entirely until it is real. Record the decision in
+     `docs/CHANNELS.md`.
+  7. Every channel appears in the module descriptor list with an accurate capability state, so the
+     shell's channel settings surface is derived from descriptors, never a hardcoded list.
+
+  ## TEST PLAN
+  - Integration: Matrix regression — starts, registers, round-trips a message unchanged
+  - Unit: Telegram with the runtime switch off does not start and reports `unavailable`
+  - Unit: Telegram with the switch on but the credential absent reports `unavailable` with a clear
+    reason and does **not** start with a placeholder credential
+  - Unit: Telegram credential is read via the secret manager; grep gate asserts no `std::env::var`
+    of a secret-shaped name
+  - Unit: the Signal adapter's `start()` opens no connection and its `send_response()` returns a
+    typed capability-unavailable error
+  - Unit: Signal's descriptor reports `unavailable` with a reason
+  - Verify no hardcoded IPs, hostnames, ports, or org names in new/modified files
+  - **Negative — the Signal inertness test:** assert the Signal module constructs no network client,
+    reads no credential, and performs no registration; a source-level assertion plus a behavioural
+    test that `start()` produces zero outbound activity
+  - **Negative:** assert Telegram is off in a default configuration — a fresh instance with no
+    channel configuration starts Matrix and Aperture only
+
+  ## EDGE CASES
+  - Telegram compiled out entirely — the descriptor must still be present and report `unavailable`,
+    so the settings surface explains the absence rather than hiding the channel
+  - An operator enabling Telegram with a malformed credential — fail to `unavailable` with a clear
+    reason; never retry-loop against the upstream, and never log the credential
+  - Someone later extending the Signal stub — `docs/CHANNELS.md` must state the scope boundary
+    explicitly so a future agent does not treat the skeleton as an invitation
+  - Signal's presence in the descriptor list tempting the UI into rendering an enable toggle — the
+    descriptor must mark it non-configurable, not merely unavailable
+  - A shared-type change from APTR-26 touching the Matrix adapter — permitted only as a mechanical
+    accommodation, and called out explicitly in the PR body
+
+- **Acceptance criteria:**
+  - [ ] Matrix is functionally unchanged and covered by a passing regression assertion
+  - [ ] Telegram is runtime-selectable and **off by default**; off means not started, not connected
+  - [ ] Telegram credentials read via the secret manager only; absent credential ⇒ `unavailable`
+  - [ ] Signal ships as an inert skeleton with a descriptor reporting `unavailable` and a reason
+  - [ ] Signal performs no provisioning, registration, credential read, or network activity — tested
+  - [ ] `docs/CHANNELS.md` documents the policy, the Telegram enablement steps, and the Signal boundary
+  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] README updated to document the channel policy and Telegram's off-by-default status
+
+---
+
+### APTR-28: CONTINUITY — adding Aperture must not reset memory, traits, or relationship lore
+- **Priority:** Critical
+- **Labels:** aperture, continuity, soul-contract, memory, engram
+- **Agent:** opus
+- **Estimate:** 5h
+- **Blocked by:** APTR-26
+- **Description:** Soul Contract clause 4: **continuity survives every swap.** The assistant has
+  months of Engram memory, drifted personality traits, and accumulated relationship lore built up
+  over the Matrix channel. Adding Aperture as a new channel must not reset, shadow, fork, or
+  quietly re-baseline any of it. A user who has talked to Lumina for months and then opens Aperture
+  for the first time must be met by the *same* assistant — same recollection, same voice, same
+  relationship — not a polite stranger.
+
+  This item is the epic-mandated continuity item. It is primarily a **test and verification** item
+  with whatever minimal wiring the tests prove is missing, and it is deliberately scheduled after
+  APTR-26 so it validates the real integration rather than a hypothetical one.
+
+  ## FILES
+  - `docs/CONTINUITY.md` (this repo) — the continuity invariants, why they hold structurally, and
+    the standing rule that no future item may reset identity state
+  - **Agent-core repo (sibling PR):** the continuity test suite spanning
+    `crates/lumina-core/src/users/identity.rs`, `crates/lumina-core/src/conversation/`
+    (buffer, summarizer, engram_flush), `crates/lumina-core/src/engram/`, and the persona/prompt
+    assembler; plus any minimal wiring the tests reveal as missing
+
+  ## APPROACH
+  1. State the invariants explicitly, then test each one:
+     - **I1 — one user, many channels.** An Aperture `ChannelIdentity` linked to an existing user
+       resolves to the same `user_id`; no duplicate user is created.
+     - **I2 — memory is user-scoped, not channel-scoped.** Engram recall for a turn arriving over
+       Aperture returns the same memories as the identical turn over Matrix.
+     - **I3 — traits persist.** Personality traits and their drift state are read from the same
+       store regardless of channel; registering a new channel performs no trait reset or
+       re-initialization.
+     - **I4 — relationship lore persists.** Accumulated relationship context is unchanged by
+       channel registration.
+     - **I5 — conversation continuity.** The conversation buffer, summarizer, and Engram flush
+       operate on the same user scope; a cross-channel conversation summarizes as one relationship,
+       not two.
+     - **I6 — persona voice is unchanged.** The prompt assembler produces the same persona framing
+       for the same user over Aperture as over Matrix (Soul Contract clause 1: speak, never template).
+  2. Build a fixture that seeds a user with Matrix history, engram memories, drifted traits, and
+     relationship lore; then registers an Aperture identity for that user; then asserts every
+     invariant holds **byte-for-byte where the data is deterministic** and semantically where it is
+     not.
+  3. The headline **negative test**: capture the full identity state (memories, traits, lore,
+     summaries) before Aperture registration, register Aperture, capture again, and assert **zero
+     destructive delta** — nothing removed, nothing zeroed, nothing re-initialized. Additive change
+     is permitted; loss is a hard failure. This test is the item's deliverable and must be named so
+     it is obvious in the suite.
+  4. Also test the **new-user** path so the invariants do not accidentally require pre-existing
+     Matrix history: a user created via Aperture invite gets a normal, fully-functional identity.
+  5. Where a test reveals genuinely missing wiring (for example a code path keyed on channel where
+     it should be keyed on user), fix it minimally and precisely. **Do not opportunistically
+     refactor the memory subsystem inside a continuity item** — a broad refactor here is exactly the
+     kind of change that causes the loss this item exists to prevent.
+  6. Document in `docs/CONTINUITY.md` that these tests are a **standing gate**: any future item in
+     Sprints C–G that touches identity, session, or memory must keep them green, and a change that
+     requires weakening them needs an explicit operator decision, not an agent's judgment call.
+  7. Add a first-class assertion that Aperture never writes to a *new* memory store — it uses the
+     existing Engram path or it is wrong.
+
+  ## TEST PLAN
+  - Unit: I1 — linking an Aperture identity to an existing user yields one `user_id`, no duplicate
+  - Integration: I2 — identical prompts over Matrix and Aperture recall the same memory set
+  - Unit: I3 — trait values and drift state are identical before and after Aperture registration
+  - Unit: I4 — relationship lore is unchanged before and after registration
+  - Integration: I5 — a conversation spanning both channels summarizes and flushes as one scope
+  - Unit: I6 — persona framing for the same user is equivalent across channels
+  - Unit: new-user-via-Aperture path produces a normal, complete identity
+  - Verify no hardcoded IPs, hostnames, ports, or org names in new/modified files
+  - **Negative — the mandated continuity test:** full identity-state snapshot before and after
+    Aperture registration asserts **zero destructive delta**; the test fails loudly on any removal,
+    zeroing, or re-initialization of memory, traits, or lore
+  - **Negative:** assert Aperture writes to no new or parallel memory store — the existing Engram
+    path or nothing
+
+  ## EDGE CASES
+  - A user whose Matrix identity and Aperture identity are created in the opposite order — the
+    invariants must hold symmetrically; test both orders
+  - Two Aperture identities for one user (two accounts, one person) — the operator's intent decides;
+    the default is that a linked identity joins the existing user, and an unlinked signup is a new
+    user, with no silent merging of two people's memories in either direction
+  - A trait store schema migration landing concurrently — the continuity suite must fail on data
+    loss even across a migration, which is precisely when it is most needed
+  - Deliberate user-initiated memory deletion — out of scope here and must not be conflated with a
+    reset; the test asserts *incidental* loss, not the absence of an explicit delete feature
+  - An empty-memory new user producing a trivially-passing snapshot comparison — the fixture must
+    seed non-trivial state, and a test asserts the fixture itself is non-empty
+
+- **Acceptance criteria:**
+  - [ ] All six continuity invariants (I1–I6) are covered by explicit passing tests
+  - [ ] The mandated negative test proves zero destructive delta to memory, traits, or lore
+  - [ ] Aperture writes to no new or parallel memory store; the existing Engram path is used
+  - [ ] Identity linking is symmetric — both creation orders tested and passing
+  - [ ] New-user-via-Aperture produces a normal, complete identity
+  - [ ] `docs/CONTINUITY.md` records the invariants and the standing-gate rule for later sprints
+  - [ ] No hardcoded infrastructure values in new/modified code
+  - [ ] All existing tests still pass

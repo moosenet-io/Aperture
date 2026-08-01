@@ -38,9 +38,27 @@ This file is internal scaffolding for the authoring agents. It is NOT a delivera
 - At least one explicit **negative** test
 
 ## HARD SECURITY RULES — a violation makes the spec rejectable
-- **No literal IP addresses, hostnames, domains, ports, org names, emails, personal names,
-  API keys, tokens, or absolute paths containing a username.** Anywhere. Use env-var NAMES
-  (e.g. `APERTURE_SESSION_SIGNING_KEY`) and repo-relative paths. This repo mirrors publicly.
+- **No literal IP addresses, internal hostnames, internal domains, ports, internal org paths,
+  emails, personal names, API keys, tokens, or absolute paths containing a username.**
+  Anywhere. Use env-var NAMES (e.g. `APERTURE_SESSION_SIGNING_KEY`) and repo-relative paths.
+  This repo mirrors publicly.
+
+  **CLARIFICATION (ruling, 2026-08-01).** The rule targets *infrastructure identifiers* — the
+  things that would let a reader locate or reach the fleet. It does **not** ban names.
+  Explicitly PERMITTED, and expected, in specs and docs:
+  - **Product and module names:** MooseNet, Lumina, Aperture, Muse, Harmony, Terminus, Chord,
+    Engram, Atlas. These already appear throughout the public mirrors and the published design
+    system. Do not obfuscate them.
+  - **Platform, standard, and vendor-neutral technical terms:** Windows, macOS, iOS, Android,
+    Safari, Chromium, Tauri, Vite, `apple-touch-icon`, "Add to Home Screen", VAPID, WCAG, SSE.
+  - **Public package and licence names.**
+  Explicitly FORBIDDEN, and the actual target of the rule:
+  - Any address that resolves to fleet infrastructure — an IP, an internal hostname, an
+    internal domain, a `host:port`, or an internal forge/tracker URL.
+  - Container/host identifiers (e.g. a `CT###`-style tag), operator names, operator emails.
+  - Any credential value, or an absolute path containing a username.
+  If in doubt: would this string help a stranger reach or identify the operator's machines?
+  If yes, it is forbidden. If it only names a product or a public standard, it is fine.
 - **File paths are repo-relative only.** Never a forge URL, never `/home/<user>/...`.
 - **Secrets** are read via `SecretManager::get()` / `vault::manager().get()`. Never
   `std::env::var` for anything token/key/password/secret-shaped. Never a value in a file.
