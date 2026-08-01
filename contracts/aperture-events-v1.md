@@ -282,7 +282,14 @@ client that has never connected omits the header and receives only live events.
 
 A client persists the highest `seq` it has seen **per `stream_id`** across reconnects.
 
-**The five input cases. Every value of this header falls into exactly one of them:**
+**Six request cases: absence of the header, plus five distinct header values.** Every request
+falls into exactly one row below.
+
+*(The count is grouped deliberately. A bare integer drifts the moment a case is added — it lives
+apart from the thing it counts — so it is written as "absence plus five values" to make what is
+being counted visible to whoever adds the next one. Note that these six **request cases** are not
+the five **`resync` reasons** in §5.3: the absent and within-buffer cases emit no `resync` at all,
+and `gap_detected` arises mid-stream rather than from a resume request.)*
 
 | `Last-Event-ID` | Meaning | Result |
 |---|---|---|
@@ -415,8 +422,8 @@ high-water mark**: the client is acknowledging an event the server never emitted
 client bug, a resumed snapshot of client state from a different deployment, a replayed or crafted
 header, or a server that lost sequence state without losing the id.
 
-It is none of the other four cases — not live, not aged out, not unknown, not malformed — which is
-why it is named. Left undefined, three implementations would pick three different answers:
+It matches none of the other five request cases — not an absent header, not live, not aged out,
+not unknown, not malformed — which is why it is named. Left undefined, three implementations would pick three different answers:
 
 | Tempting answer | Why it is wrong |
 |---|---|
