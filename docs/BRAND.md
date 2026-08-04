@@ -89,11 +89,52 @@ The voice is precise, technical, quietly confident — no exclamation, no emoji 
 | `assets/aperture-wordmark.svg` | 220×44 | Mark plus "Aperture" and the "constellation client" subtitle |
 | `assets/banner.svg` | 1280×640 | Repo hero / README header |
 | `assets/architecture.svg` | 1280×720 | System diagram |
-| `assets/badges.svg` | 800×40 | Status strip |
+| `assets/badges.svg` | 800×40 | Fact strip — static repository properties only, never a build or test status (see **Badges** below) |
+
+`client/public/favicon.svg` is the served copy of the favicon, byte-identical to the
+`assets/` original. A test asserts that identity, so editing one and forgetting the other
+fails rather than shipping a stale tab icon.
 
 Every asset is self-contained: no external references, no embedded raster payloads, no
 remote fonts. They can be committed, mirrored, and served from anywhere without a
 dependency following them.
+
+**That is enforced, not merely intended.** `client/scripts/assert-svg-safe.mjs` runs on every
+build over `assets/` and `client/public/`, and rejects `<script>`, `<foreignObject>`, `on*`
+event handlers, any reference that is not a same-document fragment, embedded rasters, and
+`javascript:`/`data:`/`vbscript:`/`file:`/`blob:` schemes. Elements and attributes are
+**allowlisted**, so a construct nobody anticipated fails by default — which means adding an
+asset that needs a new element is deliberately a conversation rather than a config edit. The
+gate parses strict XML and fails on any asset it cannot fully parse. It is a security gate:
+these files render on the public mirror, where an SVG opened directly is a document, not a
+picture.
+
+Two consequences bind anyone authoring an asset:
+
+- **The `style` attribute is not permitted.** Use presentation attributes (`fill`, `stroke`,
+  `stop-color`, and the rest). A CSS grammar in an attribute value cannot be checked without
+  tokenizing escapes and comments correctly forever, so the attribute is simply not admitted.
+- **A `<style>` element is permitted, but its body must stay tiny.** Plain style rules, at most
+  one `@media (prefers-color-scheme: light|dark)` wrapper, and values built only from colours,
+  keywords, numbers and lengths — no function, string, escape or entity reference. This is what
+  the wordmark's light-mode rule already looks like, and it is deliberately not room for more.
+
+What it does **not** check is everything else on this page — composition, legibility at the
+minimum sizes below, light-page behaviour, and whether the mark was used correctly. Those are
+human judgements, and a green gate says nothing about them.
+
+## Badges
+
+`assets/badges.svg` states only **static properties of the repository**: status, that the
+change process is review-gated, the target set, the licence, and the absence of telemetry.
+
+**It must never carry a build or test status.** A checked-in SVG cannot observe one; it can
+only record what was true when it was drawn and then be wrong silently. An earlier revision
+of this strip read "build passing" while the repository had no CI at all, and "tests pending"
+beside a test suite that already existed and passed — wrong in both directions at once. A live status
+badge needs a service rendering it against a real run, which arrives with the CI work
+(APTR-09). Until then, if a fact cannot be read off the repository itself, it does not belong
+in this strip.
 
 ## Light and dark
 

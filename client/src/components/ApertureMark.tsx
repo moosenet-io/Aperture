@@ -11,12 +11,18 @@
  *
  * Colour comes from `currentColor` so the design system (APTR-02) owns the palette.
  */
+import type { UiString } from '../strings';
 
 export interface ApertureMarkProps {
   /** Rendered edge length in px. */
   size?: number;
-  /** Accessible name. Omit for a decorative mark. */
-  title?: string;
+  /**
+   * Accessible name. Omit for a decorative mark.
+   *
+   * Typed as a {@link UiString} (APTR-100): an accessible name is text a user hears, so it comes
+   * from the string catalogue like any other user-facing string. A bare literal does not compile.
+   */
+  title?: UiString;
 }
 
 export function ApertureMark({ size = 32, title }: ApertureMarkProps): JSX.Element {

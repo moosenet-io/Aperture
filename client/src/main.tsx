@@ -16,6 +16,7 @@ import { applyStoredTheme } from './theme';
 import { App } from './App';
 import './styles/constellation.css';
 import './styles/primitives.css';
+import './styles/state.css';
 import './styles/app.css';
 
 applyStoredTheme();

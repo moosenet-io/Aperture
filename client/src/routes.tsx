@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 
 import { ApertureMark } from './components/ApertureMark';
+import { t } from './strings';
 
 /**
  * Route table placeholder.
@@ -16,9 +17,9 @@ export const ROUTES = {
 function Placeholder(): JSX.Element {
   return (
     <main className="app-placeholder">
-      <ApertureMark size={64} title="Aperture" />
-      <h1>Aperture</h1>
-      <p>The client shell is under construction.</p>
+      <ApertureMark size={64} title={t('app.mark.title')} />
+      <h1>{t('app.name')}</h1>
+      <p>{t('app.shell.underConstruction')}</p>
     </main>
   );
 }
