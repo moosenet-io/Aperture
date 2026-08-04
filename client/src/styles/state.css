@@ -1,0 +1,355 @@
+/* APTR-100 — the state primitives' token usage.
+ *
+ * Every value here is a token from constellation.css, or a calc() over one. The adherence lint
+ * fails the build on a colour, a font stack, or a raw px dimension without a recorded reason —
+ * the three `dimension-literal:` comments below are the only literals in the file, and each says
+ * why the value cannot be a token.
+ *
+ * Motion appears in three places (the skeleton shimmer, the spinner, the indeterminate progress
+ * bar) and all three are disabled under `prefers-reduced-motion` at the bottom of this file, in
+ * ADDITION to the token layer's global collapse. The components also withhold the shimmer in
+ * JavaScript. Neither layer is redundant: CSS cannot remove an element, and JS cannot reach a
+ * pseudo-element.
+ */
+
+/* ── The accessible-only label ───────────────────────────────────────────────────────────────
+   Off-screen for sighted users, present in the accessibility tree. `display: none` and
+   `visibility: hidden` would remove it from that tree, which is the one thing it exists for. */
+.visually-hidden {
+  position: absolute;
+  /* dimension-literal: a 1x1 box is the smallest that keeps the node in the accessibility tree —
+     zero size removes it from the tree in several engines, which is the failure this avoids */
+  width: 1px;
+  /* dimension-literal: paired with the width above for the same reason */
+  height: 1px;
+  margin: calc(var(--border-width) * -1);
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* ── Skeleton ──────────────────────────────────────────────────────────────────────────────── */
+
+.skeleton {
+  display: block;
+}
+
+.skeleton-bars {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.skeleton-bar {
+  display: block;
+  background: var(--surface-inset);
+  border-radius: var(--radius-sm);
+}
+
+.skeleton-text {
+  height: var(--space-3);
+  width: 100%;
+}
+
+/* Real paragraphs do not end at the margin, and a placeholder that does reads as a table. */
+.skeleton-text-last {
+  width: 60%;
+}
+
+.skeleton-heading {
+  height: var(--space-5);
+  width: 40%;
+}
+
+.skeleton-avatar {
+  width: var(--space-7);
+  height: var(--space-7);
+  border-radius: var(--radius-pill);
+}
+
+.skeleton-thumbnail {
+  width: var(--space-9);
+  height: var(--space-8);
+  border-radius: var(--radius-md);
+}
+
+.skeleton-control {
+  width: var(--space-9);
+  height: var(--space-6);
+  border-radius: var(--radius-md);
+}
+
+.skeleton-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    var(--surface-inset) 0%,
+    var(--bg-hover) 50%,
+    var(--surface-inset) 100%
+  );
+  background-size: 200% 100%;
+  animation: aperture-skeleton-shimmer var(--dur-slow) var(--ease-in-out) infinite;
+}
+
+@keyframes aperture-skeleton-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.skeleton-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* ── Spinner ──────────────────────────────────────────────────────────────────────────────── */
+
+.spinner {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.spinner-ring {
+  display: block;
+  box-sizing: border-box;
+  border: calc(var(--border-width) * 2) solid var(--line-strong);
+  border-top-color: var(--accent);
+  border-radius: var(--radius-pill);
+  animation: aperture-spin var(--dur-slow) linear infinite;
+}
+
+.spinner-sm .spinner-ring {
+  width: var(--space-4);
+  height: var(--space-4);
+}
+
+.spinner-md .spinner-ring {
+  width: var(--space-5);
+  height: var(--space-5);
+}
+
+.spinner-lg .spinner-ring {
+  width: var(--space-6);
+  height: var(--space-6);
+}
+
+/* With motion withheld the ring still has to READ as "busy", so the accent arc stays and only
+   the rotation goes. A ring that lost its accent would be an empty circle. */
+.spinner-still .spinner-ring {
+  animation: none;
+}
+
+@keyframes aperture-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── The empty / error block ──────────────────────────────────────────────────────────────── */
+
+.state-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-7) var(--space-5);
+  text-align: center;
+  max-width: var(--maxw-prose);
+  margin-inline: auto;
+}
+
+.state-title {
+  margin: 0;
+  font-size: var(--fs-h4);
+  font-weight: var(--fw-semibold);
+  line-height: var(--lh-heading);
+  color: var(--text-heading);
+}
+
+.state-detail {
+  margin: 0;
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  color: var(--text-body);
+}
+
+.state-hint {
+  margin: 0;
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+  color: var(--text-muted);
+}
+
+.state-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  justify-content: center;
+  margin-top: var(--space-2);
+}
+
+.state-reference {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.state-reference-label {
+  font-size: var(--fs-label);
+  letter-spacing: var(--ls-label);
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.error-state .state-title {
+  color: var(--status-error);
+}
+
+/* ── Progress ─────────────────────────────────────────────────────────────────────────────── */
+
+.progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+}
+
+/* The native element is restyled rather than replaced: it carries the progressbar semantics and
+   draws the proportion without an inline width, which the adherence lint forbids. */
+.progress-track {
+  appearance: none;
+  flex: 1 1 auto;
+  height: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--surface-inset);
+  color: var(--accent);
+  overflow: hidden;
+}
+
+.progress-track::-webkit-progress-bar {
+  background: var(--surface-inset);
+  border-radius: var(--radius-pill);
+}
+
+.progress-track::-webkit-progress-value {
+  background: var(--accent);
+  border-radius: var(--radius-pill);
+  transition: inline-size var(--dur-base) var(--ease-out);
+}
+
+.progress-track::-moz-progress-bar {
+  background: var(--accent);
+  border-radius: var(--radius-pill);
+}
+
+.progress-value {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-mono-sm);
+  letter-spacing: var(--ls-mono);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* An indeterminate <progress> has no value to draw, so the track itself carries the motion. */
+.progress-indeterminate .progress-track {
+  background-image: linear-gradient(
+    90deg,
+    var(--surface-inset) 0%,
+    var(--accent-soft) 50%,
+    var(--surface-inset) 100%
+  );
+  background-size: 200% 100%;
+  animation: aperture-skeleton-shimmer var(--dur-slow) var(--ease-in-out) infinite;
+}
+
+/* ── Inline notice ────────────────────────────────────────────────────────────────────────── */
+
+.inline-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: var(--border-width) solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--tint-neutral);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+  color: var(--text-body);
+}
+
+.inline-notice-message {
+  flex: 1 1 auto;
+}
+
+.inline-notice-action {
+  flex: 0 0 auto;
+}
+
+.inline-notice-info {
+  background: var(--tint-info);
+  border-color: var(--tint-info-line);
+  color: var(--on-info);
+}
+
+.inline-notice-success {
+  background: var(--tint-success);
+  border-color: var(--tint-success-line);
+  color: var(--on-success);
+}
+
+.inline-notice-warning {
+  background: var(--tint-warning);
+  border-color: var(--tint-warning-line);
+  color: var(--on-warning);
+}
+
+.inline-notice-error {
+  background: var(--tint-error);
+  border-color: var(--tint-error-line);
+  color: var(--on-error);
+}
+
+/* ── prefers-reduced-motion ───────────────────────────────────────────────────────────────────
+   The token layer already caps every animation at one iteration. That leaves a shimmer FROZEN
+   mid-sweep, which still reads as a decorative artefact rather than a placeholder, so the three
+   moving parts here are removed outright. The components additionally withhold the shimmer
+   class in JS — see components/state/motion.ts for why both layers exist. */
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-shimmer,
+  .spinner-ring,
+  .progress-indeterminate .progress-track {
+    animation: none;
+    background-image: none;
+  }
+
+  .progress-track::-webkit-progress-value {
+    transition: none;
+  }
+}
+
+/* ── forced-colors ────────────────────────────────────────────────────────────────────────────
+   Under a forced-colours mode the tinted surfaces collapse to the user's own palette, so a
+   notice's meaning would be carried by a background that is no longer there. The border is
+   restated in a system colour so the block still reads as a distinct region. */
+@media (forced-colors: active) {
+  .inline-notice {
+    border-color: CanvasText;
+  }
+
+  .skeleton-bar,
+  .progress-track {
+    border: var(--border-width) solid CanvasText;
+  }
+}

@@ -1,50 +1,57 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="800" height="40" viewBox="0 0 800 40"
-     font-family="'DejaVu Sans', Verdana, Helvetica, sans-serif" font-size="11">
-  <title>Aperture — status badges</title>
+     font-family="'DejaVu Sans', Verdana, Helvetica, sans-serif" font-size="11"
+     role="img" aria-label="Aperture: status pre-1.0, pipeline review-gated, targets web, desktop and mobile, licence MIT, telemetry none">
+  <title>Aperture — repository facts</title>
+  <desc>A hand-authored, checked-in strip. Every badge states a STATIC property of this
+  repository. None of them reports a build or test status, because a committed SVG cannot
+  observe one: it would state whatever was true on the day it was drawn and then be wrong
+  silently. Live status badges require a CI service to render them, which arrives with APTR-09.</desc>
   <defs>
     <linearGradient id="ap-sheen" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
     </linearGradient>
   </defs>
 
-  <!-- build / passing -->
-  <g transform="translate(15,0)">
-    <rect x="0" y="8" width="116" height="22" rx="5" fill="#2a2342"/>
-    <rect x="52" y="8" width="64" height="22" rx="5" fill="#10b981"/><rect x="52" y="8" width="12" height="22" fill="#10b981"/>
-    <rect x="0" y="8" width="116" height="11" rx="5" fill="url(#ap-sheen)"/>
-    <text x="26" y="23" text-anchor="middle" fill="#c7c3d6">build</text>
-    <text x="84" y="23" text-anchor="middle" fill="#062b1f" font-weight="bold">passing</text>
+  <!-- status / pre-1.0 — matches SECURITY.md's supported-versions policy and the client's 0.x version. -->
+  <g transform="translate(17,0)">
+    <rect x="0" y="8" width="112" height="22" rx="5" fill="#2a2342"/>
+    <rect x="52" y="8" width="60" height="22" rx="5" fill="#f59e0b"/><rect x="52" y="8" width="12" height="22" fill="#f59e0b"/>
+    <rect x="0" y="8" width="112" height="11" rx="5" fill="url(#ap-sheen)"/>
+    <text x="26" y="23" text-anchor="middle" fill="#c7c3d6">status</text>
+    <text x="82" y="23" text-anchor="middle" fill="#3a2405" font-weight="bold">pre-1.0</text>
   </g>
 
-  <!-- tests / pending (no suite yet) -->
-  <g transform="translate(151,0)">
-    <rect x="0" y="8" width="116" height="22" rx="5" fill="#2a2342"/>
-    <rect x="52" y="8" width="64" height="22" rx="5" fill="#f59e0b"/><rect x="52" y="8" width="12" height="22" fill="#f59e0b"/>
-    <rect x="0" y="8" width="116" height="11" rx="5" fill="url(#ap-sheen)"/>
-    <text x="26" y="23" text-anchor="middle" fill="#c7c3d6">tests</text>
-    <text x="84" y="23" text-anchor="middle" fill="#3a2405" font-weight="bold">pending</text>
+  <!-- pipeline / review-gated — a property of the process, described in CONTRIBUTING.md and
+       docs/PIPELINE.md. Not a claim about any particular run. -->
+  <g transform="translate(137,0)">
+    <rect x="0" y="8" width="164" height="22" rx="5" fill="#2a2342"/>
+    <rect x="64" y="8" width="100" height="22" rx="5" fill="#7c3aed"/><rect x="64" y="8" width="12" height="22" fill="#7c3aed"/>
+    <rect x="0" y="8" width="164" height="11" rx="5" fill="url(#ap-sheen)"/>
+    <text x="32" y="23" text-anchor="middle" fill="#c7c3d6">pipeline</text>
+    <text x="114" y="23" text-anchor="middle" fill="#ffffff" font-weight="bold">review-gated</text>
   </g>
 
-  <!-- targets -->
-  <g transform="translate(287,0)">
+  <!-- targets — blue, because BRAND.md assigns blue to the client surfaces. Per-target
+       readiness is the Targets table in the README, immediately below this strip. -->
+  <g transform="translate(309,0)">
     <rect x="0" y="8" width="225" height="22" rx="5" fill="#2a2342"/>
-    <rect x="64" y="8" width="161" height="22" rx="5" fill="#7c3aed"/><rect x="64" y="8" width="12" height="22" fill="#7c3aed"/>
+    <rect x="64" y="8" width="161" height="22" rx="5" fill="#3b82f6"/><rect x="64" y="8" width="12" height="22" fill="#3b82f6"/>
     <rect x="0" y="8" width="225" height="11" rx="5" fill="url(#ap-sheen)"/>
     <text x="32" y="23" text-anchor="middle" fill="#c7c3d6">targets</text>
     <text x="144" y="23" text-anchor="middle" fill="#ffffff" font-weight="bold">web · desktop · mobile</text>
   </g>
 
   <!-- licence -->
-  <g transform="translate(532,0)">
+  <g transform="translate(542,0)">
     <rect x="0" y="8" width="108" height="22" rx="5" fill="#2a2342"/>
-    <rect x="64" y="8" width="44" height="22" rx="5" fill="#3b82f6"/><rect x="64" y="8" width="12" height="22" fill="#3b82f6"/>
+    <rect x="64" y="8" width="44" height="22" rx="5" fill="#7c3aed"/><rect x="64" y="8" width="12" height="22" fill="#7c3aed"/>
     <rect x="0" y="8" width="108" height="11" rx="5" fill="url(#ap-sheen)"/>
     <text x="32" y="23" text-anchor="middle" fill="#c7c3d6">licence</text>
     <text x="86" y="23" text-anchor="middle" fill="#ffffff" font-weight="bold">MIT</text>
   </g>
 
-  <!-- telemetry -->
-  <g transform="translate(660,0)">
+  <!-- telemetry — green, and an enforced property: no analytics, no CDN, no remote font. -->
+  <g transform="translate(658,0)">
     <rect x="0" y="8" width="125" height="22" rx="5" fill="#2a2342"/>
     <rect x="77" y="8" width="48" height="22" rx="5" fill="#10b981"/><rect x="77" y="8" width="12" height="22" fill="#10b981"/>
     <rect x="0" y="8" width="125" height="11" rx="5" fill="url(#ap-sheen)"/>

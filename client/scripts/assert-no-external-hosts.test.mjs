@@ -228,7 +228,7 @@ describe('protocol-relative origins are validated as URLs, not by a dotted-host 
   });
 
   it('flags a host with a port', () => {
-    expect(scanText('const u="//localhost:3000/api";', 'js', allowed)).toHaveLength(1);
+    expect(scanText('const u="//<REDACTED_LOCAL_URL_1>/api";', 'js', allowed)).toHaveLength(1);
   });
 
   it('flags one in markup and in CSS too', () => {

@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/badges.svg" alt="Status badges" width="800">
+  <img src="assets/badges.svg" alt="status pre-1.0 · pipeline review-gated · targets web, desktop and mobile · licence MIT · telemetry none" width="800">
 </p>
 
 # Aperture
@@ -105,7 +105,7 @@ guarded agent loop, so behaviour is identical regardless of where a message arri
 ```bash
 # client workspace — Node >= 20
 npm --prefix client ci
-npm --prefix client run build      # contract-drift + SDK gates, tsc --noEmit, vite build, egress lint
+npm --prefix client run build      # drift + SDK + SVG gates, tsc --noEmit, source lints, vite build, egress lint
 npm --prefix client run test
 ```
 
@@ -123,13 +123,15 @@ Tailwind: styling is the shared constellation token layer (see **Design system**
 |---|---|
 | `npm --prefix client run dev` | Vite dev server |
 | `npm --prefix client run typecheck` | `tsc --noEmit` under `strict` |
-| `npm --prefix client run build` | the drift gate → the SDK static gate → `tsc --noEmit` → the adherence lint → `vite build` → the egress lint. Any of them failing fails the build |
+| `npm --prefix client run build` | the drift gate → the SDK static gate → the SVG safety gate → `tsc --noEmit` → the adherence lint → the no-bare-strings gate → `vite build` → the egress lint. Any of them failing fails the build |
 | `npm --prefix client run test` | vitest |
 | `npm --prefix client run gen:api` | regenerate the typed SDK from `contracts/aperture-api-v1.yaml` |
 | `npm --prefix client run assert-api-current` | the contract-drift gate — regenerate and diff |
 | `npm --prefix client run assert-sdk-clean` | the SDK static gate — no absolute URL, no default endpoint, one request site |
 | `npm --prefix client run lint:adherence` | the design-system adherence lint, over the source tree |
 | `npm --prefix client run assert-no-external-hosts` | the egress lint, against an existing `client/dist` |
+| `npm --prefix client run assert-svg-safe` | the SVG safety gate, over `assets/` and `client/public/` |
+| `npm --prefix client run assert-no-bare-strings` | the no-bare-strings gate — user-facing text must resolve through the typed catalogue |
 
 Fonts are **bundled**, not fetched: the `@fontsource/*` packages emit the woff2 files into the
 build output, so no font host is contacted at runtime. Backend addressing is never compiled in
@@ -526,6 +528,270 @@ WCAG 1.4.3. Both say so where they are declared, and a separate test asserts the
 layer never applies either as live text outside that scope — a contrast suite cannot police a
 token it excludes. That check **resolves aliases**, so reaching an excluded token through an
 intermediate custom property is caught too.
+
+### State primitives — loading, empty, error, progress
+
+`client/src/components/state/` ships the four situations every screen has, as typed components,
+so seven sprints render them one way instead of seven:
+
+| situation | control |
+|---|---|
+| content is coming, and its shape is known | `Skeleton` / `SkeletonGroup` |
+| a short indeterminate wait (< `SPINNER_MAX_WAIT_MS`, 1s) | `Spinner` |
+| a measurable amount of work | `ProgressBar` |
+| there is legitimately nothing to show | `EmptyState` |
+| a request failed | `ErrorState` |
+| a component threw while rendering | `ErrorBoundary` |
+| a message about the thing you are looking at | `InlineNotice` |
+
+Four properties are worth stating because they are enforced rather than intended:
+
+- **A skeleton mirrors a shape.** `shape` is required and its union has no generic option, so
+  there is no `<Skeleton />` that renders an anonymous grey box.
+- **Loading is announced once.** The bars are `aria-hidden`; a polite live region carries the
+  state, and its text never changes, so it speaks on mount and not again. A `SkeletonGroup`
+  renders **one** region for a whole region of skeletons.
+- **Motion is withheld, not frozen, under `prefers-reduced-motion`** — and the preference is read
+  fail-safe: when it cannot be determined, the answer is "reduced". A frozen shimmer is still a
+  decorative artefact; a skeleton that never had one is a placeholder.
+- **A skeleton that never resolves is a failure state.** `SkeletonGroup`'s optional `timeout` is
+  a single `{ afterMs, fallback }` object, so a timeout cannot be armed without saying what
+  replaces the skeleton when it fires. No request that dies silently leaves an endless shimmer.
+
+`ErrorState` renders a typed SDK error's **class**, never its text. The mapping from error URN to
+words and a recovery action is `Record<keyof typeof ERROR_URN, …>`, so a URN added to the SDK
+stops this file compiling until someone decides what the user should be told. The server's
+`title`/`detail` are deliberately not displayed: the URN is the stable identity, the prose is
+attacker-influenceable, and rendering it would give upstream text the interface's own voice.
+**Neither is the URN itself** — it can carry arbitrary text (`urn:aperture:error:token-abcdef`),
+so it is used as a lookup key and discarded. The `correlation_id` **is** shown, validated against
+the contract's `Id` shape first: it is an opaque reference, and it is the one thing that lets a
+user and an operator talk about the same request.
+
+`describeError` is **total** — it returns a presentation for every input and throws for none.
+That is the property `ErrorState` depends on: a classifier that can throw turns a handled failure
+into an unhandled one at the exact moment the UI is trying to recover. Every read of an untrusted
+body goes through an own-property descriptor access that never invokes a getter and never walks a
+prototype chain, every `instanceof` is wrapped (a Proxy can throw from `getPrototypeOf` and abort
+the dispatch before any branch is reached), and the whole classification sits behind a boundary
+whose recovery path is a frozen constant and calls nothing.
+
+> **Interim, by design.** APTR-10 owns Aperture's error model and has hardened `src/api/errors.ts`
+> against hostile values over eight review rounds. The classification path in
+> `components/state/error-presentation.ts` is a **temporary stand-in** that exists only because
+> APTR-10 is unmerged and this workspace must build. Two answers to "how do we read a hostile
+> problem safely" is worse than either, so it is written to APTR-10's standard, its `RecoveryKind`
+> is APTR-10's `RecoveryAction` union member for member, and every per-URN recovery value already
+> matches APTR-10's table — the merge is a deletion, not a reconciliation.
+> `scripts/aptr10-handoff.test.mjs` **fails the build the moment `src/api/errors.ts` exports
+> `describeError`**, so the duplicate cannot quietly survive. One shape still needs arbitration:
+> APTR-10 carries one `message` per URN, this catalogue carries `title` + `detail`.
+
+`ErrorBoundary` renders that fallback for a thrown render, with a reference, instead of a blank
+page. When the failure never reached the server it mints its own id, prefixed `client-` so nobody
+searches a server log for it. There is no remote reporting and there will not be: no telemetry,
+no analytics, no external fetch.
+
+**`InlineNotice` is render-only, and that is a boundary rather than a limitation.** It is not a
+toast tray, not a queue, not a store, and not a second notification channel. The module holds no
+state — no emitter, no context, no portal, no global mount point — and three tests assert that
+structurally. A notification that reaches the user *out of band* spends the assistant's
+prioritized presence budget (Soul Contract clause 2), which is arbitrated in one place; a
+component library that grew its own tray would be a second, unarbitrated channel, built by
+accident one convenience helper at a time.
+
+### The string catalogue, and no bare strings
+
+**Every user-facing string in Aperture lives in `client/src/strings/catalogue.ts`** and is
+rendered through `t(key)` or, when it carries a value, `format(key, params)`. English-only for
+now; the pattern is established now because retrofitting one across seven sprints is a rewrite.
+
+What the **compiler** holds — these are type errors, not lint findings, and no test is what makes
+them true:
+
+- **Completeness.** `StringKey` is declared independently of the table, which is checked against
+  `Record<StringKey, string>` by `satisfies`. A key with no entry, or an entry with no key, does
+  not compile.
+- **Lookup validity.** `t('nope')` does not compile.
+- **Placeholder completeness.** Placeholders are recovered from each string's literal type, so a
+  missing or misspelled `format` parameter is a type error rather than a `{name}` on screen.
+- **Plain vs parameterized.** `t()` accepts only a key with no placeholders and `format()` only a
+  key with some.
+- **Text props.** `t()` returns a branded `UiString`, and every text prop on the state primitives
+  is typed as one, so **a bare literal cannot satisfy one by ordinary structural typing**:
+  `<EmptyState title="No threads" />` is a **type error**. That is the guarantee at its true
+  strength, and it is the case that actually occurs.
+
+**The brand is not unforgeable, and TypeScript cannot make a string brand cast-proof.** Two paths
+mint one, and both are made visible rather than implied:
+
+- **A cast.** `value as unknown as UiString` works, as does anything laundered through `any`. So
+  `assert-no-bare-strings` rejects a cast naming `UiString` anywhere except
+  `client/src/strings/index.ts`, the module that declares it. A cast through `any` names nothing
+  and stays undetected — recorded as a non-goal in that script.
+- **`fromUserContent()`**, deliberately, for text that belongs to the user — a thread title, a
+  filename — which must never be translated or catalogued. It is a **listed** exception: the gate
+  prints every call site on a green run, so "where does text bypass the catalogue" has an answer
+  a reader can check rather than trust.
+
+What `client/scripts/assert-no-bare-strings.mjs` adds is what types cannot reach: an **arbitrary
+DOM element**. `<h1>Aperture</h1>` type-checks perfectly, because `ReactNode` accepts any string.
+So the gate reads the JSX and fails on literal text between tags, a string or template rendered
+as a child, a static string on an attribute that is not in its technical registry, a `content:`
+string in a stylesheet, a catalogue key assembled at a call site, a key the catalogue does not
+contain, and a cast to `UiString` outside the module that owns the brand.
+
+**The attribute registry is an allowlist, and that is the whole design.** Listing the *user-facing*
+attributes would be a denylist that lags by construction — invisible to the next such attribute
+and to every prop of every component a later sprint writes. Instead the script names the
+attributes whose value is a machine-facing token (a class, a route, an ARIA enumeration, an SVG
+path) and reports every other static string. A new technical prop therefore fails the build until
+someone adds it, with a reason, in a reviewed diff. There is no configuration file, no pragma, and
+no allowlist JSON.
+
+**An exemption holds only where its justification does.** The `onX` handler exemption existed
+because React rejects a string handler — which is true of a *native* element and not of a custom
+component, which may legally declare `onTitle: string` and render it. So it is narrowed to native
+elements, identified by React's own rule that a lowercase-initial tag is intrinsic; on a component
+only the explicit registry applies. `data-*` is deliberately not narrowed the same way, because
+its justification is a DOM convention rather than React's typings — the residual case, a component
+that renders a `data-` prop as text, is a documented non-goal with a test pinning it.
+
+**Lookups and escapes are resolved by binding, not by spelling.** `t`, `format` and
+`fromUserContent` are recognised through the import that bound them — as a named import, a renamed
+one, or a member of a namespace import (`import * as strings`; that form previously walked past
+both the key check and the escape listing). Where a binding cannot be resolved the run **stops**
+rather than guessing: a name that is both imported from the catalogue and declared locally, a
+default import, and an `import … = require()` are all errors, because a wrong finding costs more
+than a missing one.
+
+It **fails closed**: an unparseable file, an unregistered extension, a missing scan target, a scan
+that matched nothing, a catalogue it cannot read or whose keys it cannot resolve, and a missing
+compiler capability are all errors.
+
+Every walked file lands in exactly one of **three** disjoint sets — `scanned` (a parser ran over
+it to completion), `excluded` (a test module, with its reason recorded), or `errored` (it could
+not be analysed). Both **coverage** and **disjointness** are asserted on every run: a file in none
+of the three is a file nothing read, and a file in two means "scanned" would mean two different
+things. Errors that are not about a walked file — a missing scan target, an unreadable catalogue —
+are not part of the partition, because they are not files. `*.test.tsx` files are excluded —
+fixture text is not product text — and that exclusion is made safe rather than convenient by a
+rule that fails if application code ever imports a test module.
+
+It is a **lexical tripwire, not a proof**, and its own header lists what it cannot see: text
+routed through a variable is the largest gap, and the `UiString` brand is what closes that for
+Aperture's own components. Each non-goal is pinned by a test that goes red if it is ever closed.
+
+## Brand and assets
+
+The Aperture mark is an **iris** — a six-blade camera diaphragm closed onto a hexagonal
+opening. It was chosen because it is literal without being illustrative: a diaphragm is the
+part of an optical instrument that decides how much of the world reaches the sensor, which is
+what this client is. The full rationale, the construction parameters, the palette, and the
+usage rules — including what not to do with the mark — are in **[docs/BRAND.md](docs/BRAND.md)**.
+
+| Asset | Size | Use |
+|---|---|---|
+| [`assets/aperture-icon-32.svg`](assets/aperture-icon-32.svg) | 32×32 | The mark alone — app icon, tab strips, repo avatar |
+| [`assets/aperture-favicon.svg`](assets/aperture-favicon.svg) | 64×64 | Browser tab — wider blade gaps and higher contrast so it survives 16px |
+| [`assets/aperture-wordmark.svg`](assets/aperture-wordmark.svg) | 220×44 | Mark plus "Aperture" and its subtitle |
+| [`assets/banner.svg`](assets/banner.svg) | 1280×640 | The README hero above |
+| [`assets/architecture.svg`](assets/architecture.svg) | 1280×720 | The system diagram above |
+| [`assets/badges.svg`](assets/badges.svg) | 800×40 | The fact strip above |
+
+`client/public/favicon.svg` is the served copy of the favicon and is byte-identical to the
+`assets/` original; a test asserts that, so the two cannot drift apart unnoticed.
+
+Every one of them is **hand-authored and self-contained**: no external reference, no embedded
+raster payload, no remote font, nothing fetched when the file is opened. That is not a
+convention this page asks you to trust — see the gate below.
+
+**On theme.** Each asset paints its own opaque backing behind any text it carries: the marks
+sit on a deep-space tile, the banner and the diagram paint a full-canvas gradient, and each
+badge is a filled panel. So none of them can go invisible on a light forge or mirror page.
+Only the wordmark *adapts* — it carries an inline `prefers-color-scheme` rule that swaps its
+text ink in light mode. That rule follows the **viewer's OS preference**, not the page's
+background, because an SVG rendered through `<img>` cannot see the page it sits in;
+`docs/BRAND.md` records the one combination where that gives the wrong answer. The banner and
+the architecture diagram are deliberately dark-only pieces rather than adaptive ones.
+
+**On the badges.** They state only *static properties of this repository* — its pre-1.0
+status, that changes are review-gated, its target set, its licence, and that it ships no
+telemetry. **None of them reports a build or test status**, because a committed SVG cannot
+observe one: it would state whatever was true on the day it was drawn and then go wrong
+silently. This strip previously read "build passing" with no CI in the repository at all, and
+"tests pending" beside a test suite that already existed and passed — one badge wrong in each
+direction, which is what a status nobody can observe drifts into. Live
+status badges need a CI service to render them, and CI arrives with **APTR-09**; there is no
+`ci/` directory on `main` yet.
+
+### The SVG safety gate
+
+`client/scripts/assert-svg-safe.mjs` runs on every build and over both directories that ship
+vector assets. **It is a security gate, not a style check.** A README renders `banner.svg`
+through an `<img>`, which is inert — but the same file is one click away from being opened
+directly on the public mirror, where it is a full document with script execution and
+subresource loading, and `client/public/favicon.svg` is served by the app itself.
+
+It rejects `<script>`, `<foreignObject>`, `on*` event handlers, any `href`/`xlink:href` that
+is not a same-document fragment, embedded rasters, and `javascript:`/`data:`/`vbscript:`/
+`file:`/`blob:` schemes anywhere — in an attribute, in a `url()` functional IRI, or in a
+`<style>` body. A legitimate `xlink:href="#gradient"` is permitted, and a test pins that.
+
+Two things make it stronger than the other two scanners in that directory, and one thing makes
+it weaker:
+
+- **Elements and attributes are allowlisted, not denylisted, and there is exactly one
+  registry for each.** A denylist of hazards someone thought of passes forever on the next one
+  SVG gains, and SVG has a history of gaining them. Anything not in the code-owned registry
+  fails by default; a test proves this by rejecting a real element that has no named rule at
+  all. Widening a registry is a source change a reviewer sees — there is no allowlist file,
+  pragma, or environment variable that turns a rule off.
+
+  Review found the first revision had a denylist *inside* the allowlist and a second registry
+  in front of it, so three classes slipped through: reference attributes such as `src` and
+  `action` were admitted by a reference path that ran before the allowlist and never consulted
+  it; a CSS check that matched the literal text `url(` was defeated by any equivalent spelling
+  (`u\72l(…)`, `u/**/rl(…)`); and character data was never validated, so ill-formed XML passed
+  a gate whose contract is that it fails. All three are fixed and pinned by regression tests,
+  and two derived invariants now assert the registries cannot disagree again.
+
+  The consequences are visible in the assets: the **`style` attribute is not permitted at all**
+  — presentation attributes express everything these files need, and removing the attribute
+  removes an entire CSS grammar that would otherwise have to be tokenized correctly forever. A
+  `<style>` **element** is still permitted, because the wordmark's `prefers-color-scheme` rule
+  needs one, but its body must match a deliberately tiny grammar: plain style rules, one
+  optional `@media (prefers-color-scheme: …)` wrapper, and declaration values drawn from a
+  character set with no function, string, escape or entity in it. Valid CSS outside that shape
+  fails, which is the right trade for a body that only ever sets a few fills.
+- **It parses SVG as strict XML and refuses to recover.** The egress lint and the adherence
+  lint both document that an attribute value containing `>` desynchronizes their markup scanner
+  and that detection past that point is unmodelled — an inherent consequence of HTML permitting
+  unquoted values. XML does not, so this gate handles that case correctly, and it decodes XML
+  character references before inspecting a value. Both claims are pinned by tests. An asset that
+  does **not** parse is a **failure**, never a skip: an unchecked asset is not evidence of safety.
+
+  Three properties of that strictness are worth stating because each closed a real gap. **A
+  character gets the same verdict however it is spelled** — one shared predicate decides both
+  the literal character and the `&#…;` reference, and a test asserts the two agree at every
+  boundary of the XML `Char` production, so neither path can be widened alone. The file is
+  decoded as **strict UTF-8**: an invalid byte sequence is rejected rather than replaced with
+  U+FFFD, because U+FFFD is itself legal and a lenient decode would turn a malformed file into
+  a well-formed document that is not the one on disk. And whitespace in markup means **XML's
+  `S` production** — exactly `#x20`, `#x9`, `#xA`, `#xD` — not JavaScript's `\s`, which also
+  accepts U+00A0, U+2028, U+2029 and U+FEFF.
+
+  Those three were the same bug in three places, and the generalisation is the useful part:
+  **when a specification defines a character class, define it — do not reach for the host
+  language's approximation of it.** Each time, the surrounding code was strict and the borrowed
+  primitive was lenient, so the leniency arrived pre-installed and invisible. `String.fromCodePoint`
+  substituting U+FFFD, `readFileSync(…, 'utf8')` repairing malformed bytes, `\s` meaning Unicode
+  whitespace, and `TextDecoder` silently swallowing a byte order mark are all one mistake.
+  **Substitution is not validation**: when the input is malformed, the gate fails on it rather
+  than quietly repairing it into something that parses.
+- **It does not render.** It cannot tell you an asset is visually correct, legible at its
+  minimum size, or well-composed. Those are `docs/BRAND.md` rules that a human checks. And it
+  stops a hazard being *committed*; the runtime CSP is what stops one *acting*.
 
 ## Contributing
 
