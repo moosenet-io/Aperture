@@ -1,0 +1,154 @@
+{
+  "revision": "1.0",
+  "note": "APTR-11. The complete key surface of the Aperture BFF, by NAME. This file contains no values, no addresses and no credentials, and it never will: a `default` is a behavioural default (a number, a boolean, a media-type allowlist), and a secret entry carries no `default`, no `type` and no `example` at all. A test in crates/lumina-core/src/aperture/config.rs compares this file against the key set the code actually reads, in BOTH directions, including each key's kind, type, rendered default and purpose. The Aperture repo carries a copy at contracts/aperture-config-v1.json, against which docs/CONFIGURATION.md and .env.example are checked. Keeping the two copies identical is a review step, not a gated one — see the module doc.",
+  "keys": [
+    {
+      "name": "APERTURE_ENABLED",
+      "kind": "behavioural",
+      "type": "bool",
+      "default": "false",
+      "purpose": "Master switch for the BFF"
+    },
+    {
+      "name": "APERTURE_ALLOW_SIGNUP",
+      "kind": "behavioural",
+      "type": "bool",
+      "default": "false",
+      "purpose": "Whether self-signup is open"
+    },
+    {
+      "name": "APERTURE_ADMIN_BOOTSTRAP",
+      "kind": "behavioural",
+      "type": "bool",
+      "default": "true",
+      "purpose": "Whether first-run onboarding is reachable"
+    },
+    {
+      "name": "APERTURE_SESSION_TTL_SECS",
+      "kind": "behavioural",
+      "type": "unsigned",
+      "default": "3600",
+      "purpose": "Session lifetime before refresh, in seconds"
+    },
+    {
+      "name": "APERTURE_REFRESH_TTL_SECS",
+      "kind": "behavioural",
+      "type": "unsigned",
+      "default": "2592000",
+      "purpose": "Refresh-token lifetime, in seconds"
+    },
+    {
+      "name": "APERTURE_MAX_DEVICES_PER_USER",
+      "kind": "behavioural",
+      "type": "unsigned",
+      "default": "8",
+      "purpose": "Registered-device ceiling per user"
+    },
+    {
+      "name": "APERTURE_AUTH_RATE_LIMIT_PER_MIN",
+      "kind": "behavioural",
+      "type": "unsigned",
+      "default": "10",
+      "purpose": "Auth attempts per minute per source"
+    },
+    {
+      "name": "APERTURE_STREAM_HEARTBEAT_SECS",
+      "kind": "behavioural",
+      "type": "unsigned",
+      "default": "15",
+      "purpose": "Stream keepalive interval, in seconds"
+    },
+    {
+      "name": "APERTURE_STREAM_MAX_IDLE_SECS",
+      "kind": "behavioural",
+      "type": "unsigned",
+      "default": "300",
+      "purpose": "Idle stream reaped after, in seconds"
+    },
+    {
+      "name": "APERTURE_STREAM_RESUME_WINDOW_SECS",
+      "kind": "behavioural",
+      "type": "unsigned",
+      "default": "120",
+      "purpose": "How long a stream may be resumed by event id, in seconds"
+    },
+    {
+      "name": "APERTURE_STREAM_MAX_CONCURRENT",
+      "kind": "behavioural",
+      "type": "unsigned",
+      "default": "4",
+      "purpose": "Concurrent streams per user"
+    },
+    {
+      "name": "APERTURE_TURN_CANCEL_GRACE_SECS",
+      "kind": "behavioural",
+      "type": "unsigned",
+      "default": "30",
+      "purpose": "Grace window after a turn's last subscriber leaves before it is cancelled, in seconds"
+    },
+    {
+      "name": "APERTURE_UPLOAD_MAX_BYTES",
+      "kind": "behavioural",
+      "type": "unsigned",
+      "default": "26214400",
+      "purpose": "Per-file attachment size ceiling, in bytes"
+    },
+    {
+      "name": "APERTURE_UPLOAD_MAX_FILES_PER_THREAD",
+      "kind": "behavioural",
+      "type": "unsigned",
+      "default": "20",
+      "purpose": "Attachment count ceiling per thread"
+    },
+    {
+      "name": "APERTURE_UPLOAD_ALLOWED_TYPES",
+      "kind": "behavioural",
+      "type": "csv",
+      "default": "image/png, image/jpeg, image/webp, image/gif, application/pdf, text/plain, text/markdown",
+      "purpose": "Permitted attachment content types, as an allowlist"
+    },
+    {
+      "name": "APERTURE_MODULE_PROBE_TTL_SECS",
+      "kind": "behavioural",
+      "type": "unsigned",
+      "default": "30",
+      "purpose": "Capability re-probe interval, in seconds"
+    },
+    {
+      "name": "APERTURE_CONTEXT_RETENTION_SECS",
+      "kind": "behavioural",
+      "type": "unsigned",
+      "default": "604800",
+      "purpose": "How long context-bus entries are retained, in seconds"
+    },
+    {
+      "name": "APERTURE_CONTEXT_ENABLED",
+      "kind": "behavioural",
+      "type": "bool",
+      "default": "true",
+      "purpose": "Master switch for the context bus"
+    },
+    {
+      "name": "APERTURE_SECRET_CACHE_TTL_SECS",
+      "kind": "behavioural",
+      "type": "unsigned",
+      "default": "300",
+      "purpose": "How long a cached secret stays usable when the secret backend is unreachable, in seconds"
+    },
+    {
+      "name": "APERTURE_SESSION_SIGNING_KEY",
+      "kind": "secret",
+      "purpose": "Signs and verifies session tokens"
+    },
+    {
+      "name": "APERTURE_VAPID_PUBLIC_KEY",
+      "kind": "secret",
+      "purpose": "Web Push subscription key"
+    },
+    {
+      "name": "APERTURE_VAPID_PRIVATE_KEY",
+      "kind": "secret",
+      "purpose": "Web Push signing key"
+    }
+  ]
+}
