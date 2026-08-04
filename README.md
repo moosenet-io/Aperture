@@ -105,7 +105,7 @@ guarded agent loop, so behaviour is identical regardless of where a message arri
 ```bash
 # client workspace — Node >= 20
 npm --prefix client ci
-npm --prefix client run build      # drift + SDK + SVG gates, tsc --noEmit, source lints, vite build, egress lint
+npm --prefix client run build      # drift + config-docs + SDK + SVG gates, tsc --noEmit, source lints, vite build, egress lint
 npm --prefix client run test
 ```
 
@@ -123,10 +123,11 @@ Tailwind: styling is the shared constellation token layer (see **Design system**
 |---|---|
 | `npm --prefix client run dev` | Vite dev server |
 | `npm --prefix client run typecheck` | `tsc --noEmit` under `strict` |
-| `npm --prefix client run build` | the drift gate → the SDK static gate → the SVG safety gate → `tsc --noEmit` → the adherence lint → the no-bare-strings gate → `vite build` → the egress lint. Any of them failing fails the build |
+| `npm --prefix client run build` | the drift gate → the configuration-documentation gate → the SDK static gate → the SVG safety gate → `tsc --noEmit` → the adherence lint → the no-bare-strings gate → `vite build` → the egress lint. Any of them failing fails the build |
 | `npm --prefix client run test` | vitest |
 | `npm --prefix client run gen:api` | regenerate the typed SDK from `contracts/aperture-api-v1.yaml` |
 | `npm --prefix client run assert-api-current` | the contract-drift gate — regenerate and diff |
+| `npm --prefix client run assert-config-documented` | the configuration-documentation gate — the key manifest, `docs/CONFIGURATION.md` and `.env.example` must name the same set, with the same purposes and defaults, and any shape the parsers cannot read fails rather than being skipped |
 | `npm --prefix client run assert-sdk-clean` | the SDK static gate — no absolute URL, no default endpoint, one request site |
 | `npm --prefix client run lint:adherence` | the design-system adherence lint, over the source tree |
 | `npm --prefix client run assert-no-external-hosts` | the egress lint, against an existing `client/dist` |
@@ -302,7 +303,8 @@ rule that matches nothing fails the build rather than rotting silently.
 | Document | What it covers |
 |---|---|
 | [docs/INSTALL.md](docs/INSTALL.md) | Installation for every target, start to finish |
-| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every configuration key, by name |
+| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every configuration key, by name — with its purpose and default, and no value anywhere |
+| [.env.example](.env.example) | The same key set as an inventory to copy. **Names only**; a value in it fails the build |
 | [docs/PIPELINE.md](docs/PIPELINE.md) | How changes reach `main` and the public mirror |
 | [docs/BRAND.md](docs/BRAND.md) | The Aperture mark, palette, and usage rules |
 | [docs/BFF-PLACEMENT.md](docs/BFF-PLACEMENT.md) | Where the backend lives, why it is a feature-gated module in the agent core, and which repository's gate proves which criterion |
@@ -367,6 +369,37 @@ rejected outright by the lint, in every file including the token layer. Structur
 system's rule and applies to the authored light theme exactly as it does to the ported dark one.
 Where a component replaces the focus outline with a glow, a test asserts it restores a real
 outline under forced colours, since glow is stripped there.
+
+### Configuration and secrets
+
+Aperture holds no secrets. Every key it reads is listed by **name** in
+**[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**, with its purpose and its default and no
+value anywhere, and the same names appear as an empty inventory in
+**[.env.example](.env.example)**.
+
+Behavioural configuration — flags, timeouts, limits — is plain configuration. **Secrets** —
+the session signing key and the Web Push keypair — are resolved at runtime through the secret
+manager from the vault. They are never read from a plain environment variable, never written
+into a file, and there is no supported way to supply one in a `.env`: `.env.example` lists
+them as comments rather than as assignable slots, and a real `.env` cannot be committed at all.
+
+When the external secret backend is unreachable, a previously resolved value may be reused from
+a cache that is **memory-only, wiped when dropped, and bounded** by
+`APERTURE_SECRET_CACHE_TTL_SECS`. A cold cache plus an unreachable backend makes the capability
+`unavailable` with a reason. It is never a generated key, never a default key, and never a key
+derived from anything.
+
+`npm --prefix client run assert-config-documented` holds the three descriptions to **set
+equality**, per kind, plus per-key equality of purpose and default — so a key that is read but
+undocumented and a key that is documented but unread both fail the build. It also **rejects any
+shape it cannot read** rather than skipping it: a line in `.env.example` that is not exactly
+`NAME=`, an assignment hidden in a comment, a key in an HTML or blockquoted or leading-pipe-less
+table, or a manifest entry missing one of its members all fail naming the line. Set equality over
+"whatever the parser happened to recognise" would report agreement across an invisible gap, so
+the parsers are allowlists. That the manifest
+matches the keys the backend's Rust actually reads is proved by a test in the agent-core
+repository, because it is a property of Rust call sites; that the two repositories carry the
+same manifest is a review step, and this README says so rather than implying it is gated.
 
 ### The adherence lint
 

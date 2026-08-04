@@ -11,11 +11,12 @@
   "scripts": {
     "dev": "vite",
     "typecheck": "tsc --noEmit",
-    "build": "npm run assert-api-current && npm run assert-sdk-clean && npm run assert-svg-safe && tsc --noEmit && node scripts/adherence-lint.mjs && node scripts/assert-no-bare-strings.mjs && vite build && node scripts/assert-no-external-hosts.mjs",
+    "build": "npm run assert-api-current && npm run assert-config-documented && npm run assert-sdk-clean && npm run assert-svg-safe && tsc --noEmit && node scripts/adherence-lint.mjs && node scripts/assert-no-bare-strings.mjs && vite build && node scripts/assert-no-external-hosts.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "gen:api": "node scripts/gen-api.mjs",
     "assert-api-current": "node scripts/assert-api-current.mjs",
+    "assert-config-documented": "node scripts/assert-config-documented.mjs",
     "assert-sdk-clean": "node scripts/assert-sdk-clean.mjs",
     "assert-no-external-hosts": "node scripts/assert-no-external-hosts.mjs",
     "assert-svg-safe": "node scripts/assert-svg-safe.mjs",

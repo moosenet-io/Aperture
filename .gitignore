@@ -1,0 +1,16 @@
+# APTR-11. A real environment file is a runtime materialization of the vault, never a source
+# artifact — so nothing that could hold one is committable. The example is the single exception,
+# and it is gated: `npm --prefix client run assert-config-documented` fails the build on any line
+# in it that assigns a value.
+#
+# The allowance is one exact PATH, not a filename and not a pattern:
+#
+#   * `.env.example.local` and `.env.example.prod` stay ignored, because an allowance that
+#     matched a family would have re-opened the hole the rule above it exists to close.
+#   * the leading `/` anchors it to the repository root. Without it Git applies the negation to
+#     that BASENAME at any depth, so `client/.env.example` — a file the documentation gate never
+#     reads, because it only ever opens the root one — would have been committable carrying real
+#     values. The gate and the allowance now name the same single file.
+.env
+.env.*
+!/.env.example
